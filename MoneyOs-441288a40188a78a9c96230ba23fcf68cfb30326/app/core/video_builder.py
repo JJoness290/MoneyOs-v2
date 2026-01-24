@@ -40,6 +40,8 @@ FALSE_ASSUMPTION_MARKER = "assumption did not survive the timeline"
 MIDPOINT_OVERLAY_TEXT = "One thing was clear by then"
 MIDPOINT_OVERLAY_DURATION = 3.5
 FALSE_ASSUMPTION_DURATION = 2.8
+TARGET_WIDTH = 1920
+TARGET_HEIGHT = 1080
 
 
 def _fit_background(clip: VideoFileClip) -> VideoFileClip:
@@ -54,6 +56,40 @@ def _fit_background(clip: VideoFileClip) -> VideoFileClip:
         y_center=y_center,
         width=target_w,
         height=target_h,
+    )
+
+
+def normalize_video(
+    input_path: Path,
+    output_path: Path,
+    target_w: int = TARGET_WIDTH,
+    target_h: int = TARGET_HEIGHT,
+) -> None:
+    filter_chain = (
+        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
+        "format=yuv420p"
+    )
+    _run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_path),
+            "-vf",
+            filter_chain,
+            "-r",
+            str(TARGET_FPS),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "medium",
+            "-threads",
+            str(monitored_threads()),
+            str(output_path),
+        ]
     )
 
 
@@ -351,7 +387,9 @@ def _render_intent_block(
             indices[intent] = indices.get(intent, 0) + 1
             continue
         slice_duration = min(clip_duration, remaining)
-        entries.append((clip_path, slice_duration))
+        normalized_path = output_dir / f"{intent}_{len(entries)}.mp4"
+        normalize_video(clip_path, normalized_path)
+        entries.append((normalized_path, slice_duration))
         remaining -= slice_duration
 
     if not entries:
@@ -366,7 +404,9 @@ def _render_intent_block(
             preset="medium",
         )
         fallback.close()
-        return temp_path
+        normalized_fallback = output_dir / f"{intent}_fallback_normalized.mp4"
+        normalize_video(temp_path, normalized_fallback)
+        return normalized_fallback
 
     concat_file = _write_concat_file(entries, output_dir)
     block_path = output_dir / f"{intent}.mp4"
@@ -388,6 +428,8 @@ def _render_intent_block(
             str(TARGET_FPS),
             "-c:v",
             "libx264",
+            "-pix_fmt",
+            "yuv420p",
             "-preset",
             "medium",
             "-threads",
@@ -407,12 +449,14 @@ def _render_false_assumption_clip(
     if not clip_path:
         return None
     output_path = output_dir / "false_assumption.mp4"
+    normalized_path = output_dir / "false_assumption_normalized.mp4"
+    normalize_video(clip_path, normalized_path)
     _run_ffmpeg(
         [
             "ffmpeg",
             "-y",
             "-i",
-            str(clip_path),
+            str(normalized_path),
             "-t",
             f"{FALSE_ASSUMPTION_DURATION:.3f}",
             "-vf",
@@ -425,6 +469,8 @@ def _render_false_assumption_clip(
             str(TARGET_FPS),
             "-c:v",
             "libx264",
+            "-pix_fmt",
+            "yuv420p",
             "-preset",
             "medium",
             "-threads",
@@ -448,7 +494,9 @@ def _render_midpoint_overlay(output_dir: Path) -> Path:
         logger=None,
     )
     overlay.close()
-    return overlay_path
+    normalized_overlay = output_dir / "midpoint_overlay_normalized.mp4"
+    normalize_video(overlay_path, normalized_overlay)
+    return normalized_overlay
 
 
 def _compose_with_overlays(
@@ -476,11 +524,12 @@ def _compose_with_overlays(
         video_chain = "[0:v]"
 
     inputs += ["-itsoffset", f"{phase_times['midpoint_time']:.3f}", "-i", str(midpoint_clip)]
+    filter_parts.append(f"[{input_index}:v]format=rgba,colorchannelmixer=aa=0.6[midpoint]")
     filter_parts.append(
-        f"{video_chain}[{input_index}:v]overlay=enable='between(t,{phase_times['midpoint_time']:.3f},"
-        f"{phase_times['midpoint_time'] + MIDPOINT_OVERLAY_DURATION:.3f}),"
-        "scale=trunc(iw/2)*2:trunc(ih/2)*2[vfinal]"
+        f"{video_chain}[midpoint]overlay=enable='between(t,{phase_times['midpoint_time']:.3f},"
+        f"{phase_times['midpoint_time'] + MIDPOINT_OVERLAY_DURATION:.3f})[tmp]"
     )
+    filter_parts.append("[tmp]scale=trunc(iw/2)*2:trunc(ih/2)*2[vfinal]")
     input_index += 1
 
     inputs += ["-i", str(audio_path)]
@@ -498,6 +547,8 @@ def _compose_with_overlays(
             f"{input_index}:a",
             "-c:v",
             "libx264",
+            "-pix_fmt",
+            "yuv420p",
             "-preset",
             "medium",
             "-threads",
