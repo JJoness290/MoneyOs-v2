@@ -5,8 +5,12 @@ from pathlib import Path
 from typing import Tuple
 
 import numpy as np
-from moviepy.editor import AudioFileClip, CompositeVideoClip, ImageClip, VideoFileClip, concatenate_videoclips
 from PIL import Image, ImageDraw, ImageFont
+
+if not hasattr(Image, "ANTIALIAS"):
+    setattr(Image, "ANTIALIAS", Image.Resampling.LANCZOS)
+
+from moviepy.editor import AudioFileClip, CompositeVideoClip, ImageClip, VideoFileClip, concatenate_videoclips
 
 from app.config import MINECRAFT_BG_DIR, TARGET_FPS, TARGET_RESOLUTION
 
