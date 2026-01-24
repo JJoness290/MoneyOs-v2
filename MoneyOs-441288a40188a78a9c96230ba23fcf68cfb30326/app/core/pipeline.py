@@ -79,7 +79,7 @@ def run_pipeline(status_callback) -> PipelineResult:
 
     status_callback("Rendering video...")
     video_path = _build_video_path()
-    video_result = build_video(sanitized_script, tts_result.audio_path, video_path)
+    video_result = build_video(sanitized_script, tts_result.audio_path, video_path, status_callback=status_callback)
 
     status_callback(
         f"Done (audio: {tts_result.duration_seconds:.2f}s, video: {video_result.duration_seconds:.2f}s)"
