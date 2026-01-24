@@ -48,7 +48,6 @@ def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
     ]
     escalation_one = [
         "A time stamp showed the transfer happened after midnight.",
-        "Time was running out.",
         "A keycard log showed entry from a card that should have been inactive.",
         "A vendor invoice matched the missing amount down to the dollar.",
         f"{ally} called the bank and learned the transfer had two approvals.",
@@ -59,7 +58,6 @@ def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
         "An old invite showed a meeting time that nobody recalled.",
         "A voice note hinted the reserve was being moved for protection.",
         "A margin note said to wait until the audit window closed.",
-        "That clock kept ticking.",
         f"{ally} saw the audit window ended the same day the fund vanished.",
         f"{protagonist} checked the stamp and found it matched a batch from months earlier.",
         "A clerk admitted the stamp box had gone home with someone once.",
@@ -72,7 +70,6 @@ def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
         "The weekend aligned with the unexplained meeting invite.",
         "A bank clerk confirmed the escrow form was prefilled before midnight.",
         "A draft email showed a warning about a looming injunction.",
-        "The deadline was real.",
         "The warning made the midnight transfer feel like a deadline.",
         "That trail pointed to intent rather than a mistake.",
     ]
@@ -92,7 +89,6 @@ def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
         "Each explanation sounded like a cover story and none solved the timing.",
         "A second ledger copy carried a prepared statement labeled for discovery.",
         "The statement blamed a hacker, yet the logs showed no breach.",
-        "The gap felt dangerous.",
         f"{protagonist} concluded the choice came from inside.",
         "A legal aide described the escrow as a temporary safe room.",
         "The note explained that the reserve could not be garnished there.",
