@@ -80,18 +80,8 @@ def _save_usage_history(history: list[str]) -> None:
 
 def _ensure_background_clips() -> list[Path]:
     if not MINECRAFT_BG_DIR.exists() or not MINECRAFT_BG_DIR.is_dir():
-        raise RuntimeError(
-            "NO MINECRAFT BACKGROUND FOUND.\n"
-            "Place at least one video in assets/minecraft/\n"
-            "Generation has been aborted."
-        )
+        return []
     backgrounds = sorted(MINECRAFT_BG_DIR.glob("*.mp4"))
-    if not backgrounds:
-        raise RuntimeError(
-            "NO MINECRAFT BACKGROUND FOUND.\n"
-            "Place at least one video in assets/minecraft/\n"
-            "Generation has been aborted."
-        )
     return backgrounds
 
 
@@ -116,6 +106,15 @@ def _select_background(backgrounds: list[Path]) -> list[Path]:
 
 def _load_background(audio_duration: float) -> VideoFileClip:
     backgrounds = _ensure_background_clips()
+    if not backgrounds:
+        broll_candidates = sorted(BROLL_DIR.rglob("*.mp4"))
+        if broll_candidates:
+            clip = VideoFileClip(str(broll_candidates[0])).without_audio()
+            clip = _fit_background(clip)
+            if clip.duration < audio_duration:
+                clip = clip.fx(vfx.loop, duration=audio_duration)
+            return clip.subclip(0, audio_duration)
+        return _fallback_still_clip(audio_duration)
     ordered = _select_background(backgrounds)
     remaining = audio_duration
     clips: list[VideoFileClip] = []
@@ -142,6 +141,13 @@ def _load_background(audio_duration: float) -> VideoFileClip:
 
     _save_usage_history(history)
     return concatenate_videoclips(clips, method="compose")
+
+
+def _fallback_still_clip(duration: float) -> VideoFileClip:
+    width, height = TARGET_RESOLUTION
+    frame = np.full((height, width, 3), 12, dtype=np.uint8)
+    clip = ImageClip(frame).set_duration(duration)
+    return clip.fx(vfx.resize, lambda t: 1.01 + 0.01 * (t / max(duration, 0.01)))
 
 
 def _split_sentences(text: str) -> list[str]:
