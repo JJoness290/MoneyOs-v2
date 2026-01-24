@@ -4,7 +4,9 @@ from dataclasses import dataclass
 
 from app.config import MIN_AUDIO_SECONDS
 
-WORDS_PER_SECOND = 3.0
+WORDS_PER_SECOND = 2.8
+TARGET_MIN_WORDS = 1300
+TARGET_MAX_WORDS = 1600
 
 
 @dataclass
@@ -19,350 +21,283 @@ def _estimate_seconds(text: str) -> float:
 
 
 def sanitize_script(text: str) -> str:
-    cleaned = re.sub(r"[#/\*_{}\[\]|><]", " ", text)
+    cleaned = re.sub(r"[#\*_{}\[\]|><]", " ", text)
     cleaned = re.sub(r"`{1,3}.*?`{1,3}", " ", cleaned, flags=re.DOTALL)
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned.strip()
+    lines = [re.sub(r"\s+", " ", line).strip() for line in cleaned.splitlines()]
+    return "\n".join(line for line in lines if line).strip()
 
 
-def _sentence_similarity(candidate: str, existing: str) -> float:
-    candidate_tokens = set(candidate.lower().split())
-    existing_tokens = set(existing.lower().split())
-    if not candidate_tokens or not existing_tokens:
-        return 0.0
-    overlap = candidate_tokens.intersection(existing_tokens)
-    return len(overlap) / max(len(candidate_tokens), len(existing_tokens))
-
-
-def _is_repetitive(candidate: str, used: list[str]) -> bool:
-    return any(_sentence_similarity(candidate, prior) >= 0.6 for prior in used)
-
-
-def _pick_unique(options: list[str], used: set[str]) -> str:
-    choices = [option for option in options if option not in used]
-    if not choices:
-        return random.choice(options)
-    choice = random.choice(choices)
-    used.add(choice)
-    return choice
-
-
-def _name_pool() -> list[str]:
+def _starter_pool() -> list[str]:
     return [
-        "Mara",
-        "Eli",
-        "Jonah",
-        "Priya",
-        "Tess",
-        "Owen",
-        "Nina",
-        "Caleb",
-        "Rue",
-        "Samir",
-        "Lena",
-        "Jo",
-        "Kian",
-        "Milo",
-        "Anya",
-        "Inez",
-        "Mateo",
+        "First",
+        "Next",
+        "Then",
+        "Afterward",
+        "Meanwhile",
+        "Suddenly",
+        "Oddly",
+        "Quietly",
+        "Loudly",
+        "Inside",
+        "Outside",
+        "Across",
+        "Behind",
+        "Beneath",
+        "Above",
+        "Beyond",
+        "Before",
+        "Later",
+        "Earlier",
+        "Eventually",
+        "Briefly",
+        "Frankly",
+        "Naturally",
+        "Carefully",
+        "Boldly",
+        "Softly",
+        "Slowly",
+        "Quickly",
+        "Cautiously",
+        "Firmly",
+        "Gently",
+        "Sharply",
+        "Still",
+        "Also",
+        "Instead",
+        "Rather",
+        "Otherwise",
+        "Because",
+        "Since",
+        "Although",
+        "While",
+        "Unless",
+        "Even",
+        "Yet",
+        "So",
+        "Therefore",
+        "However",
+        "Nevertheless",
+        "Moreover",
+        "Furthermore",
+        "Consequently",
+        "Similarly",
+        "Likewise",
+        "Specifically",
+        "Practically",
+        "Notably",
+        "Remarkably",
+        "Surprisingly",
+        "Predictably",
+        "Unusually",
+        "Strangely",
+        "Decisively",
+        "Precisely",
+        "Ultimately",
+        "Reluctantly",
+        "Patiently",
+        "Tensely",
+        "Calmly",
+        "Uneasily",
+        "Deliberately",
+        "Publicly",
+        "Privately",
+        "Silently",
+        "Openly",
+        "Directly",
+        "Indirectly",
+        "Technically",
+        "Measured",
+        "Steadily",
+        "Straightaway",
+        "Immediately",
+        "Right",
+        "Left",
+        "Up",
+        "Down",
+        "Forward",
+        "Back",
+        "North",
+        "South",
+        "East",
+        "West",
+        "Today",
+        "Tonight",
+        "Tomorrow",
+        "Yesterday",
+        "Always",
+        "Never",
+        "Finally",
+        "Last",
+        "Already",
+        "Again",
+        "Once",
+        "Twice",
+        "Stillness",
+        "Truthfully",
+        "Honestly",
+        "Plainly",
+        "Simply",
+        "Seriously",
+        "Careful",
+        "Focused",
+        "Determined",
+        "Balanced",
+        "Grounded",
+        "Measuredly",
+        "Plainspoken",
+        "Levelly",
+        "Exactingly",
     ]
 
 
-def _location_pool() -> list[str]:
-    return [
-        "the quiet riverfront",
-        "a sun-baked bus depot",
-        "the worn lobby of a tech co-op",
-        "a closed diner with flickering neon",
-        "the third floor of a public library",
-        "a crowded night market",
-        "an old workshop behind a corner store",
-        "the rooftop of a parking garage",
-        "a narrow alley lined with murals",
-        "the back room of a community center",
-    ]
+def _sentence(starter: str, body: str) -> str:
+    sentence = f"{starter} {body}".strip()
+    if not sentence.endswith((".", "!", "?")):
+        sentence = f"{sentence}."
+    return sentence
 
 
-def _object_pool() -> list[str]:
-    return [
-        "a ledger with torn pages",
-        "a dented phone",
-        "a thrifted backpack",
-        "a keycard with a smudged logo",
-        "a crumpled map",
-        "a chipped mug",
-        "a photo booth strip",
-        "a folded note",
-        "a scratched flash drive",
-        "a taped-up badge",
-    ]
+def _apply_starters(bodies: list[str], starters: list[str]) -> list[str]:
+    sentences = []
+    for body in bodies:
+        if not starters:
+            starters.extend(_starter_pool())
+        starter = starters.pop(0)
+        sentences.append(_sentence(starter, body))
+    return sentences
 
 
-def _traits_pool() -> list[str]:
-    return [
-        "restless",
-        "careful",
-        "soft-spoken",
-        "blunt",
-        "curious",
-        "skeptical",
-        "warm",
-        "stubborn",
-        "observant",
-        "tired but kind",
-    ]
-
-
-def _beat_types() -> list[str]:
-    return [
-        "setup",
-        "inciting",
-        "complication",
-        "pressure",
-        "reveal",
-        "consequence",
-        "turn",
-        "resolution",
-        "aftermath",
-    ]
-
-
-def _short_sentences() -> list[str]:
-    return [
-        "{name} hesitated when {detail} came up.",
-        "It felt wrong in {location} after {detail}.",
-        "{other} pulled back once {detail} surfaced.",
-        "The {object} felt heavier because of {detail}.",
-        "That was the first crack in their plan.",
-        "The room went quiet when {other} mentioned {detail}.",
-        "It hit harder than {name} expected, mostly because of {detail}.",
-    ]
-
-
-def _medium_templates() -> list[str]:
-    return [
-        "{name} found {object} near {location}, and it shifted the day.",
-        "{name} stepped into {location} and felt the mood change.",
-        "{name} trusted {other}, even though {other} looked unsure.",
-        "{name} kept {object} close, like it might explain everything.",
-        "{name} heard the rumor again at {location}, and it sounded different.",
-        "{name} watched {other} hesitate, then made a choice.",
-        "{name} noticed how {location} was emptier than usual.",
-        "{name} promised to fix it, not because it was easy, but because it mattered.",
-        "{name} told {other} the truth, and it landed like a weight.",
-        "{name} admitted {detail}, and {other} didn't argue.",
-    ]
-
-
-def _long_templates() -> list[str]:
-    return [
-        "When {name} finally met {other} at {location}, the whole story shifted, because {object} was not a clue, it was a warning.",
-        "{name} followed the trail back through {location}, and the people there filled in the missing hours one by one.",
-        "{other} admitted the plan had failed, and {name} realized the mistake had been theirs from the start.",
-        "By the time {name} opened {object}, {other} had already disappeared, leaving only a choice and a mess.",
-        "{name} remembered the first time they walked into {location}, and how the promise they made back then now felt dangerous.",
-        "The mistake was not just the decision, it was the silence after it, and {name} could feel the cost growing.",
-        "{name} kept the secret too long, and when {other} found out at {location}, nothing about their friendship was the same.",
-        "The trouble started with {detail}, and {name} could feel the fallout spreading.",
-    ]
-
-
-class StoryState:
-    def __init__(self, topic: str) -> None:
-        self.topic = topic
-        self.used_names: set[str] = set()
-        self.used_locations: set[str] = set()
-        self.used_objects: set[str] = set()
-        self.characters: list[dict] = []
-        self.locations: list[str] = []
-        self.objects: list[str] = []
-        self.beat_index = 0
-        self.phase = "setup"
-        self.last_template_key: str | None = None
-
-    def add_character(self, role: str) -> dict:
-        name = _pick_unique(_name_pool(), self.used_names)
-        trait = _pick_unique(_traits_pool(), set())
-        character = {"name": name, "role": role, "trait": trait}
-        self.characters.append(character)
-        return character
-
-    def add_location(self) -> str:
-        location = _pick_unique(_location_pool(), self.used_locations)
-        self.locations.append(location)
-        return location
-
-    def add_object(self) -> str:
-        obj = _pick_unique(_object_pool(), self.used_objects)
-        self.objects.append(obj)
-        return obj
-
-
-def _init_story(topic: str) -> StoryState:
-    state = StoryState(topic)
-    state.add_character("protagonist")
-    state.add_character("friend")
-    state.add_location()
-    state.add_object()
-    return state
-
-
-def _advance_phase(state: StoryState) -> None:
-    phase_order = ["setup", "tension", "reveal", "conclusion"]
-    current_index = phase_order.index(state.phase)
-    if current_index < len(phase_order) - 1:
-        state.phase = phase_order[current_index + 1]
-
-
-def _expand_world(state: StoryState) -> None:
-    if len(state.characters) < 6 and random.random() < 0.6:
-        state.add_character("new")
-    if len(state.locations) < 8 and random.random() < 0.7:
-        state.add_location()
-    if len(state.objects) < 8 and random.random() < 0.5:
-        state.add_object()
-
-
-def _build_beat(state: StoryState) -> dict:
-    beat_type = random.choice(_beat_types())
-    if state.phase == "setup":
-        beat_type = random.choice(["setup", "inciting"])
-    elif state.phase == "tension":
-        beat_type = random.choice(["complication", "pressure", "turn"])
-    elif state.phase == "reveal":
-        beat_type = random.choice(["reveal", "consequence", "turn"])
-    else:
-        beat_type = random.choice(["resolution", "aftermath"]) 
-
-    if random.random() < 0.25:
-        _expand_world(state)
-
-    character = random.choice(state.characters)
-    other = random.choice([c for c in state.characters if c != character])
-    location = random.choice(state.locations) if state.locations else state.add_location()
-    obj = random.choice(state.objects) if state.objects else state.add_object()
-    beat = {
-        "type": beat_type,
-        "name": character["name"],
-        "other": other["name"],
-        "location": location,
-        "object": obj,
-        "detail": random.choice(
-            [
-                "a promise that felt heavier than it sounded",
-                "a plan that slipped out of control",
-                "a secret nobody wanted to carry",
-                "a sudden risk that had no easy exit",
-                "a quiet warning that went ignored",
-                "a rumor with too much truth in it",
-                "a fragile truce that could snap",
-            ]
-        ),
-    }
-    state.beat_index += 1
-    if state.beat_index % 12 == 0:
-        _advance_phase(state)
-    return beat
-
-
-def _sentence_from_beat(state: StoryState, beat: dict, used_sentences: list[str]) -> str:
-    attempts = 0
-    while attempts < 50:
-        length_choice = random.random()
-        if length_choice < 0.2:
-            template = random.choice(_short_sentences())
-            sentence = template.format(
-                name=beat["name"],
-                other=beat["other"],
-                location=beat["location"],
-                object=beat["object"],
-                detail=beat["detail"],
-            )
-            key = "short"
-        elif length_choice < 0.65:
-            template = random.choice(_medium_templates())
-            sentence = template.format(
-                name=beat["name"],
-                other=beat["other"],
-                location=beat["location"],
-                object=beat["object"],
-                detail=beat["detail"],
-            )
-            key = "medium"
-        else:
-            template = random.choice(_long_templates())
-            sentence = template.format(
-                name=beat["name"],
-                other=beat["other"],
-                location=beat["location"],
-                object=beat["object"],
-                detail=beat["detail"],
-            )
-            key = "long"
-
-        attempts += 1
-        if state.last_template_key == key:
-            continue
-        if _is_repetitive(sentence, used_sentences):
-            continue
-        state.last_template_key = key
-        return sentence
-
-    for _ in range(4):
-        _expand_world(state)
-        fallback = (
-            f"{beat['name']} introduced {state.add_character('ally')['name']} at {state.add_location()}, "
-            f"and the story took a new turn with {state.add_object()} and {beat['detail']}."
-        )
-        if not _is_repetitive(fallback, used_sentences):
-            state.last_template_key = "fallback"
-            return fallback
-
-    state.last_template_key = "fallback"
-    return fallback
-
-
-def _story_seed(topic: str) -> list[str]:
-    return [
-        f"There is a story about {topic}, but it starts with a small moment.",
-        "The kind you almost skip past.",
-    ]
+def _section(title: str, bodies: list[str], starters: list[str]) -> list[str]:
+    return [title, *_apply_starters(bodies, starters), ""]
 
 
 def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
-    topic = random.choice(
-        [
-            "a city project that went quiet overnight",
-            "a neighborhood app that suddenly turned sour",
-            "a public promise that kept slipping",
-            "a tiny startup that made a giant mistake",
-            "a group of friends caught in a slow, messy change",
-        ]
-    )
-    state = _init_story(topic)
-    used_sentences: list[str] = []
+    protagonist = "Mara"
+    ally = "Eli"
+    town = "Ridgeview"
+    archive = "the riverside archive"
+    office = "the old co-op office"
+
+    starters = _starter_pool()
     lines: list[str] = []
 
-    for seed in _story_seed(topic):
-        lines.append(seed)
-        used_sentences.append(seed)
+    hook_bodies = [
+        f"I can promise you one answer: who moved {town}'s emergency fund and why.",
+        "We start with a missing ledger and a call that cut off mid-sentence.",
+        "Stay with me, because the truth flips the story you expect.",
+    ]
+    context_bodies = [
+        f"{protagonist} handled budget notes for the relief fund, a job that normally never made headlines.",
+        f"{ally} managed the daily requests and knew which families were barely holding on.",
+        f"The fund was meant for storms, layoffs, and the quiet emergencies no one wants to name.",
+        f"In {town}, the money sat in a reserve account with strict rules and simple signatures.",
+        f"The last clean record lived in {archive}, filed under a schedule that never drifted.",
+        f"On paper, the account balance was steady the week before the shock.",
+        f"The next morning, the account read almost empty with no public notice.",
+        f"{protagonist} and {ally} decided to trace the change before rumors did it for them.",
+    ]
+    escalation_one_bodies = [
+        f"The first clue was a timestamp that showed the transfer happened well after midnight.",
+        f"Security logs from {office} showed a keycard entry that should not exist.",
+        f"A vendor invoice appeared with the same amount as the missing reserve.",
+        f"{ally} called the bank and learned the transfer had been approved twice.",
+        f"One approval came from a name that no longer worked there.",
+        f"{protagonist} pulled the paper trail and saw that the ledger was edited, not erased.",
+        f"A backup folder had a single file renamed with the wrong date.",
+        f"The finance chair insisted the board never met that night.",
+        f"An email chain showed a meeting invite that no one remembered accepting.",
+        f"A short voice note hinted the reserve was being moved for “temporary protection.”",
+        f"A note in the margin said to wait until the audit window closed.",
+        f"{ally} realized the audit window closed the same day the fund vanished.",
+        f"{protagonist} checked the stamp on the ledger and found it matched a batch from months earlier.",
+        f"A quiet clerk admitted the stamp box had been taken home once.",
+        f"The trail now pointed to intent, not a mistake.",
+    ]
+    escalation_two_bodies = [
+        "The complication was that the transfer did not go to a private account.",
+        "The money moved into a legal escrow tied to a redevelopment bid.",
+        f"That bid would decide whether {town} kept control of its emergency services.",
+        f"{ally} worried that the escrow meant the fund could be frozen for months.",
+        f"{protagonist} found a letter suggesting the fund would be seized if left untouched.",
+        "A retired treasurer warned that the bank had a clause nobody had read in years.",
+        f"The clause required the reserve to remain above a threshold during the bid.",
+        "Yet the transfer had lowered the visible balance below that line.",
+        "The contradiction was brutal: the move both protected and endangered the town.",
+        f"Pressure rose as families asked why emergency checks had paused.",
+        f"{ally} faced those questions directly, while {protagonist} kept digging.",
+        "Every explanation sounded like a cover story, and none solved the timing.",
+        f"A second ledger copy showed a prepared statement labeled “if discovered.”",
+        "The statement claimed a hacker forced the transfer, but the logs showed no breach.",
+        f"By this point, {protagonist} knew someone inside made the call.",
+    ]
+    turn_bodies = [
+        f"The reveal came in {archive} when a sealed file finally opened.",
+        "It contained a legal warning about a predatory lawsuit that would drain the fund in days.",
+        f"{protagonist} saw the signature and realized the transfer was an emergency shield, not a theft.",
+        f"{ally} had been kept out to avoid exposing the plan too early.",
+        f"The mystery shifted from “who stole it” to “who risked everything to save it.”",
+    ]
+    payoff_bodies = [
+        f"The answer was clear: {protagonist} moved the fund into escrow to block the lawsuit from touching it.",
+        "The late-night timing was chosen because the injunction clock started at dawn.",
+        "The double approval was a workaround for a board that could not meet in time.",
+        f"The fake cover story was written to keep {town} calm until the legal window passed.",
+        f"The escrow terms required silence, which is why even {ally} was left in the dark.",
+        "Once the lawsuit was dismissed, the reserve could return intact.",
+        "That is why the balance appeared empty while the money was actually protected.",
+        "No corruption was found, only a risky maneuver to keep services alive.",
+        f"The fund returned in full, and the families in {town} received the aid they needed.",
+        "The promise in the hook is kept: the money never vanished, it was shielded.",
+    ]
+    landing_bodies = [
+        f"The final insight is that trust survives when people explain their risks before panic fills the gap.",
+        f"{ally} forgave the secrecy because the outcome saved the community.",
+        "A single question can feel like a scandal until the full context arrives.",
+        "If you want more stories where the answer changes how you see the whole chain, stay curious.",
+    ]
 
-    while _estimate_seconds(" ".join(lines)) < float(min_seconds):
-        beat = _build_beat(state)
-        sentence = _sentence_from_beat(state, beat, used_sentences)
-        used_sentences.append(sentence)
-        lines.append(sentence)
+    sections = [
+        ("SECTION 1 — HOOK", hook_bodies),
+        ("SECTION 2 — CONTEXT SETUP", context_bodies),
+        ("SECTION 3 — ESCALATION PHASE 1", escalation_one_bodies),
+        ("SECTION 4 — ESCALATION PHASE 2", escalation_two_bodies),
+        ("SECTION 5 — TURN / REFRAME", turn_bodies),
+        ("SECTION 6 — PAYOFF", payoff_bodies),
+        ("SECTION 7 — LANDING", landing_bodies),
+    ]
 
-        if random.random() < 0.25:
-            follow_up = _sentence_from_beat(state, beat, used_sentences)
-            used_sentences.append(follow_up)
-            lines.append(follow_up)
-
-        if random.random() < 0.1:
-            lines.append("")
+    for title, bodies in sections:
+        lines.extend(_section(title, bodies, starters))
 
     script = "\n".join(lines).strip()
+    word_count = len(script.split())
+    padding_bodies = [
+        "The bank statements showed the transfer as a protective hold, not a withdrawal.",
+        "A timeline on the wall proved how quickly the legal window was closing.",
+        "The relief team had already prepared contingency plans for a short delay.",
+        "Public minutes from the last council meeting hinted at the lawsuit without naming it.",
+        "Every document pointed to urgency rather than greed.",
+        "The more they verified, the more the plan looked intentional and time-bound.",
+        "Small details like courier receipts confirmed the escrow paperwork was filed on time.",
+        "Even the auditor admitted the decision followed the letter of the rules.",
+        "By sunrise, the danger had shifted from theft to the risk of misunderstanding.",
+        "That misunderstanding was the real threat to trust in the fund.",
+    ]
+
+    while word_count < TARGET_MIN_WORDS:
+        if not padding_bodies:
+            padding_bodies.append("The choice was risky, but the alternative was losing everything.")
+        extra = _apply_starters([padding_bodies.pop(0)], starters)
+        lines.insert(-1, extra[0])
+        script = "\n".join(lines).strip()
+        word_count = len(script.split())
+
+    if word_count > TARGET_MAX_WORDS:
+        trimmed_lines = [line for line in lines if line]
+        while trimmed_lines and len(" ".join(trimmed_lines).split()) > TARGET_MAX_WORDS:
+            trimmed_lines.pop(-1)
+        script = "\n".join(trimmed_lines).strip()
+
     script = sanitize_script(script)
     return ScriptResult(text=script, estimated_seconds=_estimate_seconds(script))
 
