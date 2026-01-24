@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MoneyOS – TikTok Generator</title>
+  <style>
+    body {
+      font-family: "Segoe UI", sans-serif;
+      background: #0f1115;
+      color: #f5f6f7;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+    }
+    .panel {
+      background: #1a1d24;
+      padding: 32px;
+      border-radius: 16px;
+      width: 420px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    }
+    h1 {
+      font-size: 24px;
+      margin-bottom: 24px;
+    }
+    button {
+      width: 100%;
+      padding: 14px;
+      background: #4d7cff;
+      border: none;
+      color: #fff;
+      font-size: 16px;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .status {
+      margin-top: 24px;
+      padding: 12px;
+      background: #12141a;
+      border-radius: 10px;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+    .label {
+      font-weight: 600;
+      color: #9bb2ff;
+    }
+    .output {
+      margin-top: 12px;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <h1>MoneyOS – TikTok Generator</h1>
+    <button id="generateButton">Generate Video</button>
+    <div class="status">
+      <div><span class="label">Status:</span> <span id="statusText">Idle</span></div>
+      <div class="output"><span class="label">Output:</span> <span id="outputPath">-</span></div>
+      <div><span class="label">Duration:</span> <span id="outputDuration">-</span></div>
+      <div><span class="label">STATUS:</span> <span id="finalStatus">Idle</span></div>
+    </div>
+  </div>
+
+  <script>
+    const generateButton = document.getElementById('generateButton');
+    const statusText = document.getElementById('statusText');
+    const outputPath = document.getElementById('outputPath');
+    const outputDuration = document.getElementById('outputDuration');
+    const finalStatus = document.getElementById('finalStatus');
+    let polling = null;
+
+    async function pollStatus(jobId) {
+      try {
+        const response = await fetch(`/status/${jobId}`);
+        if (!response.ok) {
+          throw new Error('Status unavailable');
+        }
+        const data = await response.json();
+        statusText.textContent = data.status || 'Idle';
+        if (data.success) {
+          outputPath.textContent = data.video_path || '-';
+          outputDuration.textContent = data.duration ? `${data.duration.toFixed(2)}s` : '-';
+          finalStatus.textContent = 'SUCCESS';
+          generateButton.disabled = false;
+          clearInterval(polling);
+        } else if (data.status && data.status.startsWith('Error')) {
+          finalStatus.textContent = 'FAILED';
+          generateButton.disabled = false;
+          clearInterval(polling);
+        }
+      } catch (error) {
+        console.error(error);
+        generateButton.disabled = false;
+        clearInterval(polling);
+      }
+    }
+
+    generateButton.addEventListener('click', async () => {
+      generateButton.disabled = true;
+      statusText.textContent = 'Generating script...';
+      outputPath.textContent = '-';
+      outputDuration.textContent = '-';
+      finalStatus.textContent = 'In Progress';
+
+      const response = await fetch('/generate', { method: 'POST' });
+      const data = await response.json();
+      const jobId = data.job_id;
+
+      polling = setInterval(() => pollStatus(jobId), 1000);
+    });
+  </script>
+</body>
+</html>
