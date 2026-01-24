@@ -478,7 +478,8 @@ def _compose_with_overlays(
     inputs += ["-itsoffset", f"{phase_times['midpoint_time']:.3f}", "-i", str(midpoint_clip)]
     filter_parts.append(
         f"{video_chain}[{input_index}:v]overlay=enable='between(t,{phase_times['midpoint_time']:.3f},"
-        f"{phase_times['midpoint_time'] + MIDPOINT_OVERLAY_DURATION:.3f})'[vfinal]"
+        f"{phase_times['midpoint_time'] + MIDPOINT_OVERLAY_DURATION:.3f}),"
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2[vfinal]"
     )
     input_index += 1
 
@@ -495,8 +496,6 @@ def _compose_with_overlays(
             "[vfinal]",
             "-map",
             f"{input_index}:a",
-            "-vf",
-            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
             "-c:v",
             "libx264",
             "-preset",
