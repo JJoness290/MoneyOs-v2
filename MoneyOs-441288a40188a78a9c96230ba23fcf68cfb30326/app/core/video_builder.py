@@ -508,29 +508,27 @@ def _compose_with_overlays(
     audio_duration: float,
     output_path: Path,
 ) -> None:
-    inputs = ["-i", str(base_video)]
+    inputs = ["-i", str(midpoint_clip), "-i", str(base_video)]
     filter_parts = []
-    input_index = 1
+    input_index = 2
 
     if false_clip is not None:
         inputs += ["-itsoffset", f"{phase_times['false_time']:.3f}", "-i", str(false_clip)]
         filter_parts.append(
-            f"[0:v][{input_index}:v]overlay=enable='between(t,{phase_times['false_time']:.3f},"
-            f"{phase_times['false_time'] + FALSE_ASSUMPTION_DURATION:.3f})'[vfalse]"
+            f"[1:v][{input_index}:v]overlay=enable='between(t,{phase_times['false_time']:.3f},"
+            f"{phase_times['false_time'] + FALSE_ASSUMPTION_DURATION:.3f})'[base]"
         )
         input_index += 1
-        video_chain = "[vfalse]"
+        video_chain = "[base]"
     else:
-        video_chain = "[0:v]"
+        video_chain = "[1:v]"
 
-    inputs += ["-itsoffset", f"{phase_times['midpoint_time']:.3f}", "-i", str(midpoint_clip)]
-    filter_parts.append(f"[{input_index}:v]format=rgba,colorchannelmixer=aa=0.6[midpoint]")
+    filter_parts.append("[0:v]format=rgba,colorchannelmixer=aa=0.6[midpoint]")
     filter_parts.append(
-        f"{video_chain}[midpoint]overlay=enable='between(t,{phase_times['midpoint_time']:.3f},"
+        f"[midpoint]{video_chain}overlay=enable='between(t,{phase_times['midpoint_time']:.3f},"
         f"{phase_times['midpoint_time'] + MIDPOINT_OVERLAY_DURATION:.3f})[tmp]"
     )
     filter_parts.append("[tmp]scale=trunc(iw/2)*2:trunc(ih/2)*2[vfinal]")
-    input_index += 1
 
     inputs += ["-i", str(audio_path)]
 
