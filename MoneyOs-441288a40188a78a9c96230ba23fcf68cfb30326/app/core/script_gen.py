@@ -26,278 +26,155 @@ def sanitize_script(text: str) -> str:
     lines = [re.sub(r"\s+", " ", line).strip() for line in cleaned.splitlines()]
     return "\n".join(line for line in lines if line).strip()
 
-
-def _starter_pool() -> list[str]:
-    return [
-        "First",
-        "Next",
-        "Then",
-        "Afterward",
-        "Meanwhile",
-        "Suddenly",
-        "Oddly",
-        "Quietly",
-        "Loudly",
-        "Inside",
-        "Outside",
-        "Across",
-        "Behind",
-        "Beneath",
-        "Above",
-        "Beyond",
-        "Before",
-        "Later",
-        "Earlier",
-        "Eventually",
-        "Briefly",
-        "Frankly",
-        "Naturally",
-        "Carefully",
-        "Boldly",
-        "Softly",
-        "Slowly",
-        "Quickly",
-        "Cautiously",
-        "Firmly",
-        "Gently",
-        "Sharply",
-        "Still",
-        "Also",
-        "Instead",
-        "Rather",
-        "Otherwise",
-        "Because",
-        "Since",
-        "Although",
-        "While",
-        "Unless",
-        "Even",
-        "Yet",
-        "So",
-        "Therefore",
-        "However",
-        "Nevertheless",
-        "Moreover",
-        "Furthermore",
-        "Consequently",
-        "Similarly",
-        "Likewise",
-        "Specifically",
-        "Practically",
-        "Notably",
-        "Remarkably",
-        "Surprisingly",
-        "Predictably",
-        "Unusually",
-        "Strangely",
-        "Decisively",
-        "Precisely",
-        "Ultimately",
-        "Reluctantly",
-        "Patiently",
-        "Tensely",
-        "Calmly",
-        "Uneasily",
-        "Deliberately",
-        "Publicly",
-        "Privately",
-        "Silently",
-        "Openly",
-        "Directly",
-        "Indirectly",
-        "Technically",
-        "Measured",
-        "Steadily",
-        "Straightaway",
-        "Immediately",
-        "Right",
-        "Left",
-        "Up",
-        "Down",
-        "Forward",
-        "Back",
-        "North",
-        "South",
-        "East",
-        "West",
-        "Today",
-        "Tonight",
-        "Tomorrow",
-        "Yesterday",
-        "Always",
-        "Never",
-        "Finally",
-        "Last",
-        "Already",
-        "Again",
-        "Once",
-        "Twice",
-        "Stillness",
-        "Truthfully",
-        "Honestly",
-        "Plainly",
-        "Simply",
-        "Seriously",
-        "Careful",
-        "Focused",
-        "Determined",
-        "Balanced",
-        "Grounded",
-        "Measuredly",
-        "Plainspoken",
-        "Levelly",
-        "Exactingly",
-    ]
-
-
-def _sentence(starter: str, body: str) -> str:
-    sentence = f"{starter} {body}".strip()
-    if not sentence.endswith((".", "!", "?")):
-        sentence = f"{sentence}."
-    return sentence
-
-
-def _apply_starters(bodies: list[str], starters: list[str]) -> list[str]:
-    sentences = []
-    for body in bodies:
-        if not starters:
-            starters.extend(_starter_pool())
-        starter = starters.pop(0)
-        sentences.append(_sentence(starter, body))
-    return sentences
-
-
-def _section(title: str, bodies: list[str], starters: list[str]) -> list[str]:
-    return [title, *_apply_starters(bodies, starters), ""]
-
-
 def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
     protagonist = "Mara"
     ally = "Eli"
     town = "Ridgeview"
-    archive = "the riverside archive"
-    office = "the old co-op office"
 
-    starters = _starter_pool()
-    lines: list[str] = []
-
-    hook_bodies = [
-        f"I can promise you one answer: who moved {town}'s emergency fund and why.",
-        "We start with a missing ledger and a call that cut off mid-sentence.",
-        "Stay with me, because the truth flips the story you expect.",
+    hook = [
+        f"I promised one clear answer about who moved {town}'s emergency fund and why it happened.",
+        "The story begins with a missing ledger and a phone call that ended mid-sentence.",
+        "That promise will be kept, and the answer changes how the whole chain looks.",
     ]
-    context_bodies = [
-        f"{protagonist} handled budget notes for the relief fund, a job that normally never made headlines.",
-        f"{ally} managed the daily requests and knew which families were barely holding on.",
-        f"The fund was meant for storms, layoffs, and the quiet emergencies no one wants to name.",
-        f"In {town}, the money sat in a reserve account with strict rules and simple signatures.",
-        f"The last clean record lived in {archive}, filed under a schedule that never drifted.",
-        f"On paper, the account balance was steady the week before the shock.",
-        f"The next morning, the account read almost empty with no public notice.",
-        f"{protagonist} and {ally} decided to trace the change before rumors did it for them.",
+    context = [
+        f"{protagonist} kept the relief fund records and signed off on routine checks.",
+        f"{ally} tracked the requests that came in each day and saw the pressure building.",
+        "This fund existed for storms, layoffs, and the quiet emergencies that never reach the news.",
+        f"{town} stored it in a reserve account with simple signatures and a small audit window.",
+        "A clean report showed a steady balance late in the week.",
+        "The next morning brought an almost empty balance and no public note to explain it.",
+        f"{protagonist} and {ally} agreed to trace the trail before rumors hardened into fact.",
     ]
-    escalation_one_bodies = [
-        f"The first clue was a timestamp that showed the transfer happened well after midnight.",
-        f"Security logs from {office} showed a keycard entry that should not exist.",
-        f"A vendor invoice appeared with the same amount as the missing reserve.",
-        f"{ally} called the bank and learned the transfer had been approved twice.",
-        f"One approval came from a name that no longer worked there.",
-        f"{protagonist} pulled the paper trail and saw that the ledger was edited, not erased.",
-        f"A backup folder had a single file renamed with the wrong date.",
-        f"The finance chair insisted the board never met that night.",
-        f"An email chain showed a meeting invite that no one remembered accepting.",
-        f"A short voice note hinted the reserve was being moved for “temporary protection.”",
-        f"A note in the margin said to wait until the audit window closed.",
-        f"{ally} realized the audit window closed the same day the fund vanished.",
-        f"{protagonist} checked the stamp on the ledger and found it matched a batch from months earlier.",
-        f"A quiet clerk admitted the stamp box had been taken home once.",
-        f"The trail now pointed to intent, not a mistake.",
+    escalation_one = [
+        "A time stamp showed the transfer happened after midnight.",
+        "A keycard log showed entry from a card that should have been inactive.",
+        "A vendor invoice matched the missing amount down to the dollar.",
+        f"{ally} called the bank and learned the transfer had two approvals.",
+        "One approval belonged to a name removed from the staff list.",
+        f"{protagonist} pulled a paper copy and saw edits instead of a full erase.",
+        "A backup folder carried a file with the wrong date in its title.",
+        "A finance chair swore the board never met that night.",
+        "An old invite showed a meeting time that nobody recalled.",
+        "A voice note hinted the reserve was being moved for protection.",
+        "A margin note said to wait until the audit window closed.",
+        f"{ally} saw the audit window ended the same day the fund vanished.",
+        f"{protagonist} checked the stamp and found it matched a batch from months earlier.",
+        "A clerk admitted the stamp box had gone home with someone once.",
+        "A transfer memo listed a routing code that did not match prior months.",
+        f"{protagonist} compared the routing code to old files and found a mismatch.",
+        f"{ally} noticed the approval times were clustered within five minutes.",
+        "One signature line used a block stamp instead of pen.",
+        "The stamp ink matched a box stored near the archives.",
+        "A quiet assistant confirmed the box went missing for a weekend.",
+        "The weekend aligned with the unexplained meeting invite.",
+        "A bank clerk confirmed the escrow form was prefilled before midnight.",
+        "A draft email showed a warning about a looming injunction.",
+        "The warning made the midnight transfer feel like a deadline.",
+        "That trail pointed to intent rather than a mistake.",
     ]
-    escalation_two_bodies = [
-        "The complication was that the transfer did not go to a private account.",
-        "The money moved into a legal escrow tied to a redevelopment bid.",
+    escalation_two = [
+        "The transfer did not land in a private account.",
+        "That money moved into legal escrow tied to a redevelopment bid.",
         f"That bid would decide whether {town} kept control of its emergency services.",
-        f"{ally} worried that the escrow meant the fund could be frozen for months.",
-        f"{protagonist} found a letter suggesting the fund would be seized if left untouched.",
-        "A retired treasurer warned that the bank had a clause nobody had read in years.",
-        f"The clause required the reserve to remain above a threshold during the bid.",
-        "Yet the transfer had lowered the visible balance below that line.",
-        "The contradiction was brutal: the move both protected and endangered the town.",
-        f"Pressure rose as families asked why emergency checks had paused.",
-        f"{ally} faced those questions directly, while {protagonist} kept digging.",
-        "Every explanation sounded like a cover story, and none solved the timing.",
-        f"A second ledger copy showed a prepared statement labeled “if discovered.”",
-        "The statement claimed a hacker forced the transfer, but the logs showed no breach.",
-        f"By this point, {protagonist} knew someone inside made the call.",
+        f"{ally} worried the escrow could freeze the fund for months.",
+        f"{protagonist} found a letter warning the fund could be seized if left exposed.",
+        "A retired treasurer mentioned a clause buried in the bank agreement.",
+        "That clause required the reserve to stay above a threshold during the bid.",
+        "The transfer lowered the visible balance below that line.",
+        "That contradiction felt sharp: the move protected the cash and endangered it.",
+        f"Families asked why emergency checks paused, and {ally} had no answer.",
+        f"{protagonist} kept digging while rumors circled back to blame.",
+        "Each explanation sounded like a cover story and none solved the timing.",
+        "A second ledger copy carried a prepared statement labeled for discovery.",
+        "The statement blamed a hacker, yet the logs showed no breach.",
+        f"{protagonist} concluded the choice came from inside.",
+        "A legal aide described the escrow as a temporary safe room.",
+        "The note explained that the reserve could not be garnished there.",
+        f"{protagonist} realized the escrow would look like a loss on casual review.",
+        f"{ally} feared that review would spark panic before the hold lifted.",
     ]
-    turn_bodies = [
-        f"The reveal came in {archive} when a sealed file finally opened.",
-        "It contained a legal warning about a predatory lawsuit that would drain the fund in days.",
-        f"{protagonist} saw the signature and realized the transfer was an emergency shield, not a theft.",
-        f"{ally} had been kept out to avoid exposing the plan too early.",
-        f"The mystery shifted from “who stole it” to “who risked everything to save it.”",
-    ]
-    payoff_bodies = [
-        f"The answer was clear: {protagonist} moved the fund into escrow to block the lawsuit from touching it.",
-        "The late-night timing was chosen because the injunction clock started at dawn.",
-        "The double approval was a workaround for a board that could not meet in time.",
-        f"The fake cover story was written to keep {town} calm until the legal window passed.",
-        f"The escrow terms required silence, which is why even {ally} was left in the dark.",
-        "Once the lawsuit was dismissed, the reserve could return intact.",
-        "That is why the balance appeared empty while the money was actually protected.",
-        "No corruption was found, only a risky maneuver to keep services alive.",
-        f"The fund returned in full, and the families in {town} received the aid they needed.",
-        "The promise in the hook is kept: the money never vanished, it was shielded.",
-    ]
-    landing_bodies = [
-        f"The final insight is that trust survives when people explain their risks before panic fills the gap.",
-        f"{ally} forgave the secrecy because the outcome saved the community.",
-        "A single question can feel like a scandal until the full context arrives.",
-        "If you want more stories where the answer changes how you see the whole chain, stay curious.",
-    ]
-
-    sections = [
-        ("SECTION 1 — HOOK", hook_bodies),
-        ("SECTION 2 — CONTEXT SETUP", context_bodies),
-        ("SECTION 3 — ESCALATION PHASE 1", escalation_one_bodies),
-        ("SECTION 4 — ESCALATION PHASE 2", escalation_two_bodies),
-        ("SECTION 5 — TURN / REFRAME", turn_bodies),
-        ("SECTION 6 — PAYOFF", payoff_bodies),
-        ("SECTION 7 — LANDING", landing_bodies),
-    ]
-
-    for title, bodies in sections:
-        lines.extend(_section(title, bodies, starters))
-
-    script = "\n".join(lines).strip()
-    word_count = len(script.split())
-    padding_bodies = [
-        "The bank statements showed the transfer as a protective hold, not a withdrawal.",
-        "A timeline on the wall proved how quickly the legal window was closing.",
-        "The relief team had already prepared contingency plans for a short delay.",
-        "Public minutes from the last council meeting hinted at the lawsuit without naming it.",
+    pressure_details = [
+        "Bank statements showed a protective hold instead of a withdrawal.",
+        "A calendar on the wall proved how small the legal window was.",
+        "The relief team prepared for a short delay while the escrow closed.",
+        "Public minutes hinted at legal pressure without naming it.",
         "Every document pointed to urgency rather than greed.",
-        "The more they verified, the more the plan looked intentional and time-bound.",
-        "Small details like courier receipts confirmed the escrow paperwork was filed on time.",
-        "Even the auditor admitted the decision followed the letter of the rules.",
-        "By sunrise, the danger had shifted from theft to the risk of misunderstanding.",
-        "That misunderstanding was the real threat to trust in the fund.",
+        "Courier receipts confirmed the escrow paperwork was filed on time.",
+        "An auditor admitted the decision followed the letter of the rules.",
+        "The risk now was misunderstanding rather than missing money.",
+        "The public needed clarity more than a villain.",
+        "Meeting notes showed the deadline driving every move.",
+        "A stack of receipts tracked each step through the transfer.",
+        "The bank officer stressed that the escrow held every dollar.",
+        "The relief staff documented every call they could not fulfill.",
+        "A quiet promise to reopen the fund held the team together.",
+        "Paper copies showed the fund never left the system.",
+        "A timeline on the whiteboard narrowed the window of danger.",
+        "The reserve could only be touched once the lawsuit threat expired.",
+        f"{protagonist} reviewed every signature to confirm the chain held firm.",
+        f"{ally} watched the requests pile up and felt the strain grow.",
+        "A simple checklist kept the records consistent under stress.",
+        "The bank agreement treated the escrow as a shield, not a spend.",
+        "Each verified detail reduced the fear of a hidden theft.",
+        "The reserve stayed safe even while the balance looked wrong.",
+        "The phone logs showed the urgency behind the late-night call.",
+        "A clean audit trail remained intact despite the panic.",
+        "The oversight file listed the legal risks in plain language.",
+        "The decision aimed to keep emergency services running.",
+        f"{protagonist} kept a printed copy of every notice for backup.",
+        f"{ally} kept the team calm with steady updates.",
+        "A brief pause in aid felt painful but temporary.",
+        "The town council expected a short-term freeze and prepared notices.",
+        "A handwritten note explained the escrow rule in simple terms.",
+        "The escrow clause described the reserve as protected property.",
+        "The bank manager confirmed the funds could not be seized while held.",
+        "A legal summary tied the transfer to a single filing deadline.",
+        "The finance chair admitted the clock left no easy option.",
+        "A clear timeline helped the team see the logic of the move.",
+        "The staff kept receipts ready for the audit review.",
+        "The records room held duplicate logs for verification.",
+        "The reserve stayed intact while the lawsuit threat expired.",
+        "A written plan outlined the steps to restore the balance.",
+        "The team prepared a public statement for the moment the hold lifted.",
+        "A quiet sense of relief arrived as the legal pressure eased.",
+        "The last check confirmed the escrow release had been scheduled.",
+        "The relief team agreed to rebuild trust through transparency.",
+    ]
+    escalation_two.extend(pressure_details)
+    turn = [
+        "A sealed file in the archive finally opened after a records request.",
+        "The file contained a legal warning about a predatory lawsuit due within days.",
+        f"{protagonist} read the signature and saw the transfer as a shield, not a theft.",
+        f"{ally} had been kept out to avoid exposing the plan too soon.",
+        "The mystery shifted from theft to the risk taken to save the fund.",
+    ]
+    payoff = [
+        f"The answer is direct: {protagonist} moved the fund into escrow to block the lawsuit.",
+        "The late-night timing mattered because the injunction clock started at dawn.",
+        "The double approval was a legal workaround for a board that could not meet fast enough.",
+        f"The cover story kept {town} calm until the legal window passed.",
+        f"The escrow terms demanded silence, which is why even {ally} was left in the dark.",
+        "The lawsuit was dismissed, and the reserve returned intact.",
+        "The balance looked empty while the money stayed protected.",
+        "No corruption appeared, only a risky maneuver to keep services alive.",
+        f"The reserve returned in full, and the families in {town} received the aid they needed.",
+        "The promise is kept: the money never vanished, it was shielded.",
+    ]
+    landing = [
+        "Trust survives when people explain the risk before panic fills the gap and before rumors harden into blame.",
+        f"{ally} carried the fear of failure, felt the weight of every request, and still chose to forgive the secrecy.",
+        "The relief in that decision mattered as much as the money because it rebuilt the team itself.",
+        "The story proves how quickly a protective act can look like betrayal when the timeline is hidden.",
+        "A single answer can change what a whole chain of events means and how a community heals.",
+        "Let that sit if you have ever doubted a quiet decision made under pressure.",
+        "Stay curious if you want more stories where one truth reshapes everything.",
     ]
 
-    while word_count < TARGET_MIN_WORDS:
-        if not padding_bodies:
-            padding_bodies.append("The choice was risky, but the alternative was losing everything.")
-        extra = _apply_starters([padding_bodies.pop(0)], starters)
-        lines.insert(-1, extra[0])
-        script = "\n".join(lines).strip()
-        word_count = len(script.split())
+    sentences = [*hook, "", *context, "", *escalation_one, "", *escalation_two, "", *turn, "", *payoff, ""]
+    landing_text = " ".join(landing)
 
-    if word_count > TARGET_MAX_WORDS:
-        trimmed_lines = [line for line in lines if line]
-        while trimmed_lines and len(" ".join(trimmed_lines).split()) > TARGET_MAX_WORDS:
-            trimmed_lines.pop(-1)
-        script = "\n".join(trimmed_lines).strip()
-
+    script = " ".join(sentences).strip()
+    script = f"{script} {landing_text}".strip()
     script = sanitize_script(script)
     return ScriptResult(text=script, estimated_seconds=_estimate_seconds(script))
 
