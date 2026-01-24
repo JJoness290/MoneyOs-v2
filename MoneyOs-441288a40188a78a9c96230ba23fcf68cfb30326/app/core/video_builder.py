@@ -495,6 +495,8 @@ def _compose_with_overlays(
             "[vfinal]",
             "-map",
             f"{input_index}:a",
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
             "-c:v",
             "libx264",
             "-preset",
