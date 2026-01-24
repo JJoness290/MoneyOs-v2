@@ -68,6 +68,7 @@ def normalize_video(
     filter_chain = (
         f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
         f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
+        "setsar=1,"
         "format=yuv420p"
     )
     _run_ffmpeg(
@@ -316,6 +317,7 @@ def _run_ffmpeg(args: list[str]) -> None:
     guard = ResourceGuard("ffmpeg")
     guard.start()
     try:
+        print("[ResourceGuard] FFmpeg command:", " ".join(args))
         subprocess.run(args, check=True)
     finally:
         guard.stop()
@@ -528,7 +530,8 @@ def _compose_with_overlays(
         f"[midpoint]{video_chain}overlay=enable='between(t,{phase_times['midpoint_time']:.3f},"
         f"{phase_times['midpoint_time'] + MIDPOINT_OVERLAY_DURATION:.3f})[tmp]"
     )
-    filter_parts.append("[tmp]scale=trunc(iw/2)*2:trunc(ih/2)*2[vfinal]")
+    filter_parts.append("[tmp]scale=trunc(iw/2)*2:trunc(ih/2)*2[scaled]")
+    filter_parts.append("[scaled]format=yuv420p[vfinal]")
 
     inputs += ["-i", str(audio_path)]
 
