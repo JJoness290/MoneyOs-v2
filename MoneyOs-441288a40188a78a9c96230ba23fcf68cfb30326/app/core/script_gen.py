@@ -1,4 +1,3 @@
-import random
 import re
 from dataclasses import dataclass
 
@@ -35,6 +34,7 @@ def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
         f"I promised one clear answer about who moved {town}'s emergency fund and why it happened.",
         "The story begins with a missing ledger and a phone call that ended mid-sentence.",
         "That promise will be kept, and the answer changes how the whole chain looks.",
+        "No room for guesses.",
     ]
     context = [
         f"{protagonist} kept the relief fund records and signed off on routine checks.",
@@ -47,6 +47,7 @@ def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
     ]
     escalation_one = [
         "A time stamp showed the transfer happened after midnight.",
+        "Time was running out.",
         "A keycard log showed entry from a card that should have been inactive.",
         "A vendor invoice matched the missing amount down to the dollar.",
         f"{ally} called the bank and learned the transfer had two approvals.",
@@ -57,6 +58,7 @@ def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
         "An old invite showed a meeting time that nobody recalled.",
         "A voice note hinted the reserve was being moved for protection.",
         "A margin note said to wait until the audit window closed.",
+        "That clock kept ticking.",
         f"{ally} saw the audit window ended the same day the fund vanished.",
         f"{protagonist} checked the stamp and found it matched a batch from months earlier.",
         "A clerk admitted the stamp box had gone home with someone once.",
@@ -69,6 +71,7 @@ def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
         "The weekend aligned with the unexplained meeting invite.",
         "A bank clerk confirmed the escrow form was prefilled before midnight.",
         "A draft email showed a warning about a looming injunction.",
+        "The deadline was real.",
         "The warning made the midnight transfer feel like a deadline.",
         "That trail pointed to intent rather than a mistake.",
     ]
@@ -81,12 +84,14 @@ def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
         "A retired treasurer mentioned a clause buried in the bank agreement.",
         "That clause required the reserve to stay above a threshold during the bid.",
         "The transfer lowered the visible balance below that line.",
+        "That risk felt immediate.",
         "That contradiction felt sharp: the move protected the cash and endangered it.",
         f"Families asked why emergency checks paused, and {ally} had no answer.",
         f"{protagonist} kept digging while rumors circled back to blame.",
         "Each explanation sounded like a cover story and none solved the timing.",
         "A second ledger copy carried a prepared statement labeled for discovery.",
         "The statement blamed a hacker, yet the logs showed no breach.",
+        "The gap felt dangerous.",
         f"{protagonist} concluded the choice came from inside.",
         "A legal aide described the escrow as a temporary safe room.",
         "The note explained that the reserve could not be garnished there.",
@@ -96,6 +101,7 @@ def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
     pressure_details = [
         "Bank statements showed a protective hold instead of a withdrawal.",
         "A calendar on the wall proved how small the legal window was.",
+        "Every hour felt tighter.",
         "The relief team prepared for a short delay while the escrow closed.",
         "Public minutes hinted at legal pressure without naming it.",
         "Every document pointed to urgency rather than greed.",
