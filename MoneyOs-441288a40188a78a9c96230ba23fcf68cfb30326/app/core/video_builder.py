@@ -2,6 +2,8 @@ from dataclasses import dataclass
 import json
 import random
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Tuple
 
@@ -11,14 +13,7 @@ from PIL import Image, ImageDraw, ImageFont
 if not hasattr(Image, "ANTIALIAS"):
     setattr(Image, "ANTIALIAS", Image.Resampling.LANCZOS)
 
-from moviepy.editor import (
-    AudioFileClip,
-    CompositeVideoClip,
-    ImageClip,
-    VideoFileClip,
-    concatenate_videoclips,
-    vfx,
-)
+from moviepy.editor import AudioFileClip, ImageClip, VideoFileClip, concatenate_videoclips, vfx
 
 from app.config import BROLL_DIR, MINECRAFT_BG_DIR, TARGET_FPS, TARGET_RESOLUTION
 from app.core.resource_guard import ResourceGuard, monitored_threads
@@ -43,6 +38,8 @@ INTENT_POOLS = {
 MIDPOINT_CLARITY_LINE = "By this point, one thing was clear"
 FALSE_ASSUMPTION_MARKER = "assumption did not survive the timeline"
 MIDPOINT_OVERLAY_TEXT = "One thing was clear by then"
+MIDPOINT_OVERLAY_DURATION = 3.5
+FALSE_ASSUMPTION_DURATION = 2.8
 
 
 def _fit_background(clip: VideoFileClip) -> VideoFileClip:
@@ -231,6 +228,16 @@ def _intent_for_time(moment: float, phase_times: dict[str, float]) -> str:
     return "escalation"
 
 
+def _intent_blocks(phase_times: dict[str, float], audio_duration: float) -> list[tuple[str, float, float]]:
+    return [
+        ("discovery", 0.0, phase_times["discovery_end"]),
+        ("escalation", phase_times["discovery_end"], phase_times["turn_start"]),
+        ("turn", phase_times["turn_start"], phase_times["payoff_start"]),
+        ("payoff", phase_times["payoff_start"], phase_times["landing_start"]),
+        ("landing", phase_times["landing_start"], audio_duration),
+    ]
+
+
 def _load_broll_pools() -> dict[str, list[Path]]:
     pools: dict[str, list[Path]] = {}
     for pool_name in INTENT_POOLS.values():
@@ -263,51 +270,287 @@ def _select_clip_for_intent(intent: str, pools: dict[str, list[Path]], indices: 
     return None
 
 
-def _apply_motion(clip: VideoFileClip, duration: float) -> VideoFileClip:
-    zoom_end = 1.04
-    zoom_start = 1.0
-    return clip.fx(vfx.resize, lambda t: zoom_start + (zoom_end - zoom_start) * (t / max(duration, 0.01)))
+def _run_ffmpeg(args: list[str]) -> None:
+    guard = ResourceGuard("ffmpeg")
+    guard.start()
+    try:
+        subprocess.run(args, check=True)
+    finally:
+        guard.stop()
 
 
-def _build_visual_track(script_text: str, audio_duration: float) -> tuple[VideoFileClip, list[VideoFileClip]]:
-    background = _load_background(audio_duration)
+def _probe_duration(path: Path) -> float:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def _write_concat_file(entries: list[tuple[Path, float]], output_dir: Path) -> Path:
+    concat_path = output_dir / "concat.txt"
+    lines = []
+    for path, duration in entries:
+        lines.append(f"file '{path.as_posix()}'")
+        lines.append(f"duration {duration:.3f}")
+    if entries:
+        lines.append(f"file '{entries[-1][0].as_posix()}'")
+    concat_path.write_text("\n".join(lines), encoding="utf-8")
+    return concat_path
+
+
+def _zoompan_filter(intent: str) -> str:
+    zoom_speed = {
+        "discovery": 0.0004,
+        "escalation": 0.0006,
+        "turn": 0.0005,
+        "payoff": 0.00035,
+        "landing": 0.0003,
+    }.get(intent, 0.0004)
+    return (
+        f"zoompan=z='min(zoom+{zoom_speed},1.05)':d=1:fps={TARGET_FPS},"
+        f"scale={TARGET_RESOLUTION[0]}:{TARGET_RESOLUTION[1]},setsar=1"
+    )
+
+
+def _render_intent_block(
+    intent: str,
+    duration: float,
+    pools: dict[str, list[Path]],
+    indices: dict[str, int],
+    output_dir: Path,
+) -> Path:
+    remaining = duration
+    entries: list[tuple[Path, float]] = []
+    while remaining > 0:
+        clip_path = _select_clip_for_intent(intent, pools, indices)
+        if not clip_path:
+            break
+        clip_duration = _probe_duration(clip_path)
+        if clip_duration <= 0:
+            indices[intent] = indices.get(intent, 0) + 1
+            continue
+        slice_duration = min(clip_duration, remaining)
+        entries.append((clip_path, slice_duration))
+        remaining -= slice_duration
+
+    if not entries:
+        fallback = _load_background(duration)
+        temp_path = output_dir / f"{intent}_fallback.mp4"
+        fallback.write_videofile(
+            str(temp_path),
+            codec="libx264",
+            audio_codec="aac",
+            fps=TARGET_FPS,
+            threads=monitored_threads(),
+            preset="medium",
+        )
+        fallback.close()
+        return temp_path
+
+    concat_file = _write_concat_file(entries, output_dir)
+    block_path = output_dir / f"{intent}.mp4"
+    _run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_file),
+            "-vf",
+            _zoompan_filter(intent),
+            "-t",
+            f"{duration:.3f}",
+            "-r",
+            str(TARGET_FPS),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-threads",
+            str(monitored_threads()),
+            str(block_path),
+        ]
+    )
+    return block_path
+
+
+def _render_false_assumption_clip(
+    pools: dict[str, list[Path]],
+    indices: dict[str, int],
+    output_dir: Path,
+) -> Path | None:
+    clip_path = _select_clip_for_intent("false_assumption", pools, indices)
+    if not clip_path:
+        return None
+    output_path = output_dir / "false_assumption.mp4"
+    _run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(clip_path),
+            "-t",
+            f"{FALSE_ASSUMPTION_DURATION:.3f}",
+            "-vf",
+            (
+                "setpts=1.15*PTS,"
+                f"scale={TARGET_RESOLUTION[0]}:{TARGET_RESOLUTION[1]},"
+                "eq=brightness=-0.05:saturation=0.7,setsar=1"
+            ),
+            "-r",
+            str(TARGET_FPS),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-threads",
+            str(monitored_threads()),
+            str(output_path),
+        ]
+    )
+    return output_path
+
+
+def _render_midpoint_overlay(output_dir: Path) -> Path:
+    overlay_path = output_dir / "midpoint_overlay.mov"
+    overlay = _midpoint_overlay_clip(MIDPOINT_OVERLAY_TEXT, MIDPOINT_OVERLAY_DURATION)
+    overlay = overlay.fx(vfx.fadein, 0.4).fx(vfx.fadeout, 0.4)
+    overlay.write_videofile(
+        str(overlay_path),
+        codec="qtrle",
+        fps=TARGET_FPS,
+        preset="medium",
+        threads=monitored_threads(),
+        logger=None,
+    )
+    overlay.close()
+    return overlay_path
+
+
+def _compose_with_overlays(
+    base_video: Path,
+    audio_path: Path,
+    false_clip: Path | None,
+    midpoint_clip: Path,
+    phase_times: dict[str, float],
+    audio_duration: float,
+    output_path: Path,
+) -> None:
+    inputs = ["-i", str(base_video)]
+    filter_parts = []
+    input_index = 1
+
+    if false_clip is not None:
+        inputs += ["-itsoffset", f"{phase_times['false_time']:.3f}", "-i", str(false_clip)]
+        filter_parts.append(
+            f"[0:v][{input_index}:v]overlay=enable='between(t,{phase_times['false_time']:.3f},"
+            f"{phase_times['false_time'] + FALSE_ASSUMPTION_DURATION:.3f})'[vfalse]"
+        )
+        input_index += 1
+        video_chain = "[vfalse]"
+    else:
+        video_chain = "[0:v]"
+
+    inputs += ["-itsoffset", f"{phase_times['midpoint_time']:.3f}", "-i", str(midpoint_clip)]
+    filter_parts.append(
+        f"{video_chain}[{input_index}:v]overlay=enable='between(t,{phase_times['midpoint_time']:.3f},"
+        f"{phase_times['midpoint_time'] + MIDPOINT_OVERLAY_DURATION:.3f})'[vfinal]"
+    )
+    input_index += 1
+
+    inputs += ["-i", str(audio_path)]
+
+    _run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            *inputs,
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[vfinal]",
+            "-map",
+            f"{input_index}:a",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-threads",
+            str(monitored_threads()),
+            "-c:a",
+            "aac",
+            "-t",
+            f"{audio_duration:.3f}",
+            "-shortest",
+            str(output_path),
+        ]
+    )
+
+
+def _build_visual_track(script_text: str, audio_duration: float, audio_path: Path, output_path: Path) -> None:
     pools = _load_broll_pools()
     indices: dict[str, int] = {}
-    segments = _segment_schedule(audio_duration)
     timings = _sentence_timings(script_text, audio_duration)
     phase_times = _resolve_phase_times(timings, audio_duration)
 
-    visual_clips: list[VideoFileClip] = []
-    for start, end in segments:
-        intent = _intent_for_time(start, phase_times)
-        clip_path = _select_clip_for_intent(intent, pools, indices)
-        duration = end - start
-        if clip_path:
-            clip = VideoFileClip(str(clip_path)).without_audio()
-        else:
-            clip = background.subclip(start, end)
-        if clip.duration <= 0:
-            clip = background.subclip(start, end)
-        if clip.duration < duration:
-            clip = clip.fx(vfx.loop, duration=duration)
-        clip = _fit_background(clip)
-        clip = _apply_motion(clip, duration)
-        visual_clips.append(clip.set_duration(duration))
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        intent_blocks = _intent_blocks(phase_times, audio_duration)
+        block_paths: list[Path] = []
+        for intent, start, end in intent_blocks:
+            duration = max(0.0, end - start)
+            if duration <= 0:
+                continue
+            block_paths.append(_render_intent_block(intent, duration, pools, indices, temp_path))
 
-    base_track = concatenate_videoclips(visual_clips, method="compose")
+        concat_file = _write_concat_file([(path, _probe_duration(path)) for path in block_paths], temp_path)
+        base_video = temp_path / "base_visuals.mp4"
+        _run_ffmpeg(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_file),
+                "-c",
+                "copy",
+                str(base_video),
+            ]
+        )
 
-    overlays: list[VideoFileClip] = []
-    midpoint_time = phase_times["midpoint_time"]
-    clarity_overlay = _midpoint_overlay_clip(MIDPOINT_OVERLAY_TEXT, 3.5)
-    clarity_overlay = clarity_overlay.fx(vfx.fadein, 0.4).fx(vfx.fadeout, 0.4)
-    overlays.append(clarity_overlay.set_start(midpoint_time))
+        false_clip = _render_false_assumption_clip(pools, indices, temp_path)
+        midpoint_overlay = _render_midpoint_overlay(temp_path)
 
-    false_time = phase_times["false_time"]
-    false_clip = _false_assumption_clip(pools, indices, duration=2.8)
-    if false_clip is not None:
-        overlays.append(false_clip.set_start(false_time))
-
-    return base_track, overlays
+        _compose_with_overlays(
+            base_video=base_video,
+            audio_path=audio_path,
+            false_clip=false_clip,
+            midpoint_clip=midpoint_overlay,
+            phase_times=phase_times,
+            audio_duration=audio_duration,
+            output_path=output_path,
+        )
 
 
 def _midpoint_overlay_clip(text: str, duration: float) -> ImageClip:
@@ -424,32 +667,7 @@ def build_video(
     if audio_duration <= 0:
         audio_clip.close()
         raise RuntimeError("Audio duration is zero.")
-    visual_track, overlays = _build_visual_track(script_text, audio_duration)
-    layers = [visual_track] + overlays
-
-    final_video = CompositeVideoClip(layers, size=TARGET_RESOLUTION)
-    final_video = final_video.set_duration(audio_duration)
-    final_video = final_video.set_audio(audio_clip)
-
-    guard = ResourceGuard("video_render")
-    guard.start()
-    try:
-        final_video.write_videofile(
-            str(output_path),
-            codec="libx264",
-            audio_codec="aac",
-            fps=TARGET_FPS,
-            threads=monitored_threads(),
-            preset="medium",
-            temp_audiofile=str(output_path.with_suffix(".temp-audio.m4a")),
-            remove_temp=True,
-        )
-    finally:
-        guard.stop()
-
-    visual_track.close()
-    for overlay in overlays:
-        overlay.close()
+    _build_visual_track(script_text, audio_duration, audio_path, output_path)
     audio_clip.close()
 
     return VideoBuildResult(output_path=output_path, duration_seconds=audio_duration)
