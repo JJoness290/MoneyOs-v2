@@ -87,6 +87,7 @@ def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
         f"Families asked why emergency checks paused, and {ally} had no answer.",
         f"{protagonist} kept digging while rumors circled back to blame.",
         "Each explanation sounded like a cover story and none solved the timing.",
+        "By this point, one thing was clear: the transfer was deliberate, and the clock was forcing hard choices.",
         "A second ledger copy carried a prepared statement labeled for discovery.",
         "The statement blamed a hacker, yet the logs showed no breach.",
         f"{protagonist} concluded the choice came from inside.",

@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from app.config import VIDEO_DIR
 from app.core.pipeline import PipelineResult, run_pipeline
+from app.core.system_specs import get_system_specs
 
 app = FastAPI()
 
@@ -65,6 +66,11 @@ def _run_job(job_id: str) -> None:
 async def ui() -> HTMLResponse:
     index_path = Path(__file__).parent / "ui" / "index.html"
     return HTMLResponse(index_path.read_text(encoding="utf-8"))
+
+
+@app.get("/api/system/specs")
+async def system_specs() -> JSONResponse:
+    return JSONResponse(get_system_specs())
 
 
 @app.post("/generate")

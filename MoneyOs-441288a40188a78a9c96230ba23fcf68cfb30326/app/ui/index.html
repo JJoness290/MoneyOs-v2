@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MoneyOS – TikTok Generator</title>
+  <title>MoneyOS – Video Generator</title>
   <style>
     body {
       font-family: "Segoe UI", sans-serif;
@@ -60,13 +60,19 @@
 </head>
 <body>
   <div class="panel">
-    <h1>MoneyOS – TikTok Generator</h1>
+    <h1>MoneyOS – Video Generator</h1>
     <button id="generateButton">Generate Video</button>
     <div class="status">
       <div><span class="label">Status:</span> <span id="statusText">Idle</span></div>
       <div class="output"><span class="label">Output:</span> <span id="outputPath">-</span></div>
       <div><span class="label">Duration:</span> <span id="outputDuration">-</span></div>
       <div><span class="label">STATUS:</span> <span id="finalStatus">Idle</span></div>
+    </div>
+    <div class="status">
+      <div><span class="label">CPU:</span> <span id="cpuSpec">-</span></div>
+      <div><span class="label">RAM:</span> <span id="ramSpec">-</span></div>
+      <div><span class="label">GPU:</span> <span id="gpuSpec">-</span></div>
+      <div><span class="label">Caps:</span> <span id="capSpec">-</span></div>
     </div>
   </div>
 
@@ -76,7 +82,37 @@
     const outputPath = document.getElementById('outputPath');
     const outputDuration = document.getElementById('outputDuration');
     const finalStatus = document.getElementById('finalStatus');
+    const cpuSpec = document.getElementById('cpuSpec');
+    const ramSpec = document.getElementById('ramSpec');
+    const gpuSpec = document.getElementById('gpuSpec');
+    const capSpec = document.getElementById('capSpec');
     let polling = null;
+
+    async function loadSystemSpecs() {
+      try {
+        const response = await fetch('/api/system/specs');
+        if (!response.ok) {
+          throw new Error('Specs unavailable');
+        }
+        const data = await response.json();
+        const cpu = data.cpu_model ? `${data.cpu_model} (${data.physical_cores}C/${data.logical_threads}T)` : '-';
+        const ram = data.total_ram_gb ? `${data.total_ram_gb} GB` : '-';
+        const gpus = Array.isArray(data.gpus) && data.gpus.length ? data.gpus.join(', ') : 'Unavailable';
+        const caps = data.caps
+          ? `CPU ${data.caps.cpu_percent}% / RAM ${data.caps.ram_percent}% / GPU ${data.caps.gpu_percent}%`
+          : '-';
+        cpuSpec.textContent = cpu;
+        ramSpec.textContent = ram;
+        gpuSpec.textContent = gpus;
+        capSpec.textContent = caps;
+      } catch (error) {
+        console.error(error);
+        cpuSpec.textContent = 'Unavailable';
+        ramSpec.textContent = 'Unavailable';
+        gpuSpec.textContent = 'Unavailable';
+        capSpec.textContent = '-';
+      }
+    }
 
     async function pollStatus(jobId) {
       try {
@@ -117,6 +153,8 @@
 
       polling = setInterval(() => pollStatus(jobId), 1000);
     });
+
+    loadSystemSpecs();
   </script>
 </body>
 </html>

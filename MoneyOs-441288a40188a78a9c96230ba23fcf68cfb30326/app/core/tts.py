@@ -8,6 +8,7 @@ import edge_tts
 from moviepy.editor import AudioClip, AudioFileClip, concatenate_audioclips
 
 from app.config import DEFAULT_VOICE
+from app.core.resource_guard import ResourceGuard, monitored_threads
 
 
 @dataclass
@@ -113,7 +114,16 @@ def generate_tts(script_text: str, output_path: Path, voice: str = DEFAULT_VOICE
         clips.append(AudioClip(lambda t: 0.0, duration=silence_duration, fps=44100))
 
     final_audio = concatenate_audioclips(clips)
-    final_audio.write_audiofile(str(output_path), logger=None)
+    guard = ResourceGuard("audio_render")
+    guard.start()
+    try:
+        final_audio.write_audiofile(
+            str(output_path),
+            logger=None,
+            ffmpeg_params=["-threads", str(monitored_threads())],
+        )
+    finally:
+        guard.stop()
     final_audio.close()
     for clip in clips:
         clip.close()

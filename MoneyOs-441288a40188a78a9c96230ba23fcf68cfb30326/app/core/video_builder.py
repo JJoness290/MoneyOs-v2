@@ -13,6 +13,7 @@ if not hasattr(Image, "ANTIALIAS"):
 from moviepy.editor import AudioFileClip, CompositeVideoClip, ImageClip, VideoFileClip, concatenate_videoclips
 
 from app.config import MINECRAFT_BG_DIR, TARGET_FPS, TARGET_RESOLUTION
+from app.core.resource_guard import ResourceGuard, monitored_threads
 
 
 @dataclass
@@ -216,16 +217,21 @@ def build_video(
     final_video = final_video.set_duration(audio_duration)
     final_video = final_video.set_audio(audio_clip)
 
-    final_video.write_videofile(
-        str(output_path),
-        codec="libx264",
-        audio_codec="aac",
-        fps=TARGET_FPS,
-        threads=4,
-        preset="medium",
-        temp_audiofile=str(output_path.with_suffix(".temp-audio.m4a")),
-        remove_temp=True,
-    )
+    guard = ResourceGuard("video_render")
+    guard.start()
+    try:
+        final_video.write_videofile(
+            str(output_path),
+            codec="libx264",
+            audio_codec="aac",
+            fps=TARGET_FPS,
+            threads=monitored_threads(),
+            preset="medium",
+            temp_audiofile=str(output_path.with_suffix(".temp-audio.m4a")),
+            remove_temp=True,
+        )
+    finally:
+        guard.stop()
 
     background.close()
     audio_clip.close()

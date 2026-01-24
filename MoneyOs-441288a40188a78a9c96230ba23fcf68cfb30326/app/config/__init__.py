@@ -1,6 +1,6 @@
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 OUTPUT_DIR = BASE_DIR / "output"
 VIDEO_DIR = OUTPUT_DIR / "videos"
 AUDIO_DIR = OUTPUT_DIR / "audio"
