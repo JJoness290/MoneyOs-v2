@@ -39,6 +39,7 @@ def _set_status(job_id: str, status: str, result: Optional[PipelineResult] = Non
             payload["duration_mmss"] = _format_mmss(result.video.duration_seconds)
             payload["audio_duration"] = result.tts.duration_seconds
             payload["audio_duration_mmss"] = _format_mmss(result.tts.duration_seconds)
+            payload["script_path"] = str(result.script_path.resolve())
             payload["word_count"] = result.word_count
             payload["titles"] = result.titles
             payload["description"] = result.description
