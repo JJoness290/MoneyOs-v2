@@ -106,25 +106,28 @@ def sample_frame_yavg(path: Path, ts: float) -> tuple[float | None, str]:
         "-frames:v",
         "1",
         "-vf",
-        "signalstats,metadata=print:file=pipe:1",
+        "signalstats,metadata=mode=print:file=-",
         "-f",
         "null",
         "NUL",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    stdout = result.stdout or ""
-    stderr = result.stderr or ""
-    match = re.search(r"lavfi\\.signalstats\\.YAVG=([0-9]+(\\.[0-9]+)?)", stdout)
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    output = result.stdout or ""
+    match = re.search(r"lavfi\\.signalstats\\.YAVG=([0-9]+(?:\\.[0-9]+)?)", output)
     if not match:
-        match = re.search(r"lavfi\\.signalstats\\.YAVG=([0-9]+(\\.[0-9]+)?)", stderr)
-    if not match:
-        combined = (stdout + "\n" + stderr).strip()
-        return None, combined[:2000]
+        lines = output.splitlines()
+        return None, "\n".join(lines[:80])
     try:
         return float(match.group(1)), ""
     except ValueError:
-        combined = (stdout + "\n" + stderr).strip()
-        return None, combined[:2000]
+        lines = output.splitlines()
+        return None, "\n".join(lines[:80])
 
 
 def _sample_timestamps(duration: float) -> list[float]:
@@ -153,7 +156,7 @@ def validate_visuals(path: Path) -> VisualValidation:
         return VisualValidation(False, "blackdetect", duration, black_duration, yavg_samples, md5_samples)
     yavg_values = [value for value, _ in yavg_samples if value is not None]
     if not yavg_values:
-        if debug_output and os.getenv("DEBUG_VISUALS") == "1":
+        if debug_output:
             debug_path = Path("output") / "debug" / "yavg_probe.txt"
             debug_path.parent.mkdir(parents=True, exist_ok=True)
             debug_path.write_text("\n\n".join(debug_output), encoding="utf-8")
