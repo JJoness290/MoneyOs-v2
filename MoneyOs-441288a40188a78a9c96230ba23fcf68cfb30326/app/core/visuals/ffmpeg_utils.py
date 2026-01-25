@@ -25,6 +25,10 @@ def run_ffmpeg(args: list[str], status_callback: StatusCallback = None, log_path
     try:
         command = " ".join(args)
         print("[ResourceGuard] FFmpeg command:", command)
+        if "-vf" in args:
+            filter_value = args[args.index("-vf") + 1]
+            print("[ResourceGuard] FFmpeg -vf filter:", filter_value)
+            _append_log(log_path, f"FFmpeg -vf filter: {filter_value}")
         result = subprocess.run(args, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             error_message = (

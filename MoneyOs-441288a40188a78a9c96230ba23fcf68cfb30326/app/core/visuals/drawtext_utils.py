@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 
 def escape_drawtext_text(text: str) -> str:
@@ -14,25 +15,23 @@ def escape_drawtext_text(text: str) -> str:
     )
 
 
-def _escape_fontfile(path: str) -> str:
-    return path.replace(":", "\\:")
+def escape_filtergraph_path(path: str) -> str:
+    return path.replace("\\", "/").replace(":", "\\:").replace(",", "\\,")
 
 
 def fontfile_path() -> str | None:
-    local_font = Path.cwd() / "arial.ttf"
+    env_font = os.getenv("MONEYOS_FONTFILE")
+    if env_font:
+        env_path = Path(env_font)
+        if env_path.exists():
+            return escape_filtergraph_path(env_path.as_posix())
+    local_font = Path(__file__).resolve().parents[2] / "assets" / "fonts" / "arial.ttf"
     windows_font = Path("C:/Windows/Fonts/arial.ttf")
-    linux_font = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
     if local_font.exists():
-        return _escape_fontfile(local_font.as_posix())
+        return escape_filtergraph_path(local_font.as_posix())
     if windows_font.exists():
-        return _escape_fontfile(windows_font.as_posix())
-    if linux_font.exists():
-        return _escape_fontfile(linux_font.as_posix())
+        return escape_filtergraph_path(windows_font.as_posix())
     return None
-
-
-def escape_drawtext_path(path: str) -> str:
-    return path.replace("\\", "/").replace(":", "\\:")
 
 
 def build_drawtext_filter(
@@ -42,20 +41,23 @@ def build_drawtext_filter(
     fontsize: int,
     enable: str | None = None,
     is_timecode: bool = False,
-    use_fontfile: bool = False,
+    use_fontfile: bool = True,
     textfile: str | None = None,
 ) -> str:
     if textfile:
         safe_text = None
     else:
         safe_text = text if is_timecode else escape_drawtext_text(text)
-    font_spec = "font='Arial'"
     if use_fontfile:
         font_path = fontfile_path()
         if font_path:
-            font_spec = f"font='Arial':fontfile={font_path}"
+            font_spec = f"fontfile={font_path}"
+        else:
+            font_spec = "font='Arial'"
+    else:
+        font_spec = "font='Arial'"
     parts = [
-        f"text='{safe_text}'" if safe_text is not None else f"textfile={escape_drawtext_path(textfile)}",
+        f"text='{safe_text}'" if safe_text is not None else f"textfile={escape_filtergraph_path(textfile)}",
         font_spec,
         f"x={x}",
         f"y={y}",

@@ -62,8 +62,8 @@ def add_text_overlay(
         if not fontfile_path():
             raise
         filters = [
-            build_drawtext_filter("MONEYOS VISUALS OK", "40", "40", 40, use_fontfile=True),
-            build_drawtext_filter("%{pts\\:hms}", "40", "100", 36, is_timecode=True, use_fontfile=True),
+            build_drawtext_filter("MONEYOS VISUALS OK", "40", "40", 40, use_fontfile=False),
+            build_drawtext_filter("%{pts\\:hms}", "40", "100", 36, is_timecode=True, use_fontfile=False),
         ]
         if text and textfile_path:
             filters.append(
@@ -73,7 +73,7 @@ def add_text_overlay(
                     "(h-text_h)/2",
                     64,
                     enable=enable,
-                    use_fontfile=True,
+                    use_fontfile=False,
                     textfile=str(textfile_path),
                 )
             )

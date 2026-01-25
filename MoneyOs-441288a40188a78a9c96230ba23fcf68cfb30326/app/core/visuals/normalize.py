@@ -59,8 +59,8 @@ def normalize_clip(
         if not (os.getenv("DEBUG_VISUALS") == "1" and debug_label and fontfile_path()):
             raise
         filters = [
-            build_drawtext_filter(debug_label, "40", "40", 32, use_fontfile=True, textfile=str(textfile_path)),
-            build_drawtext_filter("%{pts\\:hms}", "40", "90", 28, is_timecode=True, use_fontfile=True),
+            build_drawtext_filter(debug_label, "40", "40", 32, use_fontfile=False, textfile=str(textfile_path)),
+            build_drawtext_filter("%{pts\\:hms}", "40", "90", 28, is_timecode=True, use_fontfile=False),
         ]
         filter_chain = ",".join([base_filter, *filters])
         args[args.index("-vf") + 1] = filter_chain
