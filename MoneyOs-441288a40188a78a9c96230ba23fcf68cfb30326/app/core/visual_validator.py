@@ -109,17 +109,16 @@ def sample_frame_yavg(path: Path, ts: float) -> tuple[float | None, str]:
         "signalstats,metadata=mode=print:file=-",
         "-f",
         "null",
-        "NUL",
+        os.devnull,
     ]
     result = subprocess.run(
         cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        capture_output=True,
         text=True,
         check=False,
     )
-    output = result.stdout or ""
-    match = re.search(r"lavfi\\.signalstats\\.YAVG=([0-9]+(?:\\.[0-9]+)?)", output)
+    output = (result.stdout or "") + (result.stderr or "")
+    match = re.search(r"lavfi\.signalstats\.YAVG=([0-9]+(?:\.[0-9]+)?)", output)
     if not match:
         lines = output.splitlines()
         return None, "\n".join(lines[:80])
