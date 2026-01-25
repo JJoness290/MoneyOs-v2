@@ -100,41 +100,6 @@ def _resolve_phase_times(timings: list[tuple[str, float, float]], audio_duration
     }
 
 
-def _segment_schedule(audio_duration: float) -> list[tuple[float, float]]:
-    if audio_duration <= 0:
-        return []
-    target_segment = 4.5
-    segment_count = max(1, round(audio_duration / target_segment))
-    segment_duration = audio_duration / segment_count
-    while segment_duration < 3.0:
-        segment_count = max(1, segment_count - 1)
-        segment_duration = audio_duration / segment_count
-    while segment_duration > 6.0:
-        segment_count += 1
-        segment_duration = audio_duration / segment_count
-    segments = []
-    current = 0.0
-    for index in range(segment_count):
-        end = audio_duration if index == segment_count - 1 else current + segment_duration
-        segments.append((current, end))
-        current = end
-    return segments
-
-
-def _intent_for_time(moment: float, phase_times: dict[str, float]) -> str:
-    if moment >= phase_times["landing_start"]:
-        return "landing"
-    if moment >= phase_times["payoff_start"]:
-        return "payoff"
-    if moment >= phase_times["turn_start"]:
-        return "turn"
-    if phase_times["midpoint_time"] <= moment < phase_times["turn_start"]:
-        return "escalation"
-    if moment < phase_times["discovery_end"]:
-        return "discovery"
-    return "escalation"
-
-
 def _intent_blocks(phase_times: dict[str, float], audio_duration: float) -> list[tuple[str, float, float]]:
     return [
         ("discovery", 0.0, phase_times["discovery_end"]),
@@ -199,18 +164,6 @@ def _probe_duration(path: Path) -> float:
         return 0.0
 
 
-def _write_concat_file(entries: list[tuple[Path, float]], output_dir: Path) -> Path:
-    concat_path = output_dir / "concat.txt"
-    lines = []
-    for path, duration in entries:
-        lines.append(f"file '{path.as_posix()}'")
-        lines.append(f"duration {duration:.3f}")
-    if entries:
-        lines.append(f"file '{entries[-1][0].as_posix()}'")
-    concat_path.write_text("\n".join(lines), encoding="utf-8")
-    return concat_path
-
-
 def _render_intent_block(
     intent: str,
     duration: float,
@@ -243,7 +196,15 @@ def _render_intent_block(
             status_callback,
             f"Normalizing clip {index}/{total} -> 1920x1080 yuv420p 30fps",
         )
-        normalize_clip(clip_path, normalized_path, status_callback=status_callback, log_path=log_path)
+        label = f"SEG {clip_index}: {clip_path.name}"
+        normalize_clip(
+            clip_path,
+            normalized_path,
+            duration=slice_duration,
+            debug_label=label,
+            status_callback=status_callback,
+            log_path=log_path,
+        )
         entries.append((normalized_path, slice_duration))
         clip_index += 1
 
@@ -293,19 +254,20 @@ def _build_visual_track(
         base_video = temp_path / "base_visuals.mp4"
         if clip_entries:
             _log_status(status_callback, "Concatenating normalized clips")
-            concat_file = _write_concat_file(clip_entries, temp_path)
+            inputs = []
+            for path, _ in clip_entries:
+                inputs += ["-i", str(path)]
+            filter_parts = [f"[{index}:v]" for index in range(len(clip_entries))]
+            filter_complex = "".join(filter_parts) + f"concat=n={len(clip_entries)}:v=1:a=0[v]"
             run_ffmpeg(
                 [
                     "ffmpeg",
                     "-y",
-                    "-fflags",
-                    "+genpts",
-                    "-f",
-                    "concat",
-                    "-safe",
-                    "0",
-                    "-i",
-                    str(concat_file),
+                    *inputs,
+                    "-filter_complex",
+                    filter_complex,
+                    "-map",
+                    "[v]",
                     "-r",
                     str(TARGET_FPS),
                     "-c:v",
@@ -351,13 +313,14 @@ def _build_visual_track(
         visuals_for_output = overlay_video
         if not validate_video(overlay_video, audio_duration, log_path=log_path):
             _log_status(status_callback, "Overlay visuals failed validation; entering safe mode")
+            fallback_text = "FALLBACK ACTIVE - VISUALS FAILED"
             safe_visuals = temp_path / "safe_visuals.mp4"
             success = rebuild_safe_mode(
                 audio_duration,
                 safe_visuals,
-                MIDPOINT_OVERLAY_TEXT,
-                phase_times["midpoint_time"],
-                phase_times["midpoint_time"] + MIDPOINT_OVERLAY_DURATION,
+                fallback_text,
+                0.0,
+                audio_duration,
                 status_callback=status_callback,
                 log_path=log_path,
             )
@@ -391,7 +354,8 @@ def _build_visual_track(
                 "aac",
                 "-b:a",
                 "160k",
-                "-shortest",
+                "-t",
+                f"{audio_duration:.3f}",
                 "-movflags",
                 "+faststart",
                 str(output_path),
@@ -402,13 +366,14 @@ def _build_visual_track(
 
         if not validate_video(output_path, audio_duration, log_path=log_path):
             _log_status(status_callback, "Final video failed validation; rebuilding in safe mode")
+            fallback_text = "FALLBACK ACTIVE - VISUALS FAILED"
             safe_visuals = temp_path / "final_safe_visuals.mp4"
             if rebuild_safe_mode(
                 audio_duration,
                 safe_visuals,
-                MIDPOINT_OVERLAY_TEXT,
-                phase_times["midpoint_time"],
-                phase_times["midpoint_time"] + MIDPOINT_OVERLAY_DURATION,
+                fallback_text,
+                0.0,
+                audio_duration,
                 status_callback=status_callback,
                 log_path=log_path,
             ):
@@ -440,7 +405,8 @@ def _build_visual_track(
                         "aac",
                         "-b:a",
                         "160k",
-                        "-shortest",
+                        "-t",
+                        f"{audio_duration:.3f}",
                         "-movflags",
                         "+faststart",
                         str(output_path),
