@@ -8,7 +8,7 @@ import subprocess
 from app.config import TARGET_FPS, TARGET_RESOLUTION
 from app.core.resource_guard import monitored_threads
 from app.core.visuals.drawtext_utils import build_drawtext_filter
-from app.core.visuals.ffmpeg_utils import run_ffmpeg, select_video_encoder
+from app.core.visuals.ffmpeg_utils import encoder_uses_threads, run_ffmpeg, select_video_encoder
 
 
 @dataclass
@@ -150,27 +150,26 @@ def validate_visuals(path: Path) -> VisualValidation:
 
 def generate_fallback_visuals(duration: float, output_path: Path) -> None:
     width, height = TARGET_RESOLUTION
-    encode_args, _ = select_video_encoder()
+    encode_args, encoder_name = select_video_encoder()
     filters = [
         build_drawtext_filter("FALLBACK VISUALS", "40", "40", 48),
         build_drawtext_filter("%{pts\\:hms}", "40", "110", 36, is_timecode=True),
     ]
     filter_chain = ",".join(filters)
-    run_ffmpeg(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            f"testsrc2=size={width}x{height}:rate={TARGET_FPS}",
-            "-t",
-            f"{duration:.3f}",
-            "-vf",
-            filter_chain,
-            *encode_args,
-            "-threads",
-            str(monitored_threads()),
-            str(output_path),
-        ]
-    )
+    args = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc2=size={width}x{height}:rate={TARGET_FPS}",
+        "-t",
+        f"{duration:.3f}",
+        "-vf",
+        filter_chain,
+        *encode_args,
+        str(output_path),
+    ]
+    if encoder_uses_threads(encoder_name):
+        args += ["-threads", str(monitored_threads())]
+    run_ffmpeg(args)

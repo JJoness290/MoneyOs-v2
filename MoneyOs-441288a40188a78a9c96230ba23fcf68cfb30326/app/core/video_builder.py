@@ -18,7 +18,7 @@ from app.config import BROLL_DIR, OUTPUT_DIR, TARGET_FPS, TARGET_RESOLUTION
 from app.core.resource_guard import monitored_threads
 from app.core.visual_validator import generate_fallback_visuals, validate_visuals
 from app.core.visuals.base_bg import build_base_bg
-from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg
+from app.core.visuals.ffmpeg_utils import StatusCallback, encoder_uses_threads, run_ffmpeg, select_video_encoder
 from app.core.visuals.normalize import normalize_clip
 from app.core.visuals.overlay_text import add_text_overlay
 
@@ -321,40 +321,35 @@ def _build_visual_track(
             if not overlay_validation.ok:
                 raise RuntimeError(f"Overlay fallback failed validation: {overlay_validation.reason}")
 
+        encode_args, encoder_name = select_video_encoder()
+        mux_args = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(visuals_for_output),
+            "-i",
+            str(audio_path),
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-r",
+            str(TARGET_FPS),
+            *encode_args,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            "-t",
+            f"{audio_duration:.3f}",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        if encoder_uses_threads(encoder_name):
+            mux_args += ["-threads", str(monitored_threads())]
         run_ffmpeg(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(visuals_for_output),
-                "-i",
-                str(audio_path),
-                "-map",
-                "0:v",
-                "-map",
-                "1:a",
-                "-r",
-                str(TARGET_FPS),
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-crf",
-                "23",
-                "-preset",
-                "veryfast",
-                "-threads",
-                str(monitored_threads()),
-                "-c:a",
-                "aac",
-                "-b:a",
-                "160k",
-                "-t",
-                f"{audio_duration:.3f}",
-                "-movflags",
-                "+faststart",
-                str(output_path),
-            ],
+            mux_args,
             status_callback=status_callback,
             log_path=log_path,
         )
@@ -364,40 +359,35 @@ def _build_visual_track(
             _log_status(status_callback, f"Final video failed validation ({final_validation.reason}); using fallback")
             fallback_visuals = temp_path / "final_fallback.mp4"
             generate_fallback_visuals(audio_duration, fallback_visuals)
+            encode_args, encoder_name = select_video_encoder()
+            mux_args = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(fallback_visuals),
+                "-i",
+                str(audio_path),
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-r",
+                str(TARGET_FPS),
+                *encode_args,
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-t",
+                f"{audio_duration:.3f}",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
+            if encoder_uses_threads(encoder_name):
+                mux_args += ["-threads", str(monitored_threads())]
             run_ffmpeg(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    str(fallback_visuals),
-                    "-i",
-                    str(audio_path),
-                    "-map",
-                    "0:v",
-                    "-map",
-                    "1:a",
-                    "-r",
-                    str(TARGET_FPS),
-                    "-c:v",
-                    "libx264",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-crf",
-                    "23",
-                    "-preset",
-                    "veryfast",
-                    "-threads",
-                    str(monitored_threads()),
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "160k",
-                    "-t",
-                    f"{audio_duration:.3f}",
-                    "-movflags",
-                    "+faststart",
-                    str(output_path),
-                ],
+                mux_args,
                 status_callback=status_callback,
                 log_path=log_path,
             )

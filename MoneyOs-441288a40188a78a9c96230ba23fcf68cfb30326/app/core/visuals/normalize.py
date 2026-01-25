@@ -6,7 +6,7 @@ import os
 from app.config import TARGET_FPS, TARGET_RESOLUTION
 from app.core.resource_guard import monitored_threads
 from app.core.visuals.drawtext_utils import build_drawtext_filter, fontfile_path
-from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg, select_video_encoder
+from app.core.visuals.ffmpeg_utils import StatusCallback, encoder_uses_threads, run_ffmpeg, select_video_encoder
 
 
 def normalize_clip(
@@ -47,10 +47,10 @@ def normalize_clip(
     args += [
         *encode_args,
         "-an",
-        "-threads",
-        str(monitored_threads()),
         str(output_path),
     ]
+    if encoder_uses_threads(encoder_name):
+        args += ["-threads", str(monitored_threads())]
     if status_callback:
         status_callback(f"Normalizing clip -> 1920x1080 yuv420p 30fps ({encoder_name})")
     try:

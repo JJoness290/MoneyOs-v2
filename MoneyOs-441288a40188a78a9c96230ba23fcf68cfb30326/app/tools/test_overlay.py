@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.core.visuals.drawtext_utils import build_drawtext_filter
-from app.core.visuals.ffmpeg_utils import run_ffmpeg
+from app.core.visuals.ffmpeg_utils import run_ffmpeg, select_video_encoder
 
 
 def main() -> int:
@@ -15,6 +15,7 @@ def main() -> int:
         build_drawtext_filter("Overlay test: A:B,C % 100%\nOK", "40", "160", 32),
     ]
     filter_chain = ",".join(filters)
+    encode_args, encoder_name = select_video_encoder()
     args = [
         "ffmpeg",
         "-y",
@@ -26,10 +27,7 @@ def main() -> int:
         "3",
         "-vf",
         filter_chain,
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
+        *encode_args,
         str(output_path),
     ]
     try:

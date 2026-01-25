@@ -5,7 +5,7 @@ from pathlib import Path
 from app.config import TARGET_FPS
 from app.core.resource_guard import monitored_threads
 from app.core.visuals.drawtext_utils import build_drawtext_filter, fontfile_path
-from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg, select_video_encoder
+from app.core.visuals.ffmpeg_utils import StatusCallback, encoder_uses_threads, run_ffmpeg, select_video_encoder
 
 
 def add_text_overlay(
@@ -50,10 +50,10 @@ def add_text_overlay(
         str(TARGET_FPS),
         *encode_args,
         "-an",
-        "-threads",
-        str(monitored_threads()),
         str(output_path),
     ]
+    if encoder_uses_threads(encoder_name):
+        args += ["-threads", str(monitored_threads())]
     if status_callback:
         status_callback(f"Burning text overlays ({encoder_name})")
     try:

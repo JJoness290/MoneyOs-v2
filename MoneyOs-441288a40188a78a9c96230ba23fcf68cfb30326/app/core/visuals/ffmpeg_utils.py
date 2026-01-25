@@ -59,14 +59,15 @@ def has_nvenc() -> bool:
 def select_video_encoder() -> tuple[list[str], str]:
     use_gpu = os.getenv("MONEYOS_USE_GPU", "0") == "1"
     if use_gpu and has_nvenc():
-        print("[FFmpeg] Using NVENC encoder (h264_nvenc)")
-        return (
-            ["-c:v", "h264_nvenc", "-pix_fmt", "yuv420p", "-preset", "p4", "-cq", "23"],
-            "h264_nvenc",
-        )
+        args = ["-c:v", "h264_nvenc", "-pix_fmt", "yuv420p", "-preset", "p4", "-cq", "23"]
+        print("[ResourceGuard] Encoder: h264_nvenc args:", " ".join(args))
+        return (args, "h264_nvenc")
     if use_gpu:
         print("[FFmpeg] NVENC not available; falling back to libx264")
-    return (
-        ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "veryfast"],
-        "libx264",
-    )
+    args = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "veryfast"]
+    print("[ResourceGuard] Encoder: libx264 args:", " ".join(args))
+    return (args, "libx264")
+
+
+def encoder_uses_threads(encoder_name: str) -> bool:
+    return encoder_name == "libx264"
