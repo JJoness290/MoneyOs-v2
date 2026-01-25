@@ -17,6 +17,7 @@ from moviepy.editor import AudioFileClip, ImageClip
 from app.config import BROLL_DIR, OUTPUT_DIR, TARGET_FPS, TARGET_RESOLUTION
 from app.core.resource_guard import monitored_threads
 from app.core.visual_validator import generate_fallback_visuals, validate_visuals
+from app.core.visuals.base_bg import build_base_bg
 from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg
 from app.core.visuals.normalize import normalize_clip
 from app.core.visuals.overlay_text import add_text_overlay
