@@ -25,7 +25,7 @@ def build_base_bg(
         "-t",
         f"{duration_s:.3f}",
         "-vf",
-        "format=yuv420p,eq=brightness=0.08:contrast=1.15",
+        "format=yuv420p,eq=brightness=0.18:contrast=1.18:gamma=1.15",
         *encode_args,
         str(out_path),
     ]

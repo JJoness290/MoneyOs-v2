@@ -96,14 +96,15 @@ def sample_frame_yavg(path: Path, ts: float) -> float | None:
     result = subprocess.run(
         [
             "ffmpeg",
+            "-hide_banner",
             "-ss",
             f"{ts:.3f}",
             "-i",
             str(path),
-            "-vf",
-            "signalstats",
             "-frames:v",
             "1",
+            "-vf",
+            "signalstats,metadata=print:file=-",
             "-f",
             "null",
             "-",
@@ -112,7 +113,8 @@ def sample_frame_yavg(path: Path, ts: float) -> float | None:
         text=True,
         check=False,
     )
-    match = re.search(r"YAVG:([0-9.]+)", result.stderr)
+    combined_output = f"{result.stdout}\n{result.stderr}"
+    match = re.search(r"lavfi\\.signalstats\\.YAVG=([0-9.]+)", combined_output)
     if not match:
         return None
     try:
@@ -140,7 +142,9 @@ def validate_visuals(path: Path) -> VisualValidation:
     if black_duration >= 0.95 * duration:
         return VisualValidation(False, "blackdetect", duration, black_duration, yavg_samples, md5_samples)
     yavg_values = [value for value, _ in yavg_samples if value is not None]
-    if not yavg_values or all(value < 30.0 for value in yavg_values):
+    if not yavg_values:
+        return VisualValidation(False, "yavg_parse_failed", duration, black_duration, yavg_samples, md5_samples)
+    if all(value < 30.0 for value in yavg_values):
         return VisualValidation(False, "low_brightness", duration, black_duration, yavg_samples, md5_samples)
     md5_values = [value for value, _ in md5_samples if value is not None]
     if len(md5_values) >= 2 and len(set(md5_values)) <= len(md5_values) - 1:
