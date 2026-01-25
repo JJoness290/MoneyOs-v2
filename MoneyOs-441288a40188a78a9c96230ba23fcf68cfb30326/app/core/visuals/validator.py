@@ -54,8 +54,11 @@ def _signalstats_yavg(video_path: Path, timestamp: float) -> float | None:
     combined = f"{result.stdout}\n{result.stderr}"
     match = re.search(r"lavfi\\.signalstats\\.YAVG=([0-9]+(?:\\.[0-9]+)?)", combined)
     if not match:
-        match = re.search(r"YAVG:([0-9.]+)", combined)
+        match = re.search(r"\\bYAVG[:=]([0-9]+(?:\\.[0-9]+)?)", combined)
     if not match:
+        debug_path = Path("output") / "debug" / "yavg_probe.txt"
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        debug_path.write_text(combined[:2000], encoding="utf-8")
         return None
     try:
         return float(match.group(1))
