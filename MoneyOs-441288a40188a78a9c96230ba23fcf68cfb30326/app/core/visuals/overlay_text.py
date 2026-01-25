@@ -4,7 +4,7 @@ from pathlib import Path
 
 from app.config import TARGET_FPS
 from app.core.resource_guard import monitored_threads
-from app.core.visuals.drawtext_utils import drawtext_fontspec, escape_drawtext_text
+from app.core.visuals.drawtext_utils import build_drawtext_filter, fontfile_path
 from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg
 
 
@@ -17,24 +17,20 @@ def add_text_overlay(
     status_callback: StatusCallback = None,
     log_path: Path | None = None,
 ) -> None:
-    font_opt = drawtext_fontspec()
-    watermark = (
-        "drawtext=text='MONEYOS VISUALS OK'"
-        f":{font_opt}:x=40:y=40:fontsize=40:fontcolor=white:box=1:boxcolor=black@0.4"
-    )
-    timecode = (
-        "drawtext=text='%{pts\\:hms}'"
-        f":{font_opt}:x=40:y=100:fontsize=36:fontcolor=white:box=1:boxcolor=black@0.4"
-    )
-    filters = [watermark, timecode]
+    enable = f"between(t,{start:.3f},{end:.3f})"
+    filters = [
+        build_drawtext_filter("MONEYOS VISUALS OK", "40", "40", 40),
+        build_drawtext_filter("%{pts\\:hms}", "40", "100", 36, is_timecode=True),
+    ]
     if text:
-        escaped = escape_drawtext_text(text)
         filters.append(
-            "drawtext="
-            f"text='{escaped}'"
-            f":{font_opt}:x=(w-text_w)/2:y=(h-text_h)/2:"
-            "fontsize=64:fontcolor=white:box=1:boxcolor=black@0.4:"
-            f"enable='between(t,{start:.3f},{end:.3f})'"
+            build_drawtext_filter(
+                text,
+                "(w-text_w)/2",
+                "(h-text_h)/2",
+                64,
+                enable=enable,
+            )
         )
     filter_chain = ",".join(filters)
     args = [
@@ -61,4 +57,26 @@ def add_text_overlay(
     ]
     if status_callback:
         status_callback("Burning text overlays")
-    run_ffmpeg(args, status_callback=status_callback, log_path=log_path)
+    try:
+        run_ffmpeg(args, status_callback=status_callback, log_path=log_path)
+    except RuntimeError:
+        if not fontfile_path():
+            raise
+        filters = [
+            build_drawtext_filter("MONEYOS VISUALS OK", "40", "40", 40, use_fontfile=True),
+            build_drawtext_filter("%{pts\\:hms}", "40", "100", 36, is_timecode=True, use_fontfile=True),
+        ]
+        if text:
+            filters.append(
+                build_drawtext_filter(
+                    text,
+                    "(w-text_w)/2",
+                    "(h-text_h)/2",
+                    64,
+                    enable=enable,
+                    use_fontfile=True,
+                )
+            )
+        filter_chain = ",".join(filters)
+        args[args.index("-vf") + 1] = filter_chain
+        run_ffmpeg(args, status_callback=status_callback, log_path=log_path)

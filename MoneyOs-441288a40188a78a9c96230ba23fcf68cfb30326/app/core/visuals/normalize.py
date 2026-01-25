@@ -5,7 +5,7 @@ import os
 
 from app.config import TARGET_FPS, TARGET_RESOLUTION
 from app.core.resource_guard import monitored_threads
-from app.core.visuals.drawtext_utils import drawtext_fontspec, escape_drawtext_text
+from app.core.visuals.drawtext_utils import build_drawtext_filter, fontfile_path
 from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg
 
 
@@ -18,23 +18,18 @@ def normalize_clip(
     log_path: Path | None = None,
 ) -> None:
     width, height = TARGET_RESOLUTION
-    filter_chain = (
+    base_filter = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
         f"fps={TARGET_FPS},setsar=1,format=yuv420p"
     )
+    filter_chain = base_filter
     if os.getenv("DEBUG_VISUALS") == "1" and debug_label:
-        font_opt = drawtext_fontspec()
-        overlay_text = escape_drawtext_text(debug_label)
-        filter_chain = (
-            f"{filter_chain},"
-            "drawtext="
-            f"text='{overlay_text}':{font_opt}:x=40:y=40:fontsize=32:fontcolor=white:"
-            "box=1:boxcolor=black@0.4,"
-            "drawtext="
-            "text='%{pts\\:hms}'"
-            f":{font_opt}:x=40:y=90:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.4"
-        )
+        filters = [
+            build_drawtext_filter(debug_label, "40", "40", 32),
+            build_drawtext_filter("%{pts\\:hms}", "40", "90", 28, is_timecode=True),
+        ]
+        filter_chain = ",".join([base_filter, *filters])
     args = [
         "ffmpeg",
         "-y",
@@ -61,4 +56,15 @@ def normalize_clip(
     ]
     if status_callback:
         status_callback("Normalizing clip -> 1920x1080 yuv420p 30fps")
-    run_ffmpeg(args, status_callback=status_callback, log_path=log_path)
+    try:
+        run_ffmpeg(args, status_callback=status_callback, log_path=log_path)
+    except RuntimeError:
+        if not (os.getenv("DEBUG_VISUALS") == "1" and debug_label and fontfile_path()):
+            raise
+        filters = [
+            build_drawtext_filter(debug_label, "40", "40", 32, use_fontfile=True),
+            build_drawtext_filter("%{pts\\:hms}", "40", "90", 28, is_timecode=True, use_fontfile=True),
+        ]
+        filter_chain = ",".join([base_filter, *filters])
+        args[args.index("-vf") + 1] = filter_chain
+        run_ffmpeg(args, status_callback=status_callback, log_path=log_path)
