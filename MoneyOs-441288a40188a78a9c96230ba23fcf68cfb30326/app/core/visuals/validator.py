@@ -32,14 +32,17 @@ def _signalstats_yavg(video_path: Path, timestamp: float) -> float | None:
     result = subprocess.run(
         [
             "ffmpeg",
+            "-hide_banner",
+            "-v",
+            "info",
             "-ss",
             f"{timestamp:.3f}",
             "-i",
             str(video_path),
-            "-vf",
-            "signalstats",
             "-frames:v",
             "1",
+            "-vf",
+            "signalstats,metadata=mode=print:file=-",
             "-f",
             "null",
             "-",
@@ -48,7 +51,10 @@ def _signalstats_yavg(video_path: Path, timestamp: float) -> float | None:
         text=True,
         check=False,
     )
-    match = re.search(r"YAVG:([0-9.]+)", result.stderr)
+    combined = f"{result.stdout}\n{result.stderr}"
+    match = re.search(r"lavfi\\.signalstats\\.YAVG=([0-9]+(?:\\.[0-9]+)?)", combined)
+    if not match:
+        match = re.search(r"YAVG:([0-9.]+)", combined)
     if not match:
         return None
     try:
