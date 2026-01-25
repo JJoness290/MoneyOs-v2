@@ -1,11 +1,10 @@
 from dataclasses import dataclass
-import json
 import random
 import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Callable, Tuple
+from typing import Tuple
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -13,10 +12,16 @@ from PIL import Image, ImageDraw, ImageFont
 if not hasattr(Image, "ANTIALIAS"):
     setattr(Image, "ANTIALIAS", Image.Resampling.LANCZOS)
 
-from moviepy.editor import AudioFileClip, ImageClip, VideoFileClip, concatenate_videoclips, vfx
+from moviepy.editor import AudioFileClip, ImageClip
 
-from app.config import BROLL_DIR, MINECRAFT_BG_DIR, TARGET_FPS, TARGET_RESOLUTION
-from app.core.resource_guard import ResourceGuard, monitored_threads
+from app.config import BROLL_DIR, OUTPUT_DIR, TARGET_FPS, TARGET_RESOLUTION
+from app.core.resource_guard import monitored_threads
+from app.core.visuals.base_bg import build_base_bg
+from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg
+from app.core.visuals.normalize import normalize_clip
+from app.core.visuals.overlay_text import add_text_overlay
+from app.core.visuals.safe_mode import rebuild_safe_mode
+from app.core.visuals.validator import validate_video
 
 
 @dataclass
@@ -36,30 +41,9 @@ INTENT_POOLS = {
 }
 
 MIDPOINT_CLARITY_LINE = "By this point, one thing was clear"
-FALSE_ASSUMPTION_MARKER = "assumption did not survive the timeline"
 MIDPOINT_OVERLAY_TEXT = "One thing was clear by then"
 MIDPOINT_OVERLAY_DURATION = 3.5
-FALSE_ASSUMPTION_DURATION = 2.8
-TARGET_WIDTH = 1920
-TARGET_HEIGHT = 1080
 
-
-def _fit_background(clip: VideoFileClip) -> VideoFileClip:
-    target_w, target_h = TARGET_RESOLUTION
-    clip = clip.resize(height=target_h) if clip.h < target_h else clip.resize(height=target_h)
-    if clip.w < target_w:
-        clip = clip.resize(width=target_w)
-    x_center = clip.w / 2
-    y_center = clip.h / 2
-    return clip.crop(
-        x_center=x_center,
-        y_center=y_center,
-        width=target_w,
-        height=target_h,
-    )
-
-
-StatusCallback = Callable[[str], None] | None
 
 
 def _log_status(status_callback: StatusCallback, message: str) -> None:
@@ -67,170 +51,6 @@ def _log_status(status_callback: StatusCallback, message: str) -> None:
         status_callback(message)
 
 
-def normalize_visual(
-    input_path: Path,
-    output_path: Path,
-    duration: float | None = None,
-    status_callback: StatusCallback = None,
-    target_w: int = TARGET_WIDTH,
-    target_h: int = TARGET_HEIGHT,
-) -> None:
-    filter_chain = (
-        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
-        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
-        "setsar=1,"
-        f"fps={TARGET_FPS},"
-        "format=yuv420p"
-    )
-    args = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(input_path),
-        "-vf",
-        filter_chain,
-        "-an",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-preset",
-        "medium",
-        "-threads",
-        str(monitored_threads()),
-    ]
-    if duration is not None:
-        args += ["-t", f"{duration:.3f}"]
-    args.append(str(output_path))
-    _log_status(status_callback, "Normalizing clip -> 1920x1080 yuv420p 30fps")
-    _run_ffmpeg(args, status_callback=status_callback)
-
-
-def normalize_overlay(
-    input_path: Path,
-    output_path: Path,
-    status_callback: StatusCallback = None,
-    target_w: int = TARGET_WIDTH,
-    target_h: int = TARGET_HEIGHT,
-) -> None:
-    filter_chain = (
-        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
-        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
-        "setsar=1,"
-        f"fps={TARGET_FPS},"
-        "format=rgba"
-    )
-    args = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(input_path),
-        "-vf",
-        filter_chain,
-        "-an",
-        "-c:v",
-        "qtrle",
-        "-preset",
-        "medium",
-        "-threads",
-        str(monitored_threads()),
-        str(output_path),
-    ]
-    _log_status(status_callback, "Preparing midpoint overlay")
-    _run_ffmpeg(args, status_callback=status_callback)
-
-
-def _usage_path() -> Path:
-    return MINECRAFT_BG_DIR / ".usage.json"
-
-
-def _load_usage_history() -> list[str]:
-    path = _usage_path()
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
-    if isinstance(data, list):
-        return [str(item) for item in data]
-    return []
-
-
-def _save_usage_history(history: list[str]) -> None:
-    _usage_path().write_text(json.dumps(history[-200:]), encoding="utf-8")
-
-
-def _ensure_background_clips() -> list[Path]:
-    if not MINECRAFT_BG_DIR.exists() or not MINECRAFT_BG_DIR.is_dir():
-        return []
-    backgrounds = sorted(MINECRAFT_BG_DIR.glob("*.mp4"))
-    return backgrounds
-
-
-def _select_background(backgrounds: list[Path]) -> list[Path]:
-    if len(backgrounds) < 2:
-        raise RuntimeError("At least two background clips are required to prevent reuse.")
-    history = _load_usage_history()
-    last_used = history[-1] if history else None
-    candidates = [path for path in backgrounds if str(path) != last_used]
-    if not candidates:
-        raise RuntimeError("Unable to select a non-repeating background clip.")
-
-    def usage_index(path: Path) -> int:
-        try:
-            return history.index(str(path))
-        except ValueError:
-            return -1
-
-    ordered = sorted(candidates, key=usage_index)
-    return ordered
-
-
-def _load_background(audio_duration: float) -> VideoFileClip:
-    backgrounds = _ensure_background_clips()
-    if not backgrounds:
-        broll_candidates = sorted(BROLL_DIR.rglob("*.mp4"))
-        if broll_candidates:
-            clip = VideoFileClip(str(broll_candidates[0])).without_audio()
-            clip = _fit_background(clip)
-            if clip.duration < audio_duration:
-                clip = clip.fx(vfx.loop, duration=audio_duration)
-            return clip.subclip(0, audio_duration)
-        return _fallback_still_clip(audio_duration)
-    ordered = _select_background(backgrounds)
-    remaining = audio_duration
-    clips: list[VideoFileClip] = []
-    history = _load_usage_history()
-
-    for path in ordered:
-        if remaining <= 0:
-            break
-        clip = VideoFileClip(str(path)).without_audio()
-        clip = _fit_background(clip)
-        if clip.duration <= 0:
-            clip.close()
-            continue
-        duration = min(clip.duration, remaining)
-        clips.append(clip.subclip(0, duration))
-        remaining -= duration
-        history = [item for item in history if item != str(path)]
-        history.append(str(path))
-
-    if remaining > 0:
-        for clip in clips:
-            clip.close()
-        raise RuntimeError("Available background footage is shorter than audio.")
-
-    _save_usage_history(history)
-    return concatenate_videoclips(clips, method="compose")
-
-
-def _fallback_still_clip(duration: float) -> VideoFileClip:
-    width, height = TARGET_RESOLUTION
-    frame = np.full((height, width, 3), 12, dtype=np.uint8)
-    clip = ImageClip(frame).set_duration(duration)
-    return clip.fx(vfx.resize, lambda t: 1.01 + 0.01 * (t / max(duration, 0.01)))
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -270,14 +90,12 @@ def _resolve_phase_times(timings: list[tuple[str, float, float]], audio_duration
     if turn_start is None:
         turn_start = audio_duration * 0.65
     midpoint_time = _find_sentence_time(timings, lambda s: s.startswith(MIDPOINT_CLARITY_LINE))
-    false_time = _find_sentence_time(timings, lambda s: FALSE_ASSUMPTION_MARKER in s)
     discovery_end = audio_duration * 0.15
     return {
         "landing_start": landing_start,
         "payoff_start": payoff_start,
         "turn_start": turn_start,
         "midpoint_time": midpoint_time if midpoint_time is not None else audio_duration * 0.5,
-        "false_time": false_time if false_time is not None else audio_duration * 0.5,
         "discovery_end": discovery_end,
     }
 
@@ -359,26 +177,6 @@ def _select_clip_for_intent(intent: str, pools: dict[str, list[Path]], indices: 
     return None
 
 
-def _run_ffmpeg(args: list[str], status_callback: StatusCallback = None) -> None:
-    guard = ResourceGuard("ffmpeg")
-    guard.start()
-    try:
-        command = " ".join(args)
-        print("[ResourceGuard] FFmpeg command:", command)
-        result = subprocess.run(args, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            error_message = (
-                "FFmpeg failed:\n"
-                f"{command}\n"
-                f"{result.stderr.strip()}\n"
-                f"{result.stdout.strip()}"
-            ).strip()
-            _log_status(status_callback, error_message)
-            raise RuntimeError(error_message)
-    finally:
-        guard.stop()
-
-
 def _probe_duration(path: Path) -> float:
     result = subprocess.run(
         [
@@ -401,32 +199,6 @@ def _probe_duration(path: Path) -> float:
         return 0.0
 
 
-def _probe_video_info(path: Path) -> tuple[int, int, str]:
-    result = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height,pix_fmt",
-            "-of",
-            "json",
-            str(path),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    try:
-        data = json.loads(result.stdout)
-        stream = data.get("streams", [{}])[0]
-        return int(stream.get("width", 0)), int(stream.get("height", 0)), str(stream.get("pix_fmt", ""))
-    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
-        return 0, 0, ""
-
-
 def _write_concat_file(entries: list[tuple[Path, float]], output_dir: Path) -> Path:
     concat_path = output_dir / "concat.txt"
     lines = []
@@ -447,6 +219,7 @@ def _render_intent_block(
     output_dir: Path,
     clip_index: int,
     status_callback: StatusCallback = None,
+    log_path: Path | None = None,
 ) -> tuple[list[tuple[Path, float]], int]:
     remaining = duration
     sources: list[tuple[Path, float]] = []
@@ -462,20 +235,6 @@ def _render_intent_block(
         sources.append((clip_path, slice_duration))
         remaining -= slice_duration
 
-    if not sources:
-        fallback = _load_background(duration)
-        fallback_source = output_dir / f"{intent}_fallback_source.mp4"
-        fallback.write_videofile(
-            str(fallback_source),
-            codec="libx264",
-            audio_codec="aac",
-            fps=TARGET_FPS,
-            threads=monitored_threads(),
-            preset="medium",
-        )
-        fallback.close()
-        sources.append((fallback_source, duration))
-
     entries: list[tuple[Path, float]] = []
     total = len(sources)
     for index, (clip_path, slice_duration) in enumerate(sources, start=1):
@@ -484,142 +243,12 @@ def _render_intent_block(
             status_callback,
             f"Normalizing clip {index}/{total} -> 1920x1080 yuv420p 30fps",
         )
-        normalize_visual(clip_path, normalized_path, duration=slice_duration, status_callback=status_callback)
+        normalize_clip(clip_path, normalized_path, status_callback=status_callback, log_path=log_path)
         entries.append((normalized_path, slice_duration))
         clip_index += 1
 
     return entries, clip_index
 
-
-def _render_false_assumption_clip(
-    pools: dict[str, list[Path]],
-    indices: dict[str, int],
-    output_dir: Path,
-    status_callback: StatusCallback = None,
-) -> Path | None:
-    clip_path = _select_clip_for_intent("false_assumption", pools, indices)
-    if not clip_path:
-        return None
-    output_path = output_dir / "false_assumption.mp4"
-    normalized_path = output_dir / "false_assumption_normalized.mp4"
-    _log_status(status_callback, "Normalizing false assumption clip -> 1920x1080 yuv420p 30fps")
-    normalize_visual(clip_path, normalized_path, status_callback=status_callback)
-    _run_ffmpeg(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(normalized_path),
-            "-t",
-            f"{FALSE_ASSUMPTION_DURATION:.3f}",
-            "-vf",
-            (
-                "setpts=1.15*PTS,"
-                f"scale={TARGET_RESOLUTION[0]}:{TARGET_RESOLUTION[1]},"
-                "eq=brightness=-0.05:saturation=0.7,setsar=1"
-            ),
-            "-r",
-            str(TARGET_FPS),
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-preset",
-            "medium",
-            "-threads",
-            str(monitored_threads()),
-            str(output_path),
-        ],
-        status_callback=status_callback,
-    )
-    return output_path
-
-
-def _render_midpoint_overlay(output_dir: Path, status_callback: StatusCallback = None) -> Path:
-    overlay_path = output_dir / "midpoint_overlay.mov"
-    overlay = _midpoint_overlay_clip(MIDPOINT_OVERLAY_TEXT, MIDPOINT_OVERLAY_DURATION)
-    overlay = overlay.fx(vfx.fadein, 0.4).fx(vfx.fadeout, 0.4)
-    overlay.write_videofile(
-        str(overlay_path),
-        codec="qtrle",
-        fps=TARGET_FPS,
-        preset="medium",
-        threads=monitored_threads(),
-        logger=None,
-    )
-    overlay.close()
-    normalized_overlay = output_dir / "midpoint_overlay_normalized.mov"
-    normalize_overlay(overlay_path, normalized_overlay, status_callback=status_callback)
-    return normalized_overlay
-
-
-def _compose_with_overlays(
-    base_video: Path,
-    audio_path: Path,
-    false_clip: Path | None,
-    midpoint_clip: Path,
-    phase_times: dict[str, float],
-    audio_duration: float,
-    output_path: Path,
-    status_callback: StatusCallback = None,
-) -> None:
-    _log_status(
-        status_callback,
-        f"Final render overlay at t={phase_times['midpoint_time']:.2f}.."
-        f"{phase_times['midpoint_time'] + MIDPOINT_OVERLAY_DURATION:.2f}",
-    )
-    inputs = ["-i", str(base_video), "-i", str(midpoint_clip)]
-    filter_parts = ["[1:v]format=rgba,colorchannelmixer=aa=0.6[midpoint]"]
-    input_index = 2
-    base_label = "[0:v]"
-
-    if false_clip is not None:
-        inputs += ["-i", str(false_clip)]
-        filter_parts.append(
-            f"[0:v][{input_index}:v]overlay=enable='between(t,{phase_times['false_time']:.3f},"
-            f"{phase_times['false_time'] + FALSE_ASSUMPTION_DURATION:.3f})'[base]"
-        )
-        input_index += 1
-        base_label = "[base]"
-
-    filter_parts.append(
-        f"{base_label}[midpoint]overlay=enable='between(t,{phase_times['midpoint_time']:.3f},"
-        f"{phase_times['midpoint_time'] + MIDPOINT_OVERLAY_DURATION:.3f})':format=auto[tmp]"
-    )
-    filter_parts.append("[tmp]format=yuv420p[vfinal]")
-
-    inputs += ["-i", str(audio_path)]
-
-    _run_ffmpeg(
-        [
-            "ffmpeg",
-            "-y",
-            *inputs,
-            "-filter_complex",
-            ";".join(filter_parts),
-            "-map",
-            "[vfinal]",
-            "-map",
-            f"{input_index}:a",
-            "-r",
-            str(TARGET_FPS),
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-preset",
-            "medium",
-            "-threads",
-            str(monitored_threads()),
-            "-c:a",
-            "aac",
-            "-t",
-            f"{audio_duration:.3f}",
-            "-shortest",
-            str(output_path),
-        ],
-        status_callback=status_callback,
-    )
 
 
 def _build_visual_track(
@@ -633,6 +262,10 @@ def _build_visual_track(
     indices: dict[str, int] = {}
     timings = _sentence_timings(script_text, audio_duration)
     phase_times = _resolve_phase_times(timings, audio_duration)
+    log_path = OUTPUT_DIR / "debug" / "validation.txt"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n=== validation run for {output_path.name} ===\n")
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -653,89 +286,173 @@ def _build_visual_track(
                 normalized_dir,
                 clip_index,
                 status_callback=status_callback,
+                log_path=log_path,
             )
             clip_entries.extend(entries)
 
-        if not clip_entries:
-            raise RuntimeError("No background visuals available for video rendering.")
-
-        _log_status(status_callback, "Concatenating normalized clips")
-        concat_file = _write_concat_file(clip_entries, temp_path)
         base_video = temp_path / "base_visuals.mp4"
-        _run_ffmpeg(
+        if clip_entries:
+            _log_status(status_callback, "Concatenating normalized clips")
+            concat_file = _write_concat_file(clip_entries, temp_path)
+            run_ffmpeg(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-fflags",
+                    "+genpts",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    str(concat_file),
+                    "-r",
+                    str(TARGET_FPS),
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-crf",
+                    "23",
+                    "-preset",
+                    "veryfast",
+                    "-an",
+                    "-threads",
+                    str(monitored_threads()),
+                    str(base_video),
+                ],
+                status_callback=status_callback,
+                log_path=log_path,
+            )
+        else:
+            build_base_bg(audio_duration, base_video, status_callback=status_callback, log_path=log_path)
+
+        if not validate_video(base_video, audio_duration, log_path=log_path):
+            _log_status(status_callback, "Base visuals failed validation; rebuilding base background")
+            build_base_bg(audio_duration, base_video, status_callback=status_callback, log_path=log_path)
+            validate_video(base_video, audio_duration, log_path=log_path)
+
+        overlay_video = temp_path / "base_with_overlay.mp4"
+        _log_status(
+            status_callback,
+            f"Final render overlay at t={phase_times['midpoint_time']:.2f}.."
+            f"{phase_times['midpoint_time'] + MIDPOINT_OVERLAY_DURATION:.2f}",
+        )
+        add_text_overlay(
+            base_video,
+            overlay_video,
+            MIDPOINT_OVERLAY_TEXT,
+            phase_times["midpoint_time"],
+            phase_times["midpoint_time"] + MIDPOINT_OVERLAY_DURATION,
+            status_callback=status_callback,
+            log_path=log_path,
+        )
+
+        visuals_for_output = overlay_video
+        if not validate_video(overlay_video, audio_duration, log_path=log_path):
+            _log_status(status_callback, "Overlay visuals failed validation; entering safe mode")
+            safe_visuals = temp_path / "safe_visuals.mp4"
+            success = rebuild_safe_mode(
+                audio_duration,
+                safe_visuals,
+                MIDPOINT_OVERLAY_TEXT,
+                phase_times["midpoint_time"],
+                phase_times["midpoint_time"] + MIDPOINT_OVERLAY_DURATION,
+                status_callback=status_callback,
+                log_path=log_path,
+            )
+            visuals_for_output = safe_visuals if success else overlay_video
+
+        run_ffmpeg(
             [
                 "ffmpeg",
                 "-y",
-                "-fflags",
-                "+genpts",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
                 "-i",
-                str(concat_file),
-                "-c",
-                "copy",
-                str(base_video),
+                str(visuals_for_output),
+                "-i",
+                str(audio_path),
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-r",
+                str(TARGET_FPS),
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-crf",
+                "23",
+                "-preset",
+                "veryfast",
+                "-threads",
+                str(monitored_threads()),
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-shortest",
+                "-movflags",
+                "+faststart",
+                str(output_path),
             ],
             status_callback=status_callback,
+            log_path=log_path,
         )
 
-        width, height, pix_fmt = _probe_video_info(base_video)
-        if (
-            width != TARGET_WIDTH
-            or height != TARGET_HEIGHT
-            or width % 2 != 0
-            or height % 2 != 0
-            or pix_fmt != "yuv420p"
-        ):
-            _log_status(status_callback, "Re-normalizing base visuals to 1920x1080 yuv420p")
-            fixed_base = temp_path / "base_visuals_fixed.mp4"
-            normalize_visual(base_video, fixed_base, status_callback=status_callback)
-            base_video = fixed_base
+        if not validate_video(output_path, audio_duration, log_path=log_path):
+            _log_status(status_callback, "Final video failed validation; rebuilding in safe mode")
+            safe_visuals = temp_path / "final_safe_visuals.mp4"
+            if rebuild_safe_mode(
+                audio_duration,
+                safe_visuals,
+                MIDPOINT_OVERLAY_TEXT,
+                phase_times["midpoint_time"],
+                phase_times["midpoint_time"] + MIDPOINT_OVERLAY_DURATION,
+                status_callback=status_callback,
+                log_path=log_path,
+            ):
+                run_ffmpeg(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        str(safe_visuals),
+                        "-i",
+                        str(audio_path),
+                        "-map",
+                        "0:v",
+                        "-map",
+                        "1:a",
+                        "-r",
+                        str(TARGET_FPS),
+                        "-c:v",
+                        "libx264",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-crf",
+                        "23",
+                        "-preset",
+                        "veryfast",
+                        "-threads",
+                        str(monitored_threads()),
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "160k",
+                        "-shortest",
+                        "-movflags",
+                        "+faststart",
+                        str(output_path),
+                    ],
+                    status_callback=status_callback,
+                    log_path=log_path,
+                )
+                if not validate_video(output_path, audio_duration, log_path=log_path):
+                    raise RuntimeError("Safe mode rebuild failed validation.")
+            else:
+                raise RuntimeError("Safe mode rebuild failed.")
 
-        false_clip = _render_false_assumption_clip(pools, indices, temp_path, status_callback=status_callback)
-        midpoint_overlay = _render_midpoint_overlay(temp_path, status_callback=status_callback)
-
-        _compose_with_overlays(
-            base_video=base_video,
-            audio_path=audio_path,
-            false_clip=false_clip,
-            midpoint_clip=midpoint_overlay,
-            phase_times=phase_times,
-            audio_duration=audio_duration,
-            output_path=output_path,
-            status_callback=status_callback,
-        )
-
-
-def _midpoint_overlay_clip(text: str, duration: float) -> ImageClip:
-    width, height = TARGET_RESOLUTION
-    font = _load_font(size=72)
-    image = Image.new("RGBA", (width, height), (0, 0, 0, 160))
-    draw = ImageDraw.Draw(image)
-    text_width = draw.textlength(text, font=font)
-    x = (width - text_width) / 2
-    y = height / 2 - font.getbbox(text)[3] / 2
-    draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
-    return ImageClip(np.array(image)).set_duration(duration)
-
-
-def _false_assumption_clip(
-    pools: dict[str, list[Path]],
-    indices: dict[str, int],
-    duration: float,
-) -> VideoFileClip | None:
-    clip_path = _select_clip_for_intent("false_assumption", pools, indices)
-    if not clip_path:
-        return None
-    clip = VideoFileClip(str(clip_path)).without_audio()
-    clip = _fit_background(clip)
-    clip = clip.fx(vfx.speedx, 0.85)
-    clip = clip.fx(vfx.colorx, 0.65)
-    if clip.duration < duration:
-        clip = clip.fx(vfx.loop, duration=duration)
-    return clip.subclip(0, duration).set_duration(duration)
 
 
 def _chunk_subtitles(text: str, min_words: int = 2, max_words: int = 6) -> list[str]:
