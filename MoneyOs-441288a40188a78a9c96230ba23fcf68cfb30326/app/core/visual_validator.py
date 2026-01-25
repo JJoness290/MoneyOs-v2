@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,35 +93,38 @@ def sample_frame_md5(path: Path, ts: float) -> str | None:
     return match.group(1) if match else None
 
 
-def sample_frame_yavg(path: Path, ts: float) -> float | None:
-    result = subprocess.run(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-ss",
-            f"{ts:.3f}",
-            "-i",
-            str(path),
-            "-frames:v",
-            "1",
-            "-vf",
-            "signalstats,metadata=print:file=-",
-            "-f",
-            "null",
-            "-",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    combined_output = f"{result.stdout}\n{result.stderr}"
-    match = re.search(r"lavfi\\.signalstats\\.YAVG=([0-9.]+)", combined_output)
+def sample_frame_yavg(path: Path, ts: float) -> tuple[float | None, str]:
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-v",
+        "info",
+        "-ss",
+        f"{ts:.3f}",
+        "-i",
+        str(path),
+        "-frames:v",
+        "1",
+        "-vf",
+        "signalstats,metadata=print:file=pipe:1",
+        "-f",
+        "null",
+        "NUL",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    match = re.search(r"lavfi\\.signalstats\\.YAVG=([0-9]+(\\.[0-9]+)?)", stdout)
     if not match:
-        return None
+        match = re.search(r"lavfi\\.signalstats\\.YAVG=([0-9]+(\\.[0-9]+)?)", stderr)
+    if not match:
+        combined = (stdout + "\n" + stderr).strip()
+        return None, combined[:2000]
     try:
-        return float(match.group(1))
+        return float(match.group(1)), ""
     except ValueError:
-        return None
+        combined = (stdout + "\n" + stderr).strip()
+        return None, combined[:2000]
 
 
 def _sample_timestamps(duration: float) -> list[float]:
@@ -134,7 +138,13 @@ def _sample_timestamps(duration: float) -> list[float]:
 def validate_visuals(path: Path) -> VisualValidation:
     duration, black_duration = run_blackdetect(path)
     timestamps = _sample_timestamps(duration)
-    yavg_samples = [(sample_frame_yavg(path, ts), ts) for ts in timestamps]
+    yavg_samples: list[tuple[float | None, float]] = []
+    debug_output: list[str] = []
+    for ts in timestamps:
+        yavg, debug = sample_frame_yavg(path, ts)
+        yavg_samples.append((yavg, ts))
+        if debug:
+            debug_output.append(f"t={ts:.3f} -> {debug}")
     md5_samples = [(sample_frame_md5(path, ts), ts) for ts in timestamps]
 
     if duration <= 0:
@@ -143,6 +153,10 @@ def validate_visuals(path: Path) -> VisualValidation:
         return VisualValidation(False, "blackdetect", duration, black_duration, yavg_samples, md5_samples)
     yavg_values = [value for value, _ in yavg_samples if value is not None]
     if not yavg_values:
+        if debug_output and os.getenv("DEBUG_VISUALS") == "1":
+            debug_path = Path("output") / "debug" / "yavg_probe.txt"
+            debug_path.parent.mkdir(parents=True, exist_ok=True)
+            debug_path.write_text("\n\n".join(debug_output), encoding="utf-8")
         return VisualValidation(False, "yavg_parse_failed", duration, black_duration, yavg_samples, md5_samples)
     if all(value < 30.0 for value in yavg_values):
         return VisualValidation(False, "low_brightness", duration, black_duration, yavg_samples, md5_samples)

@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import os
+
 from app.core.visual_validator import validate_visuals
 
 
@@ -21,6 +23,11 @@ def main() -> int:
     print("black_duration:", result.black_duration)
     print("yavg_samples:", result.yavg_samples)
     print("md5_samples:", result.md5_samples)
+    if os.getenv("DEBUG_VISUALS") == "1":
+        debug_path = Path("output") / "debug" / "yavg_probe.txt"
+        if debug_path.exists():
+            print("yavg_probe_output:")
+            print(debug_path.read_text(encoding="utf-8")[:2000])
     return 0 if result.ok else 1
 
 
