@@ -18,11 +18,15 @@ def add_text_overlay(
     log_path: Path | None = None,
 ) -> None:
     enable = f"between(t,{start:.3f},{end:.3f})"
+    textfile_path = None
+    if text:
+        textfile_path = output_path.with_suffix(".txt")
+        textfile_path.write_text(text, encoding="utf-8")
     filters = [
         build_drawtext_filter("MONEYOS VISUALS OK", "40", "40", 40),
         build_drawtext_filter("%{pts\\:hms}", "40", "100", 36, is_timecode=True),
     ]
-    if text:
+    if text and textfile_path:
         filters.append(
             build_drawtext_filter(
                 text,
@@ -30,6 +34,7 @@ def add_text_overlay(
                 "(h-text_h)/2",
                 64,
                 enable=enable,
+                textfile=str(textfile_path),
             )
         )
     filter_chain = ",".join(filters)
@@ -66,7 +71,7 @@ def add_text_overlay(
             build_drawtext_filter("MONEYOS VISUALS OK", "40", "40", 40, use_fontfile=True),
             build_drawtext_filter("%{pts\\:hms}", "40", "100", 36, is_timecode=True, use_fontfile=True),
         ]
-        if text:
+        if text and textfile_path:
             filters.append(
                 build_drawtext_filter(
                     text,
@@ -75,6 +80,7 @@ def add_text_overlay(
                     64,
                     enable=enable,
                     use_fontfile=True,
+                    textfile=str(textfile_path),
                 )
             )
         filter_chain = ",".join(filters)

@@ -28,6 +28,10 @@ def fontfile_path() -> str | None:
     return None
 
 
+def escape_drawtext_path(path: str) -> str:
+    return path.replace("\\", "/").replace(":", "\\:")
+
+
 def build_drawtext_filter(
     text: str,
     x: str,
@@ -36,8 +40,12 @@ def build_drawtext_filter(
     enable: str | None = None,
     is_timecode: bool = False,
     use_fontfile: bool = False,
+    textfile: str | None = None,
 ) -> str:
-    safe_text = text if is_timecode else escape_drawtext_text(text)
+    if textfile:
+        safe_text = None
+    else:
+        safe_text = text if is_timecode else escape_drawtext_text(text)
     font_spec = "font='Arial'"
     if use_fontfile:
         font_path = fontfile_path()
@@ -45,7 +53,7 @@ def build_drawtext_filter(
             font_spec = f"font='Arial':fontfile={font_path}"
     parts = [
         "drawtext",
-        f"text='{safe_text}'",
+        f"text='{safe_text}'" if safe_text is not None else f"textfile={escape_drawtext_path(textfile)}",
         font_spec,
         f"x={x}",
         f"y={y}",

@@ -16,12 +16,10 @@ from moviepy.editor import AudioFileClip, ImageClip
 
 from app.config import BROLL_DIR, OUTPUT_DIR, TARGET_FPS, TARGET_RESOLUTION
 from app.core.resource_guard import monitored_threads
-from app.core.visuals.base_bg import build_base_bg
+from app.core.visual_validator import generate_fallback_visuals, validate_visuals
 from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg
 from app.core.visuals.normalize import normalize_clip
 from app.core.visuals.overlay_text import add_text_overlay
-from app.core.visuals.safe_mode import rebuild_safe_mode
-from app.core.visuals.validator import validate_video
 
 
 @dataclass
@@ -289,10 +287,13 @@ def _build_visual_track(
         else:
             build_base_bg(audio_duration, base_video, status_callback=status_callback, log_path=log_path)
 
-        if not validate_video(base_video, audio_duration, log_path=log_path):
-            _log_status(status_callback, "Base visuals failed validation; rebuilding base background")
-            build_base_bg(audio_duration, base_video, status_callback=status_callback, log_path=log_path)
-            validate_video(base_video, audio_duration, log_path=log_path)
+        base_validation = validate_visuals(base_video)
+        if not base_validation.ok:
+            _log_status(status_callback, f"Base visuals failed validation ({base_validation.reason}); using fallback")
+            generate_fallback_visuals(audio_duration, base_video)
+            base_validation = validate_visuals(base_video)
+            if not base_validation.ok:
+                raise RuntimeError(f"Fallback base visuals failed validation: {base_validation.reason}")
 
         overlay_video = temp_path / "base_with_overlay.mp4"
         _log_status(
@@ -311,20 +312,13 @@ def _build_visual_track(
         )
 
         visuals_for_output = overlay_video
-        if not validate_video(overlay_video, audio_duration, log_path=log_path):
-            _log_status(status_callback, "Overlay visuals failed validation; entering safe mode")
-            fallback_text = "FALLBACK ACTIVE - VISUALS FAILED"
-            safe_visuals = temp_path / "safe_visuals.mp4"
-            success = rebuild_safe_mode(
-                audio_duration,
-                safe_visuals,
-                fallback_text,
-                0.0,
-                audio_duration,
-                status_callback=status_callback,
-                log_path=log_path,
-            )
-            visuals_for_output = safe_visuals if success else overlay_video
+        overlay_validation = validate_visuals(overlay_video)
+        if not overlay_validation.ok:
+            _log_status(status_callback, f"Overlay visuals failed validation ({overlay_validation.reason}); using fallback")
+            generate_fallback_visuals(audio_duration, overlay_video)
+            overlay_validation = validate_visuals(overlay_video)
+            if not overlay_validation.ok:
+                raise RuntimeError(f"Overlay fallback failed validation: {overlay_validation.reason}")
 
         run_ffmpeg(
             [
@@ -364,60 +358,51 @@ def _build_visual_track(
             log_path=log_path,
         )
 
-        if not validate_video(output_path, audio_duration, log_path=log_path):
-            _log_status(status_callback, "Final video failed validation; rebuilding in safe mode")
-            fallback_text = "FALLBACK ACTIVE - VISUALS FAILED"
-            safe_visuals = temp_path / "final_safe_visuals.mp4"
-            if rebuild_safe_mode(
-                audio_duration,
-                safe_visuals,
-                fallback_text,
-                0.0,
-                audio_duration,
+        final_validation = validate_visuals(output_path)
+        if not final_validation.ok:
+            _log_status(status_callback, f"Final video failed validation ({final_validation.reason}); using fallback")
+            fallback_visuals = temp_path / "final_fallback.mp4"
+            generate_fallback_visuals(audio_duration, fallback_visuals)
+            run_ffmpeg(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(fallback_visuals),
+                    "-i",
+                    str(audio_path),
+                    "-map",
+                    "0:v",
+                    "-map",
+                    "1:a",
+                    "-r",
+                    str(TARGET_FPS),
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-crf",
+                    "23",
+                    "-preset",
+                    "veryfast",
+                    "-threads",
+                    str(monitored_threads()),
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "160k",
+                    "-t",
+                    f"{audio_duration:.3f}",
+                    "-movflags",
+                    "+faststart",
+                    str(output_path),
+                ],
                 status_callback=status_callback,
                 log_path=log_path,
-            ):
-                run_ffmpeg(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-i",
-                        str(safe_visuals),
-                        "-i",
-                        str(audio_path),
-                        "-map",
-                        "0:v",
-                        "-map",
-                        "1:a",
-                        "-r",
-                        str(TARGET_FPS),
-                        "-c:v",
-                        "libx264",
-                        "-pix_fmt",
-                        "yuv420p",
-                        "-crf",
-                        "23",
-                        "-preset",
-                        "veryfast",
-                        "-threads",
-                        str(monitored_threads()),
-                        "-c:a",
-                        "aac",
-                        "-b:a",
-                        "160k",
-                        "-t",
-                        f"{audio_duration:.3f}",
-                        "-movflags",
-                        "+faststart",
-                        str(output_path),
-                    ],
-                    status_callback=status_callback,
-                    log_path=log_path,
-                )
-                if not validate_video(output_path, audio_duration, log_path=log_path):
-                    raise RuntimeError("Safe mode rebuild failed validation.")
-            else:
-                raise RuntimeError("Safe mode rebuild failed.")
+            )
+            final_validation = validate_visuals(output_path)
+            if not final_validation.ok:
+                raise RuntimeError(f"Final fallback failed validation: {final_validation.reason}")
 
 
 
