@@ -5,25 +5,8 @@ import os
 
 from app.config import TARGET_FPS, TARGET_RESOLUTION
 from app.core.resource_guard import monitored_threads
+from app.core.visuals.drawtext_utils import drawtext_fontspec, escape_drawtext_text
 from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg
-
-
-def _font_path() -> str | None:
-    windows_font = Path("C:/Windows/Fonts/arial.ttf")
-    linux_font = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
-    if windows_font.exists():
-        return windows_font.as_posix()
-    if linux_font.exists():
-        return linux_font.as_posix()
-    return None
-
-
-def _escape_drawtext(text: str) -> str:
-    return (
-        text.replace("\\", "\\\\")
-        .replace(":", "\\:")
-        .replace("'", "\\'")
-    )
 
 
 def normalize_clip(
@@ -41,17 +24,16 @@ def normalize_clip(
         f"fps={TARGET_FPS},setsar=1,format=yuv420p"
     )
     if os.getenv("DEBUG_VISUALS") == "1" and debug_label:
-        fontfile = _font_path()
-        font_opt = f":fontfile={fontfile}" if fontfile else ""
-        overlay_text = _escape_drawtext(debug_label)
+        font_opt = drawtext_fontspec()
+        overlay_text = escape_drawtext_text(debug_label)
         filter_chain = (
             f"{filter_chain},"
             "drawtext="
-            f"text='{overlay_text}'{font_opt}:x=40:y=40:fontsize=32:fontcolor=white:"
+            f"text='{overlay_text}':{font_opt}:x=40:y=40:fontsize=32:fontcolor=white:"
             "box=1:boxcolor=black@0.4,"
             "drawtext="
             "text='%{pts\\:hms}'"
-            f"{font_opt}:x=40:y=90:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.4"
+            f":{font_opt}:x=40:y=90:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.4"
         )
     args = [
         "ffmpeg",
