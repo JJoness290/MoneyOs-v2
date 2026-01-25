@@ -4,6 +4,8 @@ from pathlib import Path
 import subprocess
 from typing import Callable
 
+import os
+
 from app.core.resource_guard import ResourceGuard
 
 StatusCallback = Callable[[str], None] | None
@@ -37,3 +39,34 @@ def run_ffmpeg(args: list[str], status_callback: StatusCallback = None, log_path
             raise RuntimeError(error_message)
     finally:
         guard.stop()
+
+
+def _ffmpeg_encoders() -> str:
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-encoders"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout + result.stderr
+
+
+def has_nvenc() -> bool:
+    output = _ffmpeg_encoders()
+    return "h264_nvenc" in output
+
+
+def select_video_encoder() -> tuple[list[str], str]:
+    use_gpu = os.getenv("MONEYOS_USE_GPU", "0") == "1"
+    if use_gpu and has_nvenc():
+        print("[FFmpeg] Using NVENC encoder (h264_nvenc)")
+        return (
+            ["-c:v", "h264_nvenc", "-pix_fmt", "yuv420p", "-preset", "p4", "-cq", "23"],
+            "h264_nvenc",
+        )
+    if use_gpu:
+        print("[FFmpeg] NVENC not available; falling back to libx264")
+    return (
+        ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "veryfast"],
+        "libx264",
+    )

@@ -19,8 +19,11 @@ def _escape_fontfile(path: str) -> str:
 
 
 def fontfile_path() -> str | None:
+    local_font = Path.cwd() / "arial.ttf"
     windows_font = Path("C:/Windows/Fonts/arial.ttf")
     linux_font = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+    if local_font.exists():
+        return _escape_fontfile(local_font.as_posix())
     if windows_font.exists():
         return _escape_fontfile(windows_font.as_posix())
     if linux_font.exists():
@@ -52,7 +55,6 @@ def build_drawtext_filter(
         if font_path:
             font_spec = f"font='Arial':fontfile={font_path}"
     parts = [
-        "drawtext",
         f"text='{safe_text}'" if safe_text is not None else f"textfile={escape_drawtext_path(textfile)}",
         font_spec,
         f"x={x}",
@@ -63,5 +65,5 @@ def build_drawtext_filter(
         "boxcolor=black@0.4",
     ]
     if enable:
-        parts.append(f"enable='{enable}'")
-    return ":".join(parts)
+        parts.append(f"enable={enable}")
+    return "drawtext=" + ":".join(parts)

@@ -6,7 +6,7 @@ import os
 from app.config import TARGET_FPS, TARGET_RESOLUTION
 from app.core.resource_guard import monitored_threads
 from app.core.visuals.drawtext_utils import build_drawtext_filter, fontfile_path
-from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg
+from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg, select_video_encoder
 
 
 def normalize_clip(
@@ -33,6 +33,7 @@ def normalize_clip(
             build_drawtext_filter("%{pts\\:hms}", "40", "90", 28, is_timecode=True),
         ]
         filter_chain = ",".join([base_filter, *filters])
+    encode_args, encoder_name = select_video_encoder()
     args = [
         "ffmpeg",
         "-y",
@@ -44,21 +45,14 @@ def normalize_clip(
     if duration is not None:
         args += ["-t", f"{duration:.3f}"]
     args += [
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-crf",
-        "23",
-        "-preset",
-        "veryfast",
+        *encode_args,
         "-an",
         "-threads",
         str(monitored_threads()),
         str(output_path),
     ]
     if status_callback:
-        status_callback("Normalizing clip -> 1920x1080 yuv420p 30fps")
+        status_callback(f"Normalizing clip -> 1920x1080 yuv420p 30fps ({encoder_name})")
     try:
         run_ffmpeg(args, status_callback=status_callback, log_path=log_path)
     except RuntimeError:

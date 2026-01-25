@@ -8,7 +8,7 @@ import subprocess
 from app.config import TARGET_FPS, TARGET_RESOLUTION
 from app.core.resource_guard import monitored_threads
 from app.core.visuals.drawtext_utils import build_drawtext_filter
-from app.core.visuals.ffmpeg_utils import run_ffmpeg
+from app.core.visuals.ffmpeg_utils import run_ffmpeg, select_video_encoder
 
 
 @dataclass
@@ -150,6 +150,7 @@ def validate_visuals(path: Path) -> VisualValidation:
 
 def generate_fallback_visuals(duration: float, output_path: Path) -> None:
     width, height = TARGET_RESOLUTION
+    encode_args, _ = select_video_encoder()
     filters = [
         build_drawtext_filter("FALLBACK VISUALS", "40", "40", 48),
         build_drawtext_filter("%{pts\\:hms}", "40", "110", 36, is_timecode=True),
@@ -167,14 +168,7 @@ def generate_fallback_visuals(duration: float, output_path: Path) -> None:
             f"{duration:.3f}",
             "-vf",
             filter_chain,
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-crf",
-            "23",
-            "-preset",
-            "veryfast",
+            *encode_args,
             "-threads",
             str(monitored_threads()),
             str(output_path),

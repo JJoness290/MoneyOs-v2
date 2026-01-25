@@ -5,7 +5,7 @@ from pathlib import Path
 from app.config import TARGET_FPS
 from app.core.resource_guard import monitored_threads
 from app.core.visuals.drawtext_utils import build_drawtext_filter, fontfile_path
-from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg
+from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg, select_video_encoder
 
 
 def add_text_overlay(
@@ -38,6 +38,7 @@ def add_text_overlay(
             )
         )
     filter_chain = ",".join(filters)
+    encode_args, encoder_name = select_video_encoder()
     args = [
         "ffmpeg",
         "-y",
@@ -47,21 +48,14 @@ def add_text_overlay(
         filter_chain,
         "-r",
         str(TARGET_FPS),
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-crf",
-        "23",
-        "-preset",
-        "veryfast",
+        *encode_args,
         "-an",
         "-threads",
         str(monitored_threads()),
         str(output_path),
     ]
     if status_callback:
-        status_callback("Burning text overlays")
+        status_callback(f"Burning text overlays ({encoder_name})")
     try:
         run_ffmpeg(args, status_callback=status_callback, log_path=log_path)
     except RuntimeError:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from app.config import TARGET_FPS, TARGET_RESOLUTION
 from app.core.resource_guard import monitored_threads
-from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg
+from app.core.visuals.ffmpeg_utils import StatusCallback, run_ffmpeg, select_video_encoder
 
 
 def build_base_bg(
@@ -14,6 +14,7 @@ def build_base_bg(
     log_path: Path | None = None,
 ) -> None:
     width, height = TARGET_RESOLUTION
+    encode_args, encoder_name = select_video_encoder()
     args = [
         "ffmpeg",
         "-y",
@@ -25,18 +26,11 @@ def build_base_bg(
         f"{duration_s:.3f}",
         "-vf",
         "format=yuv420p,eq=brightness=0.08:contrast=1.15",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-crf",
-        "28",
-        "-preset",
-        "veryfast",
+        *encode_args,
         "-threads",
         str(monitored_threads()),
         str(out_path),
     ]
     if status_callback:
-        status_callback("Generating animated base background")
+        status_callback(f"Generating animated base background ({encoder_name})")
     run_ffmpeg(args, status_callback=status_callback, log_path=log_path)
