@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tempfile
 
 from app.config import TARGET_FPS, TARGET_RESOLUTION
 from app.core.resource_guard import monitored_threads
@@ -12,11 +13,23 @@ def main() -> None:
     width, height = TARGET_RESOLUTION
     output_path = Path("output") / "debug" / "overlay_timed_test.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as handle:
+        handle.write("Timed overlay text")
+        textfile_path = Path(handle.name).resolve()
     filters = [
         build_drawtext_filter("TIMED OVERLAY", "40", "40", 48, enable="between(t,0.5,2.5)"),
         build_drawtext_filter("%{pts\\:hms}", "40", "110", 36, is_timecode=True),
+        build_drawtext_filter(
+            "Overlay textfile",
+            "(w-text_w)/2",
+            "(h-text_h)/2",
+            48,
+            enable="between(t,0.5,2.5)",
+            textfile=str(textfile_path),
+        ),
     ]
     filter_chain = ",".join(filters)
+    print("[test_overlay_timed] -vf:", filter_chain)
     encode_args, encoder_name = select_video_encoder()
     args = [
         "ffmpeg",
