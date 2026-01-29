@@ -19,6 +19,11 @@ def escape_filtergraph_path(path: str) -> str:
     return path.replace("\\", "/").replace(":", "\\:").replace(",", "\\,")
 
 
+def _ffmpeg_escape_enable(expr: str) -> str:
+    safe_expr = expr.replace("'", "\\'")
+    return f"'{safe_expr}'"
+
+
 def fontfile_path() -> str | None:
     env_font = os.getenv("MONEYOS_FONTFILE")
     if env_font:
@@ -67,5 +72,5 @@ def build_drawtext_filter(
         "boxcolor=black@0.4",
     ]
     if enable:
-        parts.append(f"enable={enable}")
+        parts.append(f"enable={_ffmpeg_escape_enable(enable)}")
     return "drawtext=" + ":".join(parts)
