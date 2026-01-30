@@ -9,6 +9,7 @@ from app.core.visuals.ffmpeg_utils import run_ffmpeg, select_video_encoder
 def main() -> int:
     output_path = Path("output") / "debug" / "overlay_test.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.unlink(missing_ok=True)
     filters = [
         build_drawtext_filter("MONEYOS VISUALS OK", "40", "40", 40),
         build_drawtext_filter("%{pts\\:hms}", "40", "100", 36, is_timecode=True),

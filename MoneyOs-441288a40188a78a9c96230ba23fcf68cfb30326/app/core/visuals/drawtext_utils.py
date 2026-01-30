@@ -23,10 +23,11 @@ def _normalize_path(value: str) -> str:
     return value.replace("\\", "/")
 
 
-def quote_path(value: str) -> str:
+def ffmpeg_escape_windows_path(value: str) -> str:
     normalized = _normalize_path(value)
-    safe = normalized.replace("'", "\\'")
-    return f"'{safe}'"
+    if _WINDOWS_ABS_RE.match(normalized):
+        return normalized.replace(":", "\\:", 1)
+    return normalized
 
 
 def escape_enable(expr: str) -> str:
@@ -65,7 +66,7 @@ def build_drawtext_filter(
     if use_fontfile:
         font_path = fontfile_path()
         if font_path:
-            fontfile_value = quote_path(font_path) if _WINDOWS_ABS_RE.match(font_path) else font_path
+            fontfile_value = ffmpeg_escape_windows_path(font_path)
             font_spec = f"fontfile={fontfile_value}"
         else:
             font_spec = "font='Arial'"
@@ -73,7 +74,7 @@ def build_drawtext_filter(
         font_spec = "font='Arial'"
     textfile_value = None
     if textfile:
-        textfile_value = quote_path(textfile) if _WINDOWS_ABS_RE.match(textfile) else _normalize_path(textfile)
+        textfile_value = ffmpeg_escape_windows_path(textfile)
     parts = [
         f"text='{safe_text}'" if safe_text is not None else f"textfile={textfile_value}",
         font_spec,
