@@ -55,6 +55,7 @@ DOMAIN_ANCHORS = {
         "legal contract",
         "city council meeting",
         "escrow paperwork",
+        "bank transfer paperwork",
     ],
 }
 
@@ -94,6 +95,8 @@ def build_queries(segment_text: str, domain: str, max_queries: int = 6) -> list[
     queries.append(_detect_topic(terms))
     if domain in DOMAIN_ANCHORS:
         queries.extend(DOMAIN_ANCHORS[domain])
+    if not queries:
+        queries.append(_detect_topic(terms))
     deduped = []
     for query in queries:
         query = query.strip()

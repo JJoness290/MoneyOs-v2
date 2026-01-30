@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import time
+import shutil
 from pathlib import Path
 from typing import Iterable
 import subprocess
@@ -31,6 +32,41 @@ def _orientation() -> str:
         return explicit.strip().lower()
     platform = os.getenv("MONEYOS_TARGET_PLATFORM", "tiktok").strip().lower()
     return "landscape" if platform == "youtube" else "portrait"
+
+
+def _domain_keywords(script_text: str) -> set[str]:
+    tokens = {token.lower() for token in script_text.split() if token.strip()}
+    return {
+        token
+        for token in tokens
+        if token
+        in {
+            "audit",
+            "ledger",
+            "bank",
+            "transfer",
+            "documents",
+            "paperwork",
+            "council",
+            "investigation",
+            "finance",
+            "escrow",
+            "contract",
+        }
+    }
+
+
+def _strict_match(item: VideoItem, domain_keywords: set[str], query: str) -> bool:
+    if not domain_keywords:
+        return True
+    haystack = " ".join([item.page_url, item.file_url, *item.tags]).lower()
+    if any(term in haystack for term in ["wildlife", "nature", "forest", "giraffe", "safari", "ocean"]):
+        return False
+    matched = {word for word in domain_keywords if word in haystack}
+    if len(matched) >= 1:
+        return True
+    query_tokens = {token.lower() for token in query.split() if token.strip()}
+    return any(token in haystack for token in query_tokens)
 
 
 def _segment_dir(segment_id: str) -> Path:
@@ -137,6 +173,7 @@ def ensure_broll_pool(
     max_downloads = int(os.getenv("MONEYOS_BROLL_MAX_DOWNLOADS_PER_RUN", "60"))
     rate_sleep = float(os.getenv("MONEYOS_BROLL_RATE_SLEEP", "0.3"))
     max_attempts = int(os.getenv("MONEYOS_BROLL_MAX_ATTEMPTS_PER_SEGMENT", "8"))
+    strict_mode = os.getenv("MONEYOS_BROLL_STRICT", "0") == "1"
     segment_dir = _segment_dir(segment_id)
 
     if status_callback:
@@ -144,16 +181,23 @@ def ensure_broll_pool(
             f"[BROLL] provider={_provider_name()} orientation={orientation} "
             f"segment={segment_id} target={target_duration:.2f}s"
         )
+    manifest = _load_manifest(segment_dir)
+    explicit_orientation = os.getenv("MONEYOS_BROLL_ORIENTATION")
+    if explicit_orientation and manifest.get("orientation") and manifest.get("orientation") != orientation:
+        shutil.rmtree(segment_dir, ignore_errors=True)
+        segment_dir.mkdir(parents=True, exist_ok=True)
+        manifest = {}
     existing = sorted(segment_dir.glob("*.mp4"))
     if status_callback:
         status_callback(f"[BROLL] existing={len(existing)} target={per_segment}")
     if len(existing) >= per_segment:
         return segment_dir
     domain = detect_domain(script_text or segment_text)
+    domain_keywords = _domain_keywords(script_text or segment_text)
     queries = build_queries(segment_text, domain)
     candidates: list[VideoItem] = []
     for query in queries:
-        cached = load_cache(_provider_name(), query, orientation, cache_hours)
+        cached = None if cache_hours <= 0 else load_cache(_provider_name(), query, orientation, cache_hours)
         if cached:
             items = [VideoItem(**item) for item in cached.get("items", [])]
         else:
@@ -173,8 +217,12 @@ def ensure_broll_pool(
         and item.duration <= max_dur
         and min(item.width, item.height) >= min_res
     ]
+    if strict_mode:
+        filtered = [
+            item for item in filtered if any(_strict_match(item, domain_keywords, query) for query in queries)
+        ]
     if status_callback:
-        status_callback(f"[BROLL] domain={domain} queries={queries} candidates={len(filtered)}")
+        status_callback(f"[BROLL] domain={domain} queries={queries} candidates={len(filtered)} strict={strict_mode}")
 
     ranked = []
     for query in queries:
@@ -190,7 +238,6 @@ def ensure_broll_pool(
         )
 
     ranked = _filter_existing(segment_dir, ranked)
-    manifest = _load_manifest(segment_dir)
     items = manifest.get("items", [])
 
     global _DOWNLOADS_THIS_RUN

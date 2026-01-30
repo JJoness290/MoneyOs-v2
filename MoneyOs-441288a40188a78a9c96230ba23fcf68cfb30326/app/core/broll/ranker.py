@@ -36,8 +36,19 @@ def _domain_penalty(item: VideoItem, domain: str) -> float:
     if domain != "finance_legal":
         return 0.0
     tags = {tag.lower() for tag in item.tags}
-    if tags.intersection({"wildlife", "nature", "forest", "mountain", "beach", "animals"}):
-        return -2.5
+    blacklist = {
+        "wildlife",
+        "nature",
+        "forest",
+        "mountain",
+        "beach",
+        "animals",
+        "giraffe",
+        "safari",
+        "ocean",
+    }
+    if tags.intersection(blacklist):
+        return -4.0
     return 0.0
 
 

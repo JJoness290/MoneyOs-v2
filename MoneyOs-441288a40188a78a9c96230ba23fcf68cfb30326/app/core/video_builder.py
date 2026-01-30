@@ -125,9 +125,15 @@ def _build_visual_track(
     output_path: Path,
     status_callback: StatusCallback = None,
 ) -> None:
+    broll_orientation = os.getenv("MONEYOS_BROLL_ORIENTATION") or (
+        "landscape" if TARGET_PLATFORM == "youtube" else "portrait"
+    )
+    fit_mode = "fill" if TARGET_PLATFORM == "youtube" else "contain"
     _log_status(
         status_callback,
-        f"Platform={TARGET_PLATFORM} target={TARGET_RESOLUTION[0]}x{TARGET_RESOLUTION[1]}",
+        "Platform="
+        f"{TARGET_PLATFORM} target={TARGET_RESOLUTION[0]}x{TARGET_RESOLUTION[1]} "
+        f"broll_orientation={broll_orientation} fit={fit_mode}",
     )
     timings = _sentence_timings(script_text, audio_duration)
     phase_times = _resolve_phase_times(timings, audio_duration)

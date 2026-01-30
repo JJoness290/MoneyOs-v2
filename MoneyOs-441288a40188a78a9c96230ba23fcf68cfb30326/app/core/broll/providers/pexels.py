@@ -18,6 +18,7 @@ class PexelsProvider(BrollProvider):
     def search(self, query: str, orientation: str, per_page: int) -> list[VideoItem]:
         headers = {"Authorization": self.api_key}
         params = {"query": query, "per_page": per_page, "orientation": orientation}
+        print(f"[BROLL] Pexels search params={params}")
         response = None
         for attempt in range(3):
             response = requests.get(
