@@ -52,14 +52,18 @@ class PexelsProvider(BrollProvider):
             tags = [tag.lower() for tag in video.get("tags", []) if isinstance(tag, str)]
             items.append(
                 VideoItem(
-                    provider="pexels",
+                    source="pexels",
                     provider_id=str(video.get("id")),
                     page_url=str(video.get("url")),
-                    file_url=str(best_file.get("link")),
+                    download_url=str(best_file.get("link")),
                     width=width,
                     height=height,
                     duration=duration,
                     tags=tags,
+                    thumbnail_url=str(video.get("image")) if video.get("image") else None,
+                    preview_url=str(video.get("video_files", [{}])[0].get("link")) if video.get("video_files") else None,
+                    license="Pexels",
+                    license_url="https://www.pexels.com/license/",
                 )
             )
         return items

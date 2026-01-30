@@ -15,6 +15,10 @@ from app.core.broll.querygen import build_queries, detect_domain
 from app.core.broll.ranker import rank_videos
 from app.core.broll.types import VideoItem
 from app.core.broll.providers.pexels import PexelsProvider
+from app.core.broll.providers.pixabay import PixabayProvider
+from app.core.broll.providers.wikimedia import WikimediaProvider
+from app.core.broll.providers.archive import ArchiveProvider
+from app.core.broll.reranker_clip import rerank_candidates
 from app.core.visuals.normalize import normalize_clip
 
 
@@ -59,7 +63,7 @@ def _domain_keywords(script_text: str) -> set[str]:
 def _strict_match(item: VideoItem, domain_keywords: set[str], query: str) -> bool:
     if not domain_keywords:
         return True
-    haystack = " ".join([item.page_url, item.file_url, *item.tags]).lower()
+    haystack = " ".join([item.page_url, item.download_url, *item.tags]).lower()
     if any(term in haystack for term in ["wildlife", "nature", "forest", "giraffe", "safari", "ocean"]):
         return False
     matched = {word for word in domain_keywords if word in haystack}
@@ -79,11 +83,23 @@ def _generic_fallback_dir() -> Path:
     return Path("assets") / "broll" / "generic" / "fallback"
 
 
-def _provider() -> PexelsProvider:
-    provider = _provider_name()
-    if provider == "pexels":
-        return PexelsProvider()
-    raise RuntimeError(f"Unsupported B-roll provider: {provider}")
+def _providers() -> list:
+    sources = [source.strip().lower() for source in os.getenv("MONEYOS_BROLL_SOURCES", "pexels").split(",")]
+    allowed = {"pexels", "pixabay", "wikimedia", "archive"}
+    selected = [source for source in sources if source in allowed]
+    providers = []
+    for source in selected:
+        if source == "pexels":
+            providers.append(PexelsProvider())
+        elif source == "pixabay":
+            providers.append(PixabayProvider())
+        elif source == "wikimedia":
+            providers.append(WikimediaProvider())
+        elif source == "archive":
+            providers.append(ArchiveProvider())
+    if not providers:
+        raise RuntimeError("No valid B-roll providers configured.")
+    return providers
 
 
 def _safe_manifest_path(segment_dir: Path) -> Path:
@@ -155,6 +171,23 @@ def _filter_existing(segment_dir: Path, items: Iterable[VideoItem]) -> list[Vide
     return [item for item in items if item.provider_id not in existing_ids and item.provider_id not in _RUN_USED_IDS]
 
 
+def _item_from_cache(data: dict, provider_name: str) -> VideoItem:
+    return VideoItem(
+        source=data.get("source") or provider_name,
+        provider_id=str(data.get("provider_id") or data.get("id") or data.get("provider_video_id")),
+        page_url=str(data.get("page_url") or ""),
+        download_url=str(data.get("download_url") or data.get("file_url") or data.get("direct_file_url") or ""),
+        width=int(data.get("width") or 0),
+        height=int(data.get("height") or 0),
+        duration=float(data.get("duration") or 0.0),
+        tags=list(data.get("tags") or []),
+        thumbnail_url=data.get("thumbnail_url"),
+        preview_url=data.get("preview_url"),
+        license=data.get("license"),
+        license_url=data.get("license_url"),
+    )
+
+
 def ensure_broll_pool(
     *,
     segment_id: str,
@@ -163,10 +196,12 @@ def ensure_broll_pool(
     script_text: str | None = None,
     status_callback=None,
 ) -> Path:
-    provider = _provider()
+    providers = _providers()
     orientation = _orientation()
     per_segment = int(os.getenv("MONEYOS_BROLL_PER_SEGMENT", "3"))
     cache_hours = int(os.getenv("MONEYOS_BROLL_CACHE_HOURS", "24"))
+    candidate_limit = int(os.getenv("MONEYOS_BROLL_CANDIDATES", "30"))
+    rerank_mode = os.getenv("MONEYOS_BROLL_RERANK", "clip").strip().lower()
     min_res = int(os.getenv("MONEYOS_BROLL_MIN_RES", "1080"))
     min_dur = float(os.getenv("MONEYOS_BROLL_MIN_DUR", "3.0"))
     max_dur = float(os.getenv("MONEYOS_BROLL_MAX_DUR", "20.0"))
@@ -178,7 +213,8 @@ def ensure_broll_pool(
 
     if status_callback:
         status_callback(
-            f"[BROLL] provider={_provider_name()} orientation={orientation} "
+            f"[BROLL] providers={[provider.__class__.__name__ for provider in providers]} "
+            f"orientation={orientation} "
             f"segment={segment_id} target={target_duration:.2f}s"
         )
     manifest = _load_manifest(segment_dir)
@@ -196,19 +232,22 @@ def ensure_broll_pool(
     domain_keywords = _domain_keywords(script_text or segment_text)
     queries = build_queries(segment_text, domain)
     candidates: list[VideoItem] = []
+    per_source = max(1, candidate_limit // len(providers))
     for query in queries:
-        cached = None if cache_hours <= 0 else load_cache(_provider_name(), query, orientation, cache_hours)
-        if cached:
-            items = [VideoItem(**item) for item in cached.get("items", [])]
-        else:
-            items = provider.search(query=query, orientation=orientation, per_page=15)
-            write_cache(
-                _provider_name(),
-                query,
-                orientation,
-                {"items": [item.__dict__ for item in items]},
-            )
-        candidates.extend(items)
+        for provider in providers:
+            provider_name = provider.__class__.__name__.replace("Provider", "").lower()
+            cached = None if cache_hours <= 0 else load_cache(provider_name, query, orientation, cache_hours)
+            if cached:
+                items = [_item_from_cache(item, provider_name) for item in cached.get("items", [])]
+            else:
+                items = provider.search(query=query, orientation=orientation, per_page=per_source)
+                write_cache(
+                    provider_name,
+                    query,
+                    orientation,
+                    {"items": [item.__dict__ for item in items]},
+                )
+            candidates.extend(items)
 
     filtered = [
         item
@@ -236,6 +275,16 @@ def ensure_broll_pool(
                 domain=domain,
             )
         )
+    if rerank_mode == "clip":
+        reranked = rerank_candidates(
+            segment_text,
+            ranked,
+            preview_frames=int(os.getenv("MONEYOS_BROLL_PREVIEW_FRAMES", "3")),
+        )
+        if reranked:
+            ranked = [item for item, _ in reranked]
+        elif status_callback:
+            status_callback("[BROLL] reranker unavailable; falling back to text ranking")
 
     ranked = _filter_existing(segment_dir, ranked)
     items = manifest.get("items", [])
@@ -252,9 +301,9 @@ def ensure_broll_pool(
         raw_path = segment_dir / f"raw_{filename}"
         dest = segment_dir / filename
         if status_callback:
-            status_callback(f"[BROLL] attempt {attempt_index}/{max_attempts} -> {item.file_url}")
+            status_callback(f"[BROLL] attempt {attempt_index}/{max_attempts} -> {item.download_url}")
         try:
-            _download_file(item.file_url, raw_path)
+            _download_file(item.download_url, raw_path)
             if _probe_duration(raw_path) <= 0:
                 raw_path.unlink(missing_ok=True)
                 if status_callback:
@@ -270,17 +319,20 @@ def ensure_broll_pool(
             raw_path.unlink(missing_ok=True)
         except Exception as exc:
             if status_callback:
-                status_callback(f"[BROLL] download failed {item.file_url}: {exc}")
+                status_callback(f"[BROLL] download failed {item.download_url}: {exc}")
             continue
         items.append(
             {
+                "source": item.source,
                 "provider_video_id": item.provider_id,
                 "source_page_url": item.page_url,
-                "direct_file_url": item.file_url,
+                "direct_file_url": item.download_url,
                 "local_path": str(dest),
                 "width": item.width,
                 "height": item.height,
                 "duration": item.duration,
+                "license": item.license,
+                "license_url": item.license_url,
             }
         )
         _RUN_USED_IDS.add(item.provider_id)
@@ -295,7 +347,7 @@ def ensure_broll_pool(
     manifest_payload = {
         "segment_id": segment_id,
         "segment_text_hash": hashlib.sha1(segment_text.encode("utf-8")).hexdigest(),
-        "provider": _provider_name(),
+        "provider": os.getenv("MONEYOS_BROLL_SOURCES", _provider_name()),
         "orientation": orientation,
         "queries": queries,
         "items": items,
