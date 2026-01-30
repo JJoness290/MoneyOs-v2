@@ -145,26 +145,42 @@ class AnimeBeatVisuals:
             try:
                 if not self.available():
                     raise RuntimeError("Anime backend unavailable")
-                settings = SDSettings(model=SD_MODEL, steps=SD_STEPS, guidance=SD_GUIDANCE, seed=SD_SEED)
+                settings = SDSettings(
+                    model=SD_MODEL,
+                    steps=SD_STEPS,
+                    guidance=SD_GUIDANCE,
+                    seed=SD_SEED,
+                    width=512,
+                    height=512,
+                    fp16=True,
+                    cpu_offload=False,
+                    attention_slicing=True,
+                    vae_slicing=True,
+                )
                 try:
                     generated_path = generate_image(
                         prompt_payload.prompt,
                         prompt_payload.negative_prompt,
-                        width=TARGET_RESOLUTION[0],
-                        height=TARGET_RESOLUTION[1],
                         output_path=image_path,
                         cache_dir=cache_dir,
                         settings=settings,
                     )
                 except Exception:  # noqa: BLE001
                     retry_settings = SDSettings(
-                        model=settings.model, steps=min(12, settings.steps), guidance=settings.guidance, seed=settings.seed
+                        model=settings.model,
+                        steps=min(12, settings.steps),
+                        guidance=settings.guidance,
+                        seed=settings.seed,
+                        width=settings.width,
+                        height=settings.height,
+                        fp16=settings.fp16,
+                        cpu_offload=settings.cpu_offload,
+                        attention_slicing=settings.attention_slicing,
+                        vae_slicing=settings.vae_slicing,
                     )
                     generated_path = generate_image(
                         prompt_payload.prompt,
                         prompt_payload.negative_prompt,
-                        width=TARGET_RESOLUTION[0],
-                        height=TARGET_RESOLUTION[1],
                         output_path=image_path,
                         cache_dir=cache_dir,
                         settings=retry_settings,
