@@ -14,16 +14,13 @@ if not hasattr(Image, "ANTIALIAS"):
 
 from moviepy.editor import AudioFileClip, ImageClip
 
-import hashlib
-
 from app.config import OUTPUT_DIR, TARGET_FPS, TARGET_RESOLUTION
+from app.core.broll.resolver import ensure_broll_pool, select_broll_clip
 from app.core.resource_guard import monitored_threads
 from app.core.visual_validator import generate_fallback_visuals, validate_visuals
 from app.core.visuals.base_bg import build_base_bg
-from app.core.visuals.ai_prompting import build_segment_prompt, negative_prompt
-from app.core.visuals.ai_image_generator import cache_key_for_prompt, generate_image
 from app.core.visuals.ffmpeg_utils import StatusCallback, encoder_uses_threads, run_ffmpeg, select_video_encoder
-from app.core.visuals.image_to_video import make_kenburns_clip
+from app.core.visuals.normalize import normalize_clip
 from app.core.visuals.overlay_text import add_text_overlay
 
 
@@ -107,10 +104,6 @@ def _allow_testsrc2() -> bool:
     return os.getenv("MONEYOS_ALLOW_TESTSRC2") == "1"
 
 
-def _ai_visuals_enabled() -> bool:
-    return os.getenv("MONEYOS_AI_VISUALS", "1") != "0"
-
-
 def _segment_text_for_block(
     timings: list[tuple[str, float, float]],
     start: float,
@@ -122,17 +115,6 @@ def _segment_text_for_block(
         if s_end >= start and s_start <= end:
             segments.append(sentence)
     return " ".join(segments).strip() or fallback_text
-
-
-def _seed_base(output_path: Path) -> int:
-    env_seed = os.getenv("MONEYOS_AI_SEED_BASE")
-    if env_seed:
-        try:
-            return int(env_seed)
-        except ValueError:
-            pass
-    digest = hashlib.sha1(output_path.stem.encode("utf-8")).hexdigest()
-    return int(digest[:8], 16)
 
 
 
@@ -154,67 +136,42 @@ def _build_visual_track(
         temp_path = Path(temp_dir)
         intent_blocks = _intent_blocks(phase_times, audio_duration)
         clip_entries: list[tuple[Path, float]] = []
-        seed_base = _seed_base(output_path)
-        style_preset = os.getenv("MONEYOS_AI_STYLE_PRESET", "moneyos_cinematic")
-        size = int(os.getenv("MONEYOS_AI_SIZE", "512"))
-        steps = int(os.getenv("MONEYOS_AI_STEPS", "20"))
-        guidance = float(os.getenv("MONEYOS_AI_GUIDANCE", "7.0"))
-        model_id = os.getenv("MONEYOS_AI_MODEL", "runwayml/stable-diffusion-v1-5")
-        if not _ai_visuals_enabled():
-            raise RuntimeError("AI visuals disabled. Set MONEYOS_AI_VISUALS=1 to generate backgrounds.")
+        normalized_dir = temp_path / "norm"
+        normalized_dir.mkdir(parents=True, exist_ok=True)
         for index, (_, start, end) in enumerate(intent_blocks, start=1):
             duration = max(0.0, end - start)
             if duration <= 0:
                 continue
+            segment_id = f"seg_{index:03d}"
             segment_text = _segment_text_for_block(timings, start, end, script_text)
-            prompt = build_segment_prompt(segment_text, style_preset)
-            negative = negative_prompt()
-            seed = seed_base + index
-            prompt_hash = cache_key_for_prompt(
-                prompt,
-                negative,
-                size=size,
-                seed=seed,
-                style_preset=style_preset,
-                model_id=model_id,
+            pool_dir = ensure_broll_pool(
+                segment_id=segment_id,
+                segment_text=segment_text,
+                target_duration=duration,
+                status_callback=status_callback,
             )
-            _log_status(
-                status_callback,
-                f"[AI_VISUALS] segment {index} duration={duration:.2f}s "
-                f"prompt_hash={prompt_hash[:10]} size={size} seed={seed} source=AI",
-            )
-            image_path = generate_image(
-                prompt=prompt,
-                negative_prompt=negative,
-                size=size,
-                seed=seed,
-                model_id=model_id,
-                steps=steps,
-                guidance=guidance,
-                style_preset=style_preset,
-            )
-            if image_path is None:
+            clip_path = select_broll_clip(pool_dir, status_callback=status_callback)
+            if clip_path is None:
                 if _allow_testsrc2():
-                    _log_status(status_callback, "AI visuals failed; using fallback testsrc2")
+                    _log_status(status_callback, "B-roll fetch failed; using fallback testsrc2")
                     build_base_bg(audio_duration, temp_path / "base_visuals.mp4", status_callback, log_path)
                     clip_entries = []
                     break
-                raise RuntimeError("AI image generation failed and testsrc2 fallback is disabled.")
-            clip_path = temp_path / f"ai_clip_{index:03d}.mp4"
-            make_kenburns_clip(
-                image_path=image_path,
-                duration_sec=duration,
-                out_path=clip_path,
-                fps=TARGET_FPS,
-                target=f"{TARGET_RESOLUTION[0]}x{TARGET_RESOLUTION[1]}",
+                raise RuntimeError("B-roll fetch failed and no fallback clips are available.")
+            normalized_path = normalized_dir / f"clip_{index:03d}.mp4"
+            normalize_clip(
+                clip_path,
+                normalized_path,
+                duration=duration,
+                debug_label=segment_id,
                 status_callback=status_callback,
                 log_path=log_path,
             )
-            clip_entries.append((clip_path, duration))
+            clip_entries.append((normalized_path, duration))
 
         base_video = temp_path / "base_visuals.mp4"
         if clip_entries:
-            _log_status(status_callback, "Concatenating AI clips")
+            _log_status(status_callback, "Concatenating b-roll clips")
             inputs = []
             for path, _ in clip_entries:
                 inputs += ["-i", str(path)]
@@ -243,7 +200,7 @@ def _build_visual_track(
                 log_path=log_path,
             )
         elif not base_video.exists():
-            raise RuntimeError("AI image generation failed and produced no visuals.")
+            raise RuntimeError("B-roll generation failed and produced no visuals.")
 
         base_validation = validate_visuals(base_video)
         if not base_validation.ok:
