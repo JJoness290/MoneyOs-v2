@@ -12,7 +12,14 @@ StatusCallback = Callable[[str], None] | None
 
 
 def _nvenc_quality_mode() -> str:
-    mode = os.getenv("MONEYOS_NVENC_QUALITY", "balanced").strip().lower()
+    mode = os.getenv("MONEYOS_NVENC_QUALITY", "auto").strip().lower()
+    if mode == "auto":
+        quality = os.getenv("MONEYOS_QUALITY", "auto").strip().lower()
+        if quality == "fast":
+            return "fast"
+        if quality == "max":
+            return "max"
+        return "balanced"
     if mode not in {"fast", "balanced", "max"}:
         return "balanced"
     return mode
@@ -20,7 +27,7 @@ def _nvenc_quality_mode() -> str:
 
 def _nvenc_args_for_mode(mode: str) -> list[str]:
     if mode == "fast":
-        return ["-c:v", "h264_nvenc", "-pix_fmt", "yuv420p", "-preset", "p3", "-cq", "23"]
+        return ["-c:v", "h264_nvenc", "-pix_fmt", "yuv420p", "-preset", "p4", "-cq", "26"]
     if mode == "max":
         return [
             "-c:v",
@@ -34,7 +41,7 @@ def _nvenc_args_for_mode(mode: str) -> list[str]:
             "-b:v",
             "0",
             "-cq",
-            "18",
+            "19",
             "-spatial_aq",
             "1",
             "-aq-strength",
@@ -48,7 +55,7 @@ def _nvenc_args_for_mode(mode: str) -> list[str]:
             "-g",
             "60",
         ]
-    return ["-c:v", "h264_nvenc", "-pix_fmt", "yuv420p", "-preset", "p4", "-cq", "23"]
+    return ["-c:v", "h264_nvenc", "-pix_fmt", "yuv420p", "-preset", "p5", "-cq", "22"]
 
 
 def _remove_flag(args: list[str], flag: str) -> list[str]:
