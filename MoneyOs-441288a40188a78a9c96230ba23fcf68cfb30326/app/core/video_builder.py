@@ -2,7 +2,6 @@ from dataclasses import dataclass
 import os
 import random
 import re
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Tuple
@@ -15,12 +14,16 @@ if not hasattr(Image, "ANTIALIAS"):
 
 from moviepy.editor import AudioFileClip, ImageClip
 
-from app.config import BROLL_DIR, OUTPUT_DIR, TARGET_FPS, TARGET_RESOLUTION
+import hashlib
+
+from app.config import OUTPUT_DIR, TARGET_FPS, TARGET_RESOLUTION
 from app.core.resource_guard import monitored_threads
 from app.core.visual_validator import generate_fallback_visuals, validate_visuals
 from app.core.visuals.base_bg import build_base_bg
+from app.core.visuals.ai_prompting import build_segment_prompt, negative_prompt
+from app.core.visuals.ai_image_generator import cache_key_for_prompt, generate_image
 from app.core.visuals.ffmpeg_utils import StatusCallback, encoder_uses_threads, run_ffmpeg, select_video_encoder
-from app.core.visuals.normalize import normalize_clip
+from app.core.visuals.image_to_video import make_kenburns_clip
 from app.core.visuals.overlay_text import add_text_overlay
 
 
@@ -29,16 +32,6 @@ class VideoBuildResult:
     output_path: Path
     duration_seconds: float
 
-
-INTENT_POOLS = {
-    "discovery": ["documents", "office"],
-    "escalation": ["city_night", "time"],
-    "false_assumption": ["city_night"],
-    "midpoint_clarity": ["time"],
-    "turn": ["legal", "documents"],
-    "payoff": ["resolution"],
-    "landing": ["resolution"],
-}
 
 MIDPOINT_CLARITY_LINE = "By this point, one thing was clear"
 MIDPOINT_OVERLAY_TEXT = "One thing was clear by then"
@@ -110,110 +103,36 @@ def _intent_blocks(phase_times: dict[str, float], audio_duration: float) -> list
     ]
 
 
-def _load_broll_pools() -> dict[str, list[Path]]:
-    pools: dict[str, list[Path]] = {}
-    for pool_name in INTENT_POOLS.values():
-        for name in pool_name:
-            if name in pools:
-                continue
-            pool_dir = BROLL_DIR / name
-            if pool_dir.exists() and pool_dir.is_dir():
-                pools[name] = sorted(pool_dir.glob("*.mp4"))
-            else:
-                pools[name] = []
-    return pools
-
-
 def _allow_testsrc2() -> bool:
     return os.getenv("MONEYOS_ALLOW_TESTSRC2") == "1"
 
 
-def _next_pool_clip(pool_name: str, pools: dict[str, list[Path]], indices: dict[str, int]) -> Path | None:
-    clips = pools.get(pool_name, [])
-    if not clips:
-        return None
-    index = indices.get(pool_name, 0) % len(clips)
-    indices[pool_name] = index + 1
-    return clips[index]
+def _ai_visuals_enabled() -> bool:
+    return os.getenv("MONEYOS_AI_VISUALS", "1") != "0"
 
 
-def _select_clip_for_intent(intent: str, pools: dict[str, list[Path]], indices: dict[str, int]) -> Path | None:
-    candidates = INTENT_POOLS.get(intent, [])
-    for pool_name in candidates:
-        clip = _next_pool_clip(pool_name, pools, indices)
-        if clip:
-            return clip
-    return None
+def _segment_text_for_block(
+    timings: list[tuple[str, float, float]],
+    start: float,
+    end: float,
+    fallback_text: str,
+) -> str:
+    segments = []
+    for sentence, s_start, s_end in timings:
+        if s_end >= start and s_start <= end:
+            segments.append(sentence)
+    return " ".join(segments).strip() or fallback_text
 
 
-def _probe_duration(path: Path) -> float:
-    result = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    try:
-        return float(result.stdout.strip())
-    except ValueError:
-        return 0.0
-
-
-def _render_intent_block(
-    intent: str,
-    duration: float,
-    pools: dict[str, list[Path]],
-    indices: dict[str, int],
-    output_dir: Path,
-    clip_index: int,
-    status_callback: StatusCallback = None,
-    log_path: Path | None = None,
-) -> tuple[list[tuple[Path, float]], int]:
-    remaining = duration
-    sources: list[tuple[Path, float]] = []
-    while remaining > 0:
-        clip_path = _select_clip_for_intent(intent, pools, indices)
-        if not clip_path:
-            break
-        _log_status(status_callback, f"Selected background clip: {clip_path}")
-        clip_duration = _probe_duration(clip_path)
-        if clip_duration <= 0:
-            indices[intent] = indices.get(intent, 0) + 1
-            continue
-        slice_duration = min(clip_duration, remaining)
-        sources.append((clip_path, slice_duration))
-        remaining -= slice_duration
-
-    entries: list[tuple[Path, float]] = []
-    total = len(sources)
-    for index, (clip_path, slice_duration) in enumerate(sources, start=1):
-        normalized_path = output_dir / f"clip_{clip_index:03d}.mp4"
-        _log_status(
-            status_callback,
-            f"Normalizing clip {index}/{total} -> 1920x1080 yuv420p 30fps",
-        )
-        label = f"SEG {clip_index}: {clip_path.name}"
-        normalize_clip(
-            clip_path,
-            normalized_path,
-            duration=slice_duration,
-            debug_label=label,
-            status_callback=status_callback,
-            log_path=log_path,
-        )
-        entries.append((normalized_path, slice_duration))
-        clip_index += 1
-
-    return entries, clip_index
+def _seed_base(output_path: Path) -> int:
+    env_seed = os.getenv("MONEYOS_AI_SEED_BASE")
+    if env_seed:
+        try:
+            return int(env_seed)
+        except ValueError:
+            pass
+    digest = hashlib.sha1(output_path.stem.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
 
 
 
@@ -224,20 +143,6 @@ def _build_visual_track(
     output_path: Path,
     status_callback: StatusCallback = None,
 ) -> None:
-    pools = _load_broll_pools()
-    pool_dirs = {name: BROLL_DIR / name for name in pools}
-    total_clips = sum(len(clips) for clips in pools.values())
-    _log_status(
-        status_callback,
-        "B-roll scan: "
-        + ", ".join(f"{name}={len(pools[name])}" for name in sorted(pools))
-        + f" (total={total_clips})",
-    )
-    _log_status(
-        status_callback,
-        "B-roll folders: " + ", ".join(f"{pool_dirs[name]}/*.mp4" for name in sorted(pool_dirs)),
-    )
-    indices: dict[str, int] = {}
     timings = _sentence_timings(script_text, audio_duration)
     phase_times = _resolve_phase_times(timings, audio_duration)
     log_path = OUTPUT_DIR / "debug" / "validation.txt"
@@ -247,73 +152,98 @@ def _build_visual_track(
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        normalized_dir = temp_path / "norm"
-        normalized_dir.mkdir(parents=True, exist_ok=True)
         intent_blocks = _intent_blocks(phase_times, audio_duration)
         clip_entries: list[tuple[Path, float]] = []
-        clip_index = 0
-        for intent, start, end in intent_blocks:
+        seed_base = _seed_base(output_path)
+        style_preset = os.getenv("MONEYOS_AI_STYLE_PRESET", "moneyos_cinematic")
+        size = int(os.getenv("MONEYOS_AI_SIZE", "512"))
+        steps = int(os.getenv("MONEYOS_AI_STEPS", "20"))
+        guidance = float(os.getenv("MONEYOS_AI_GUIDANCE", "7.0"))
+        model_id = os.getenv("MONEYOS_AI_MODEL", "runwayml/stable-diffusion-v1-5")
+        if not _ai_visuals_enabled():
+            raise RuntimeError("AI visuals disabled. Set MONEYOS_AI_VISUALS=1 to generate backgrounds.")
+        for index, (_, start, end) in enumerate(intent_blocks, start=1):
             duration = max(0.0, end - start)
             if duration <= 0:
                 continue
-            entries, clip_index = _render_intent_block(
-                intent,
-                duration,
-                pools,
-                indices,
-                normalized_dir,
-                clip_index,
+            segment_text = _segment_text_for_block(timings, start, end, script_text)
+            prompt = build_segment_prompt(segment_text, style_preset)
+            negative = negative_prompt()
+            seed = seed_base + index
+            prompt_hash = cache_key_for_prompt(
+                prompt,
+                negative,
+                size=size,
+                seed=seed,
+                style_preset=style_preset,
+                model_id=model_id,
+            )
+            _log_status(
+                status_callback,
+                f"[AI_VISUALS] segment {index} duration={duration:.2f}s "
+                f"prompt_hash={prompt_hash[:10]} size={size} seed={seed} source=AI",
+            )
+            image_path = generate_image(
+                prompt=prompt,
+                negative_prompt=negative,
+                size=size,
+                seed=seed,
+                model_id=model_id,
+                steps=steps,
+                guidance=guidance,
+                style_preset=style_preset,
+            )
+            if image_path is None:
+                if _allow_testsrc2():
+                    _log_status(status_callback, "AI visuals failed; using fallback testsrc2")
+                    build_base_bg(audio_duration, temp_path / "base_visuals.mp4", status_callback, log_path)
+                    clip_entries = []
+                    break
+                raise RuntimeError("AI image generation failed and testsrc2 fallback is disabled.")
+            clip_path = temp_path / f"ai_clip_{index:03d}.mp4"
+            make_kenburns_clip(
+                image_path=image_path,
+                duration_sec=duration,
+                out_path=clip_path,
+                fps=TARGET_FPS,
+                target=f"{TARGET_RESOLUTION[0]}x{TARGET_RESOLUTION[1]}",
                 status_callback=status_callback,
                 log_path=log_path,
             )
-            clip_entries.extend(entries)
+            clip_entries.append((clip_path, duration))
 
         base_video = temp_path / "base_visuals.mp4"
         if clip_entries:
-            _log_status(status_callback, "Concatenating normalized clips")
+            _log_status(status_callback, "Concatenating AI clips")
             inputs = []
             for path, _ in clip_entries:
                 inputs += ["-i", str(path)]
-            filter_parts = [f"[{index}:v]" for index in range(len(clip_entries))]
+            filter_parts = [f"[{idx}:v]" for idx in range(len(clip_entries))]
             filter_complex = "".join(filter_parts) + f"concat=n={len(clip_entries)}:v=1:a=0[v]"
+            encode_args, encoder_name = select_video_encoder()
+            concat_args = [
+                "ffmpeg",
+                "-y",
+                *inputs,
+                "-filter_complex",
+                filter_complex,
+                "-map",
+                "[v]",
+                "-r",
+                str(TARGET_FPS),
+                *encode_args,
+                "-an",
+                str(base_video),
+            ]
+            if encoder_uses_threads(encoder_name):
+                concat_args += ["-threads", str(monitored_threads())]
             run_ffmpeg(
-                [
-                    "ffmpeg",
-                    "-y",
-                    *inputs,
-                    "-filter_complex",
-                    filter_complex,
-                    "-map",
-                    "[v]",
-                    "-r",
-                    str(TARGET_FPS),
-                    "-c:v",
-                    "libx264",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-crf",
-                    "23",
-                    "-preset",
-                    "veryfast",
-                    "-an",
-                    "-threads",
-                    str(monitored_threads()),
-                    str(base_video),
-                ],
+                concat_args,
                 status_callback=status_callback,
                 log_path=log_path,
             )
-        else:
-            missing = ", ".join(
-                f"{pool_dirs[name]}/*.mp4" for name in sorted(pool_dirs) if not pools[name]
-            )
-            if not _allow_testsrc2():
-                raise RuntimeError(
-                    "No background clips available. Empty pools: "
-                    f"{missing}. Set MONEYOS_ALLOW_TESTSRC2=1 to allow testsrc2."
-                )
-            _log_status(status_callback, "No background clips found; using fallback testsrc2")
-            build_base_bg(audio_duration, base_video, status_callback=status_callback, log_path=log_path)
+        elif not base_video.exists():
+            raise RuntimeError("AI image generation failed and produced no visuals.")
 
         base_validation = validate_visuals(base_video)
         if not base_validation.ok:
