@@ -14,11 +14,12 @@ if not hasattr(Image, "ANTIALIAS"):
 
 from moviepy.editor import AudioFileClip, ImageClip
 
-from app.config import OUTPUT_DIR, TARGET_FPS, TARGET_PLATFORM, TARGET_RESOLUTION
+from app.config import OUTPUT_DIR, TARGET_FPS, TARGET_PLATFORM, TARGET_RESOLUTION, VISUAL_MODE
 from app.core.broll.resolver import ensure_broll_pool, select_broll_clip
 from app.core.resource_guard import monitored_threads
 from app.core.visual_validator import generate_fallback_visuals, validate_visuals
 from app.core.visuals.base_bg import build_base_bg
+from app.core.visuals.documentary.compositor import build_documentary_visuals
 from app.core.visuals.ffmpeg_utils import StatusCallback, encoder_uses_threads, run_ffmpeg, select_video_encoder
 from app.core.visuals.normalize import normalize_clip
 from app.core.visuals.overlay_text import add_text_overlay
@@ -327,6 +328,65 @@ def _build_visual_track(
                 raise RuntimeError(f"Final fallback failed validation: {final_validation.reason}")
 
 
+def _build_documentary_track(
+    script_text: str,
+    audio_duration: float,
+    audio_path: Path,
+    output_path: Path,
+    status_callback: StatusCallback = None,
+) -> None:
+    log_path = OUTPUT_DIR / "debug" / "validation.txt"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n=== documentary validation run for {output_path.name} ===\n")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        base_video = temp_path / "documentary_visuals.mp4"
+        build_documentary_visuals(script_text, audio_duration, base_video, status_callback=status_callback)
+
+        base_validation = validate_visuals(base_video)
+        if not base_validation.ok:
+            raise RuntimeError(f"Documentary visuals failed validation: {base_validation.reason}")
+
+        encode_args, encoder_name = select_video_encoder()
+        mux_args = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(base_video),
+            "-i",
+            str(audio_path),
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-r",
+            str(TARGET_FPS),
+            *encode_args,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            "-t",
+            f"{audio_duration:.3f}",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        if encoder_uses_threads(encoder_name):
+            mux_args += ["-threads", str(monitored_threads())]
+        run_ffmpeg(
+            mux_args,
+            status_callback=status_callback,
+            log_path=log_path,
+        )
+
+        final_validation = validate_visuals(output_path)
+        if not final_validation.ok:
+            raise RuntimeError(f"Documentary video failed validation: {final_validation.reason}")
+
+
 
 def _chunk_subtitles(text: str, min_words: int = 2, max_words: int = 6) -> list[str]:
     words = [word for word in text.split() if word.strip()]
@@ -414,7 +474,10 @@ def build_video(
     if audio_duration <= 0:
         audio_clip.close()
         raise RuntimeError("Audio duration is zero.")
-    _build_visual_track(script_text, audio_duration, audio_path, output_path, status_callback=status_callback)
+    if VISUAL_MODE == "broll":
+        _build_visual_track(script_text, audio_duration, audio_path, output_path, status_callback=status_callback)
+    else:
+        _build_documentary_track(script_text, audio_duration, audio_path, output_path, status_callback=status_callback)
     audio_clip.close()
 
     return VideoBuildResult(output_path=output_path, duration_seconds=audio_duration)
