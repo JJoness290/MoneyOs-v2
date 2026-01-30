@@ -32,6 +32,34 @@ def _keyword_score(item: VideoItem, query: str) -> float:
     return matches / max(len(tokens), 1)
 
 
+def _domain_penalty(item: VideoItem, domain: str) -> float:
+    if domain != "finance_legal":
+        return 0.0
+    tags = {tag.lower() for tag in item.tags}
+    if tags.intersection({"wildlife", "nature", "forest", "mountain", "beach", "animals"}):
+        return -2.5
+    return 0.0
+
+
+def _domain_bonus(item: VideoItem, domain: str) -> float:
+    if domain != "finance_legal":
+        return 0.0
+    tags = {tag.lower() for tag in item.tags}
+    preferred = {
+        "bank",
+        "money",
+        "documents",
+        "paperwork",
+        "audit",
+        "meeting",
+        "courthouse",
+        "contract",
+        "escrow",
+        "deadline",
+    }
+    return 1.5 if tags.intersection(preferred) else 0.0
+
+
 def rank_videos(
     candidates: list[VideoItem],
     *,
@@ -39,6 +67,7 @@ def rank_videos(
     target_duration: float | None,
     min_res: int,
     orientation: str,
+    domain: str,
 ) -> list[VideoItem]:
     scored = []
     for item in candidates:
@@ -47,6 +76,8 @@ def rank_videos(
             + _resolution_score(item, min_res) * 1.5
             + _orientation_match(item, orientation) * 2.0
             + _keyword_score(item, query) * 1.0
+            + _domain_bonus(item, domain)
+            + _domain_penalty(item, domain)
         )
         scored.append((score, item))
     scored.sort(key=lambda pair: pair[0], reverse=True)

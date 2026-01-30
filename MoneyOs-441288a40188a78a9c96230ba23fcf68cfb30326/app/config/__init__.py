@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -16,6 +17,9 @@ SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
 PEXELS_API_KEY_ENV = "PEXELS_API_KEY"
 DEFAULT_VOICE = "en-US-JennyNeural"
 TTS_RATE = "+8%"
-TARGET_RESOLUTION = (1920, 1080)
+TARGET_PLATFORM = os.getenv("MONEYOS_TARGET_PLATFORM", "tiktok").strip().lower()
+if TARGET_PLATFORM not in {"tiktok", "youtube"}:
+    TARGET_PLATFORM = "tiktok"
+TARGET_RESOLUTION = (1080, 1920) if TARGET_PLATFORM == "tiktok" else (1920, 1080)
 TARGET_FPS = 30
 MIN_AUDIO_SECONDS = 480

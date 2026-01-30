@@ -6,13 +6,15 @@ import os
 import time
 from pathlib import Path
 from typing import Iterable
+import subprocess
 
 import requests
 from app.core.broll.cache import load_cache, write_cache
-from app.core.broll.querygen import build_queries
+from app.core.broll.querygen import build_queries, detect_domain
 from app.core.broll.ranker import rank_videos
 from app.core.broll.types import VideoItem
 from app.core.broll.providers.pexels import PexelsProvider
+from app.core.visuals.normalize import normalize_clip
 
 
 _RUN_USED_IDS: set[str] = set()
@@ -24,7 +26,11 @@ def _provider_name() -> str:
 
 
 def _orientation() -> str:
-    return os.getenv("MONEYOS_BROLL_ORIENTATION", "portrait").strip().lower()
+    explicit = os.getenv("MONEYOS_BROLL_ORIENTATION")
+    if explicit:
+        return explicit.strip().lower()
+    platform = os.getenv("MONEYOS_TARGET_PLATFORM", "tiktok").strip().lower()
+    return "landscape" if platform == "youtube" else "portrait"
 
 
 def _segment_dir(segment_id: str) -> Path:
@@ -63,18 +69,46 @@ def _write_manifest(segment_dir: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _probe_duration(path: Path) -> float:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
 def _download_file(url: str, dest: Path) -> None:
     tmp_path = dest.with_suffix(".tmp")
-    with requests.get(url, stream=True, timeout=60) as response:
-        response.raise_for_status()
-        with tmp_path.open("wb") as handle:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    handle.write(chunk)
-    if tmp_path.stat().st_size == 0:
-        tmp_path.unlink(missing_ok=True)
-        raise RuntimeError("Downloaded file is empty.")
-    tmp_path.replace(dest)
+    for attempt in range(3):
+        try:
+            with requests.get(url, stream=True, timeout=45) as response:
+                response.raise_for_status()
+                with tmp_path.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            handle.write(chunk)
+            if tmp_path.stat().st_size == 0:
+                raise RuntimeError("Downloaded file is empty.")
+            tmp_path.replace(dest)
+            return
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            if attempt == 2:
+                raise
 
 
 def _filter_existing(segment_dir: Path, items: Iterable[VideoItem]) -> list[VideoItem]:
@@ -90,6 +124,7 @@ def ensure_broll_pool(
     segment_id: str,
     segment_text: str,
     target_duration: float,
+    script_text: str | None = None,
     status_callback=None,
 ) -> Path:
     provider = _provider()
@@ -101,6 +136,7 @@ def ensure_broll_pool(
     max_dur = float(os.getenv("MONEYOS_BROLL_MAX_DUR", "20.0"))
     max_downloads = int(os.getenv("MONEYOS_BROLL_MAX_DOWNLOADS_PER_RUN", "60"))
     rate_sleep = float(os.getenv("MONEYOS_BROLL_RATE_SLEEP", "0.3"))
+    max_attempts = int(os.getenv("MONEYOS_BROLL_MAX_ATTEMPTS_PER_SEGMENT", "8"))
     segment_dir = _segment_dir(segment_id)
 
     if status_callback:
@@ -109,9 +145,12 @@ def ensure_broll_pool(
             f"segment={segment_id} target={target_duration:.2f}s"
         )
     existing = sorted(segment_dir.glob("*.mp4"))
+    if status_callback:
+        status_callback(f"[BROLL] existing={len(existing)} target={per_segment}")
     if len(existing) >= per_segment:
         return segment_dir
-    queries = build_queries(segment_text)
+    domain = detect_domain(script_text or segment_text)
+    queries = build_queries(segment_text, domain)
     candidates: list[VideoItem] = []
     for query in queries:
         cached = load_cache(_provider_name(), query, orientation, cache_hours)
@@ -135,26 +174,53 @@ def ensure_broll_pool(
         and min(item.width, item.height) >= min_res
     ]
     if status_callback:
-        status_callback(f"[BROLL] queries={queries} candidates={len(filtered)}")
+        status_callback(f"[BROLL] domain={domain} queries={queries} candidates={len(filtered)}")
 
     ranked = []
     for query in queries:
-        ranked.extend(rank_videos(filtered, query=query, target_duration=target_duration, min_res=min_res, orientation=orientation))
+        ranked.extend(
+            rank_videos(
+                filtered,
+                query=query,
+                target_duration=target_duration,
+                min_res=min_res,
+                orientation=orientation,
+                domain=domain,
+            )
+        )
 
     ranked = _filter_existing(segment_dir, ranked)
     manifest = _load_manifest(segment_dir)
     items = manifest.get("items", [])
 
     global _DOWNLOADS_THIS_RUN
-    for item in ranked:
+    for attempt_index, item in enumerate(ranked, start=1):
         if len(items) >= per_segment:
+            break
+        if attempt_index > max_attempts:
             break
         if _DOWNLOADS_THIS_RUN >= max_downloads:
             break
         filename = f"clip_{len(items)+1:03d}.mp4"
+        raw_path = segment_dir / f"raw_{filename}"
         dest = segment_dir / filename
+        if status_callback:
+            status_callback(f"[BROLL] attempt {attempt_index}/{max_attempts} -> {item.file_url}")
         try:
-            _download_file(item.file_url, dest)
+            _download_file(item.file_url, raw_path)
+            if _probe_duration(raw_path) <= 0:
+                raw_path.unlink(missing_ok=True)
+                if status_callback:
+                    status_callback(f"[BROLL] invalid download skipped {raw_path}")
+                continue
+            normalize_clip(
+                raw_path,
+                dest,
+                duration=None,
+                debug_label=None,
+                status_callback=status_callback,
+            )
+            raw_path.unlink(missing_ok=True)
         except Exception as exc:
             if status_callback:
                 status_callback(f"[BROLL] download failed {item.file_url}: {exc}")
@@ -175,6 +241,9 @@ def ensure_broll_pool(
         if status_callback:
             status_callback(f"[BROLL] downloaded {dest}")
         time.sleep(rate_sleep)
+
+    if status_callback:
+        status_callback(f"[BROLL] segment {segment_id} pool_size={len(items)}")
 
     manifest_payload = {
         "segment_id": segment_id,

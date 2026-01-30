@@ -14,7 +14,7 @@ if not hasattr(Image, "ANTIALIAS"):
 
 from moviepy.editor import AudioFileClip, ImageClip
 
-from app.config import OUTPUT_DIR, TARGET_FPS, TARGET_RESOLUTION
+from app.config import OUTPUT_DIR, TARGET_FPS, TARGET_PLATFORM, TARGET_RESOLUTION
 from app.core.broll.resolver import ensure_broll_pool, select_broll_clip
 from app.core.resource_guard import monitored_threads
 from app.core.visual_validator import generate_fallback_visuals, validate_visuals
@@ -125,6 +125,10 @@ def _build_visual_track(
     output_path: Path,
     status_callback: StatusCallback = None,
 ) -> None:
+    _log_status(
+        status_callback,
+        f"Platform={TARGET_PLATFORM} target={TARGET_RESOLUTION[0]}x{TARGET_RESOLUTION[1]}",
+    )
     timings = _sentence_timings(script_text, audio_duration)
     phase_times = _resolve_phase_times(timings, audio_duration)
     log_path = OUTPUT_DIR / "debug" / "validation.txt"
@@ -148,6 +152,7 @@ def _build_visual_track(
                 segment_id=segment_id,
                 segment_text=segment_text,
                 target_duration=duration,
+                script_text=script_text,
                 status_callback=status_callback,
             )
             clip_path = select_broll_clip(pool_dir, status_callback=status_callback)

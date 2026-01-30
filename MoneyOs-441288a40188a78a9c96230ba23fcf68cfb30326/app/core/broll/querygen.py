@@ -47,6 +47,24 @@ BROAD_TOPICS = {
     "motivation": "motivation",
 }
 
+DOMAIN_ANCHORS = {
+    "finance_legal": [
+        "finance audit legal",
+        "bank transfer",
+        "audit documents",
+        "legal contract",
+        "city council meeting",
+        "escrow paperwork",
+    ],
+}
+
+
+def detect_domain(script_text: str) -> str:
+    terms = _extract_terms(script_text)
+    domain_terms = {"finance", "audit", "escrow", "contract", "legal", "court", "bank"}
+    if any(term in domain_terms for term in terms):
+        return "finance_legal"
+    return "general"
 
 def _extract_terms(text: str) -> list[str]:
     tokens = re.findall(r"[a-z0-9]+", text.lower())
@@ -60,7 +78,7 @@ def _detect_topic(terms: list[str]) -> str:
     return "business meeting"
 
 
-def build_queries(segment_text: str, max_queries: int = 6) -> list[str]:
+def build_queries(segment_text: str, domain: str, max_queries: int = 6) -> list[str]:
     terms = _extract_terms(segment_text)
     counts = Counter(terms)
     common = [term for term, _ in counts.most_common(8)]
@@ -74,6 +92,8 @@ def build_queries(segment_text: str, max_queries: int = 6) -> list[str]:
             if term not in queries:
                 queries.append(term)
     queries.append(_detect_topic(terms))
+    if domain in DOMAIN_ANCHORS:
+        queries.extend(DOMAIN_ANCHORS[domain])
     deduped = []
     for query in queries:
         query = query.strip()

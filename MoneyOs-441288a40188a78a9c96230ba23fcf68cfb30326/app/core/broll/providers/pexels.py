@@ -18,8 +18,20 @@ class PexelsProvider(BrollProvider):
     def search(self, query: str, orientation: str, per_page: int) -> list[VideoItem]:
         headers = {"Authorization": self.api_key}
         params = {"query": query, "per_page": per_page, "orientation": orientation}
-        response = requests.get("https://api.pexels.com/videos/search", headers=headers, params=params, timeout=20)
-        response.raise_for_status()
+        response = None
+        for attempt in range(3):
+            response = requests.get(
+                "https://api.pexels.com/videos/search",
+                headers=headers,
+                params=params,
+                timeout=20,
+            )
+            if response.status_code >= 500 and attempt < 2:
+                continue
+            response.raise_for_status()
+            break
+        if response is None:
+            raise RuntimeError("Pexels request failed.")
         data = response.json()
         videos = data.get("videos", [])
         items: list[VideoItem] = []

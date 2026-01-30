@@ -40,7 +40,7 @@ def main() -> int:
         segment_id = segment.get("id") or index
         seg_name = f"seg_{int(segment_id):03d}"
         try:
-            ensure_broll_pool(segment_id=seg_name, segment_text=text, target_duration=duration)
+            ensure_broll_pool(segment_id=seg_name, segment_text=text, target_duration=duration, script_text=text)
         except Exception as exc:
             failures += 1
             print(f"[BROLL] segment {seg_name} failed: {exc}")
