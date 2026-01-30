@@ -56,12 +56,20 @@ def ensure_dependencies() -> None:
         _log("All required packages already installed.")
 
     if not _has_module("torch"):
-        _log("Torch not found. Attempting CUDA-enabled install...")
-        success = _pip_install(["torch", "--index-url", "https://download.pytorch.org/whl/cu121"])
-        if not success:
-            _log(
-                "Torch install failed. Install manually from https://pytorch.org/get-started/locally/ "
-                "and ensure a CUDA build is selected."
-            )
-    else:
-        _log("Torch already installed.")
+        _log(
+            "Torch is not installed. Install it manually from https://pytorch.org/get-started/locally/ "
+            "to enable anime visuals."
+        )
+        return
+    _log("Torch already installed.")
+    if os.getenv("MONEYOS_USE_GPU", "0") == "1":
+        try:
+            import torch  # noqa: WPS433
+
+            if not torch.cuda.is_available():
+                _log(
+                    "MONEYOS_USE_GPU=1 but CUDA is unavailable. Install a CUDA-enabled torch build "
+                    "from https://pytorch.org/get-started/locally/."
+                )
+        except Exception as exc:  # noqa: BLE001
+            _log(f"Unable to verify CUDA availability: {exc}")

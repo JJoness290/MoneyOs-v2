@@ -5,12 +5,19 @@ import hashlib
 import importlib
 import importlib.util
 from pathlib import Path
+import threading
 
-from app.config import AI_IMAGE_CACHE, SD_GUIDANCE, SD_MODEL, SD_SEED, SD_STEPS
+from app.config import AI_IMAGE_CACHE, SD_GUIDANCE, SD_MODEL, SD_MODEL_ID, SD_SEED, SD_STEPS
 
 
 _PIPELINE = None
 _PIPELINE_MODEL = None
+_PIPELINE_LOCK = threading.Lock()
+
+_MODEL_PRESETS = {
+    "sd15_anime": "Linaqruf/anything-v4.0",
+    "sdxl": "stabilityai/stable-diffusion-xl-base-1.0",
+}
 
 
 @dataclass(frozen=True)
@@ -30,8 +37,44 @@ def is_sd_available() -> bool:
 
 
 def _hash_prompt(prompt: str, negative_prompt: str, settings: SDSettings, width: int, height: int) -> str:
-    raw = f"{prompt}|{negative_prompt}|{settings.model}|{settings.steps}|{settings.guidance}|{settings.seed}|{width}x{height}"
+    raw = (
+        f"{prompt}|{negative_prompt}|{settings.model}|{settings.steps}|{settings.guidance}|"
+        f"{settings.seed}|{width}x{height}|{SD_MODEL_ID}"
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _resolve_model_id(model_name: str) -> str:
+    if SD_MODEL_ID:
+        return SD_MODEL_ID
+    return _MODEL_PRESETS.get(model_name, _MODEL_PRESETS["sd15_anime"])
+
+
+def _prepare_pipeline(settings: SDSettings):
+    torch = importlib.import_module("torch")
+    diffusers = importlib.import_module("diffusers")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    model_id = _resolve_model_id(settings.model)
+    dtype = torch.float16 if device == "cuda" else torch.float32
+    pipeline = diffusers.DiffusionPipeline.from_pretrained(model_id, torch_dtype=dtype)
+    if settings.model == "sdxl" and device == "cuda":
+        pipeline.enable_model_cpu_offload()
+    else:
+        pipeline = pipeline.to(device)
+    if hasattr(pipeline, "enable_xformers_memory_efficient_attention"):
+        try:
+            pipeline.enable_xformers_memory_efficient_attention()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ANIME] xformers unavailable ({exc}); using default attention")
+    if hasattr(pipeline, "enable_attention_slicing"):
+        pipeline.enable_attention_slicing()
+    if hasattr(pipeline, "enable_vae_slicing"):
+        pipeline.enable_vae_slicing()
+    if hasattr(pipeline, "enable_vae_tiling"):
+        pipeline.enable_vae_tiling()
+    return pipeline, device
 
 
 def generate_image(
@@ -51,35 +94,40 @@ def generate_image(
         return cached_path
 
     torch = importlib.import_module("torch")
-    diffusers = importlib.import_module("diffusers")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float16 if device == "cuda" else torch.float32
     global _PIPELINE, _PIPELINE_MODEL
-    if _PIPELINE is None or _PIPELINE_MODEL != settings.model:
-        pipeline = diffusers.DiffusionPipeline.from_pretrained(settings.model, torch_dtype=dtype)
-        pipeline = pipeline.to(device)
-        if hasattr(pipeline, "enable_xformers_memory_efficient_attention"):
-            pipeline.enable_xformers_memory_efficient_attention()
-        if hasattr(pipeline, "enable_vae_slicing"):
-            pipeline.enable_vae_slicing()
-        if hasattr(pipeline, "enable_vae_tiling"):
-            pipeline.enable_vae_tiling()
-        _PIPELINE = pipeline
-        _PIPELINE_MODEL = settings.model
-    pipeline = _PIPELINE
+    with _PIPELINE_LOCK:
+        if _PIPELINE is None or _PIPELINE_MODEL != settings.model:
+            pipeline, device = _prepare_pipeline(settings)
+            _PIPELINE = pipeline
+            _PIPELINE_MODEL = settings.model
+        else:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        pipeline = _PIPELINE
     generator = torch.Generator(device=device)
     if settings.seed != 0:
         generator = generator.manual_seed(settings.seed)
 
-    result = pipeline(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        num_inference_steps=settings.steps,
-        guidance_scale=settings.guidance,
-        width=width,
-        height=height,
-        generator=generator,
-    )
+    if device == "cuda":
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            result = pipeline(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                num_inference_steps=settings.steps,
+                guidance_scale=settings.guidance,
+                width=width,
+                height=height,
+                generator=generator,
+            )
+    else:
+        result = pipeline(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            num_inference_steps=settings.steps,
+            guidance_scale=settings.guidance,
+            width=width,
+            height=height,
+            generator=generator,
+        )
     image = result.images[0]
     image.save(output_path)
     if AI_IMAGE_CACHE:
