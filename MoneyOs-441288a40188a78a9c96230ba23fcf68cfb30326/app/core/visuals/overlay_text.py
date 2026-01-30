@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 from app.config import TARGET_FPS
 from app.core.resource_guard import monitored_threads
@@ -18,10 +19,15 @@ def add_text_overlay(
     log_path: Path | None = None,
 ) -> None:
     enable = f"between(t,{start:.3f},{end:.3f})"
-    filters = [
-        build_drawtext_filter("MONEYOS VISUALS OK", "40", "40", 40),
-        build_drawtext_filter("%{pts\\:hms}", "40", "100", 36, is_timecode=True),
-    ]
+    debug_burnin = os.getenv("DEBUG_VISUALS") == "1" or os.getenv("MONEYOS_DEBUG_BURNIN") == "1"
+    filters = []
+    if debug_burnin:
+        filters.extend(
+            [
+                build_drawtext_filter("MONEYOS VISUALS OK", "40", "40", 40),
+                build_drawtext_filter("%{pts\\:hms}", "40", "100", 36, is_timecode=True),
+            ]
+        )
     if text:
         filters.append(
             build_drawtext_filter(

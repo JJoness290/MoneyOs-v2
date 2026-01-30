@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import os
 import random
 import re
 import subprocess
@@ -123,6 +124,10 @@ def _load_broll_pools() -> dict[str, list[Path]]:
     return pools
 
 
+def _allow_testsrc2() -> bool:
+    return os.getenv("MONEYOS_ALLOW_TESTSRC2") == "1"
+
+
 def _next_pool_clip(pool_name: str, pools: dict[str, list[Path]], indices: dict[str, int]) -> Path | None:
     clips = pools.get(pool_name, [])
     if not clips:
@@ -179,6 +184,7 @@ def _render_intent_block(
         clip_path = _select_clip_for_intent(intent, pools, indices)
         if not clip_path:
             break
+        _log_status(status_callback, f"Selected background clip: {clip_path}")
         clip_duration = _probe_duration(clip_path)
         if clip_duration <= 0:
             indices[intent] = indices.get(intent, 0) + 1
@@ -219,6 +225,18 @@ def _build_visual_track(
     status_callback: StatusCallback = None,
 ) -> None:
     pools = _load_broll_pools()
+    pool_dirs = {name: BROLL_DIR / name for name in pools}
+    total_clips = sum(len(clips) for clips in pools.values())
+    _log_status(
+        status_callback,
+        "B-roll scan: "
+        + ", ".join(f"{name}={len(pools[name])}" for name in sorted(pools))
+        + f" (total={total_clips})",
+    )
+    _log_status(
+        status_callback,
+        "B-roll folders: " + ", ".join(f"{pool_dirs[name]}/*.mp4" for name in sorted(pool_dirs)),
+    )
     indices: dict[str, int] = {}
     timings = _sentence_timings(script_text, audio_duration)
     phase_times = _resolve_phase_times(timings, audio_duration)
@@ -286,10 +304,21 @@ def _build_visual_track(
                 log_path=log_path,
             )
         else:
+            missing = ", ".join(
+                f"{pool_dirs[name]}/*.mp4" for name in sorted(pool_dirs) if not pools[name]
+            )
+            if not _allow_testsrc2():
+                raise RuntimeError(
+                    "No background clips available. Empty pools: "
+                    f"{missing}. Set MONEYOS_ALLOW_TESTSRC2=1 to allow testsrc2."
+                )
+            _log_status(status_callback, "No background clips found; using fallback testsrc2")
             build_base_bg(audio_duration, base_video, status_callback=status_callback, log_path=log_path)
 
         base_validation = validate_visuals(base_video)
         if not base_validation.ok:
+            if not _allow_testsrc2():
+                raise RuntimeError(f"Base visuals failed validation: {base_validation.reason}")
             _log_status(status_callback, f"Base visuals failed validation ({base_validation.reason}); using fallback")
             generate_fallback_visuals(audio_duration, base_video)
             base_validation = validate_visuals(base_video)
@@ -315,6 +344,8 @@ def _build_visual_track(
         visuals_for_output = overlay_video
         overlay_validation = validate_visuals(overlay_video)
         if not overlay_validation.ok:
+            if not _allow_testsrc2():
+                raise RuntimeError(f"Overlay visuals failed validation: {overlay_validation.reason}")
             _log_status(status_callback, f"Overlay visuals failed validation ({overlay_validation.reason}); using fallback")
             generate_fallback_visuals(audio_duration, overlay_video)
             overlay_validation = validate_visuals(overlay_video)
@@ -356,6 +387,8 @@ def _build_visual_track(
 
         final_validation = validate_visuals(output_path)
         if not final_validation.ok:
+            if not _allow_testsrc2():
+                raise RuntimeError(f"Final video failed validation: {final_validation.reason}")
             _log_status(status_callback, f"Final video failed validation ({final_validation.reason}); using fallback")
             fallback_visuals = temp_path / "final_fallback.mp4"
             generate_fallback_visuals(audio_duration, fallback_visuals)
