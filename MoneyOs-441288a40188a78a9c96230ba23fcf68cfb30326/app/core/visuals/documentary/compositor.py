@@ -9,15 +9,25 @@ import re
 from typing import Iterable
 
 from app.config import (
+    AI_IMAGE_BACKEND,
+    ANIME_BEAT_SECONDS,
+    ANIME_MAX_IMAGES_PER_SEGMENT,
+    ANIME_STYLE,
     DOC_BG_DIR,
     DOC_BG_MODE,
     DOC_STYLE,
     OUTPUT_DIR,
+    SD_GUIDANCE,
+    SD_MODEL,
+    SD_SEED,
+    SD_STEPS,
     SUBTITLE_STYLE,
     TARGET_FPS,
     TARGET_RESOLUTION,
+    VISUAL_MODE,
 )
 from app.core.resource_guard import monitored_threads
+from app.core.visuals.anime.beat_renderer import AnimeBeatVisuals
 from app.core.visuals.documentary.overlays import (
     build_evidence_overlay,
     build_lower_third,
@@ -156,6 +166,15 @@ def _hash_config(segment: DocSegment) -> str:
         "resolution": TARGET_RESOLUTION,
         "fps": TARGET_FPS,
         "subtitle_style": SUBTITLE_STYLE,
+        "visual_mode": VISUAL_MODE,
+        "anime_style": ANIME_STYLE,
+        "anime_backend": AI_IMAGE_BACKEND,
+        "anime_beat_seconds": ANIME_BEAT_SECONDS,
+        "anime_max_beats": ANIME_MAX_IMAGES_PER_SEGMENT,
+        "sd_model": SD_MODEL,
+        "sd_steps": SD_STEPS,
+        "sd_guidance": SD_GUIDANCE,
+        "sd_seed": SD_SEED,
     }
     raw = json.dumps(payload, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
@@ -295,12 +314,21 @@ def render_documentary_segment(
     timeline = build_timeline(segment.index / segment.total_segments, seg_dir / "timeline.png")
 
     background_path = seg_dir / "background.mp4"
-    loops = _available_loops()
-    if DOC_BG_MODE == "loops" and loops:
-        loop_path = loops[(segment.index - 1) % len(loops)]
-        _build_loop_background(loop_path, segment.duration, background_path, status_callback)
+    if VISUAL_MODE == "anime":
+        anime = AnimeBeatVisuals(status_callback=status_callback)
+        try:
+            anime.render_segment_background(segment.text, segment.duration, background_path)
+        except Exception as exc:  # noqa: BLE001
+            if status_callback:
+                status_callback(f"[ANIME] segment {segment.index} failed ({exc}); using procedural background")
+            _build_procedural_background(segment.duration, background_path, status_callback)
     else:
-        _build_procedural_background(segment.duration, background_path, status_callback)
+        loops = _available_loops()
+        if DOC_BG_MODE == "loops" and loops:
+            loop_path = loops[(segment.index - 1) % len(loops)]
+            _build_loop_background(loop_path, segment.duration, background_path, status_callback)
+        else:
+            _build_procedural_background(segment.duration, background_path, status_callback)
 
     overlay_inputs = [scene_card, lower_third, evidence, timeline]
     subtitle_dir = seg_dir / "subtitles"

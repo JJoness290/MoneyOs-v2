@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from app.config import VIDEO_DIR
+from app.core.bootstrap import ensure_dependencies
 from app.core.pipeline import PipelineResult, run_pipeline
 from app.core.system_specs import get_system_specs
 
@@ -22,6 +23,11 @@ STATUS_DONE = "Done"
 
 _jobs_lock = threading.Lock()
 _jobs: Dict[str, dict] = {}
+
+
+@app.on_event("startup")
+def bootstrap_dependencies() -> None:
+    ensure_dependencies()
 
 
 def _format_mmss(seconds: float) -> str:
