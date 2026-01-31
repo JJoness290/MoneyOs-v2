@@ -15,9 +15,9 @@ def _nvenc_quality_mode() -> str:
     mode = os.getenv("MONEYOS_NVENC_QUALITY", "auto").strip().lower()
     if mode == "auto":
         quality = os.getenv("MONEYOS_QUALITY", "auto").strip().lower()
-        if quality == "fast":
+        if quality == "low":
             return "fast"
-        if quality == "max":
+        if quality in {"high", "max"}:
             return "max"
         return "balanced"
     if mode not in {"fast", "balanced", "max"}:

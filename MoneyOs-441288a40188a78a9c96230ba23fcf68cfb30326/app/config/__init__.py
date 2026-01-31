@@ -69,9 +69,9 @@ AI_IMAGE_BACKEND = os.getenv("MONEYOS_AI_IMAGE_BACKEND", "sd_local").strip().low
 if AI_IMAGE_BACKEND not in {"sd_local"}:
     AI_IMAGE_BACKEND = "sd_local"
 SD_MODEL = os.getenv("MONEYOS_SD_MODEL", "sd15_anime").strip().lower()
-if SD_MODEL not in {"sd15_anime", "sdxl"}:
+if SD_MODEL not in {"sd15_anime", "sdxl_anime"}:
     SD_MODEL = "sd15_anime"
-SD_MODEL_ID = os.getenv("MONEYOS_SD_MODEL_ID") or None
+SD_MODEL_ID = os.getenv("MONEYOS_SD_MODEL_ID") or "runwayml/stable-diffusion-v1-5"
 try:
     SD_STEPS = int(os.getenv("MONEYOS_SD_STEPS", "18"))
 except ValueError:

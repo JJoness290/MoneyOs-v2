@@ -12,6 +12,7 @@ from typing import Any
 from app.config import AI_IMAGE_CACHE, SD_GUIDANCE, SD_MODEL, SD_MODEL_ID, SD_SEED, SD_STEPS
 from app.core.quality_profiles import (
     detect_hardware,
+    base_preset_for_vram,
     get_quality_profile,
     sanitize_filename_component,
     save_profile_from_info,
@@ -25,8 +26,8 @@ _LOGGED_MEMORY = False
 _PROFILE_INFO: dict[str, Any] | None = None
 
 _MODEL_PRESETS = {
-    "sd15_anime": "Linaqruf/anything-v4.0",
-    "sdxl": "stabilityai/stable-diffusion-xl-base-1.0",
+    "sd15_anime": "runwayml/stable-diffusion-v1-5",
+    "sdxl_anime": "stabilityai/stable-diffusion-xl-base-1.0",
 }
 
 
@@ -66,13 +67,16 @@ def _hash_prompt(prompt: str, negative_prompt: str, settings: SDSettings) -> str
 
 
 def _resolve_model_id(model_name: str) -> str:
-    if SD_MODEL_ID:
+    env_override = os.getenv("MONEYOS_SD_MODEL_ID")
+    if env_override:
+        return env_override
+    if model_name == "sd15_anime":
         return SD_MODEL_ID
     return _MODEL_PRESETS.get(model_name, _MODEL_PRESETS["sd15_anime"])
 
 
 def _model_family(model_name: str) -> str:
-    if model_name == "sdxl":
+    if model_name == "sdxl_anime":
         return "sdxl"
     return "sd15"
 
@@ -91,9 +95,20 @@ def _clamp_dim(value: int) -> int:
 
 def _quality_mode() -> str:
     mode = os.getenv("MONEYOS_QUALITY", "auto").strip().lower()
-    if mode not in {"auto", "max", "fast", "manual", "balanced"}:
+    if mode not in {"auto", "max", "low", "balanced", "high", "manual"}:
         return "auto"
     return mode
+
+
+def _select_model_name(hardware, quality_mode: str) -> str:
+    explicit = os.getenv("MONEYOS_SD_MODEL")
+    if explicit:
+        return SD_MODEL
+    if hardware.vram_total_gb <= 8:
+        return "sd15_anime"
+    if hardware.vram_total_gb >= 12 and quality_mode in {"high", "max"}:
+        return "sdxl_anime"
+    return "sd15_anime"
 
 
 def _merge_env_overrides(profile: dict[str, Any]) -> dict[str, Any]:
@@ -118,18 +133,57 @@ def _merge_env_overrides(profile: dict[str, Any]) -> dict[str, Any]:
     return overrides
 
 
+def _pipeline_settings(torch_module, settings: SDSettings) -> SDSettings:
+    if _quality_mode() == "manual":
+        return settings
+    hardware = detect_hardware(torch_module)
+    vram_gb = hardware.vram_free_gb or hardware.vram_total_gb
+    base_profile = base_preset_for_vram(vram_gb)
+    fp16 = _env_bool("MONEYOS_SD_FP16", base_profile["fp16"])
+    cpu_offload = _env_bool("MONEYOS_SD_CPU_OFFLOAD", base_profile["cpu_offload"])
+    attn_slicing = _env_bool("MONEYOS_SD_ATTENTION_SLICING", base_profile["attention_slicing"])
+    vae_slicing = _env_bool("MONEYOS_SD_VAE_SLICING", base_profile["vae_slicing"])
+    return SDSettings(
+        model=settings.model,
+        steps=settings.steps,
+        guidance=settings.guidance,
+        seed=settings.seed,
+        width=settings.width,
+        height=settings.height,
+        fp16=fp16,
+        cpu_offload=cpu_offload,
+        attention_slicing=attn_slicing,
+        vae_slicing=vae_slicing,
+    )
+
+
 def _resolve_profile(torch_module, settings: SDSettings, pipeline) -> tuple[SDSettings, dict[str, Any]]:
     mode = _quality_mode()
     hardware = detect_hardware(torch_module)
-    model_id = _resolve_model_id(settings.model)
-    profile, source = get_quality_profile(
-        pipeline,
-        torch_module,
-        model_id,
-        mode,
-        logger=lambda msg: print(f"[ANIME] {msg}"),
-    )
-    final_profile = _merge_env_overrides(profile) if mode != "manual" else profile
+    if mode == "manual":
+        profile = {
+            "width": settings.width,
+            "height": settings.height,
+            "steps": settings.steps,
+            "guidance": settings.guidance,
+            "fp16": settings.fp16,
+            "cpu_offload": settings.cpu_offload,
+            "attention_slicing": settings.attention_slicing,
+            "vae_slicing": settings.vae_slicing,
+            "xformers": os.getenv("MONEYOS_SD_XFORMERS", "0") == "1",
+        }
+        final_profile = _merge_env_overrides(profile)
+        source = "manual"
+    else:
+        model_id = _resolve_model_id(settings.model)
+        profile, source = get_quality_profile(
+            pipeline,
+            torch_module,
+            model_id,
+            mode,
+            logger=lambda msg: print(f"[ANIME] {msg}"),
+        )
+        final_profile = _merge_env_overrides(profile)
     print(
         "[ANIME] hardware="
         f"{sanitize_filename_component(hardware.gpu_name or 'cpu')} "
@@ -218,6 +272,21 @@ def generate_image(
     torch = importlib.import_module("torch")
 
     global _PIPELINE, _PIPELINE_MODEL
+    hardware = detect_hardware(torch)
+    selected_model = _select_model_name(hardware, _quality_mode())
+    if selected_model != settings.model:
+        settings = SDSettings(
+            model=selected_model,
+            steps=settings.steps,
+            guidance=settings.guidance,
+            seed=settings.seed,
+            width=settings.width,
+            height=settings.height,
+            fp16=settings.fp16,
+            cpu_offload=settings.cpu_offload,
+            attention_slicing=settings.attention_slicing,
+            vae_slicing=settings.vae_slicing,
+        )
     pipeline_settings = _pipeline_settings(torch, settings)
     with _PIPELINE_LOCK:
         if _PIPELINE is None or _PIPELINE_MODEL != pipeline_settings.model:

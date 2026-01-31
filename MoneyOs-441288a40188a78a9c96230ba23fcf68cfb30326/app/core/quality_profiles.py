@@ -111,6 +111,18 @@ def save_cached_profile(key: str, profile: dict[str, Any]) -> None:
 
 
 def base_preset_for_vram(vram_gb: float) -> dict[str, Any]:
+    if vram_gb <= 4:
+        return {
+            "width": 384,
+            "height": 384,
+            "steps": 12,
+            "guidance": 6.0,
+            "fp16": True,
+            "cpu_offload": True,
+            "attention_slicing": True,
+            "vae_slicing": True,
+            "xformers": False,
+        }
     if vram_gb <= 6:
         return {
             "width": 448,
@@ -199,23 +211,26 @@ def autotune_sd_profile(
         log(f"warmup failed: {exc}")
 
     candidates = _candidate_grid()
-    if quality_mode == "fast":
+    if quality_mode == "low":
         candidates = [(512, 14), (512, 16)]
-    elif quality_mode == "auto":
+    elif quality_mode in {"auto", "balanced"}:
         candidates = candidates[:8]
+    elif quality_mode in {"high", "max"}:
+        candidates = candidates[:12]
 
     for size, steps in candidates:
         if time.time() - start_time > time_budget_s:
             log("time budget exceeded; stopping probe")
             break
         try:
+            guidance = 7.0 if quality_mode in {"high", "max"} else base_profile["guidance"]
             pipeline(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 width=size,
                 height=size,
                 num_inference_steps=steps,
-                guidance_scale=base_profile["guidance"],
+                guidance_scale=guidance,
                 generator=generator,
             )
             vram_peak = 0.0
@@ -226,8 +241,13 @@ def autotune_sd_profile(
                 torch.cuda.reset_peak_memory_stats()
             except Exception:  # noqa: BLE001
                 vram_peak = 0.0
-            if vram_peak and vram_peak > (base_profile["vram_total_gb"] * vram_safety):
-                log(f"candidate {size}x{size} steps={steps} exceeds VRAM safety; stopping")
+            headroom_gb = max(1.0, base_profile["vram_total_gb"] * 0.15)
+            vram_limit = min(
+                base_profile["vram_total_gb"] * vram_safety,
+                base_profile["vram_total_gb"] - headroom_gb,
+            )
+            if vram_peak and vram_peak > vram_limit:
+                log(f"candidate {size}x{size} steps={steps} exceeds VRAM headroom; stopping")
                 break
             best = {**best, "width": size, "height": size, "steps": steps}
         except Exception as exc:  # noqa: BLE001
@@ -260,6 +280,10 @@ def get_quality_profile(
     logger: Logger | None = None,
 ) -> tuple[dict[str, Any], str]:
     log = logger or _log_default
+    if quality_mode == "auto":
+        probe_mode = "balanced"
+    else:
+        probe_mode = quality_mode
     hardware = detect_hardware(torch_module)
     vram_total = hardware.vram_total_gb
     vram_free = hardware.vram_free_gb or vram_total
@@ -267,6 +291,8 @@ def get_quality_profile(
     time_budget = float(os.getenv("MONEYOS_QUALITY_TIME_BUDGET_SECONDS", "30"))
 
     base_profile = base_preset_for_vram(vram_free or vram_total)
+    if quality_mode in {"high", "max"} and base_profile["guidance"] < 7.0:
+        base_profile["guidance"] = 7.0
     base_profile.update(
         {
             "vram_total_gb": vram_total,
@@ -284,13 +310,13 @@ def get_quality_profile(
             base_profile.update(cached)
             source = "cached"
             log(f"cache hit: {key}")
-            return {**base_profile, "profile_key": key}, source
-    if quality_mode != "manual":
-        log(f"probing profile (mode={quality_mode})")
+            return {**base_profile, "profile_key": key, "model_id": model_id}, source
+    if probe_mode != "manual":
+        log(f"probing profile (mode={probe_mode})")
         tuned = autotune_sd_profile(
             pipeline,
             base_profile,
-            quality_mode,
+            probe_mode,
             logger=log,
             time_budget_s=time_budget,
             vram_safety=vram_safety,
@@ -308,8 +334,9 @@ def get_quality_profile(
             "vram_safety": vram_safety,
             "time_budget_s": time_budget,
             "timestamp": time.time(),
+            "model_id": model_id,
         }
         save_cached_profile(key, profile_payload)
         source = "probed"
         return {**base_profile, **profile_payload, "profile_key": key}, source
-    return {**base_profile, "profile_key": key}, "manual"
+    return {**base_profile, "profile_key": key, "model_id": model_id}, "manual"

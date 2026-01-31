@@ -63,6 +63,7 @@ def main() -> None:
         print(
             "[ANIME_TEST] profile source="
             f"{profile_info.get('profile_source')} quality={profile_info.get('quality_mode')} "
+            f"key={profile_info.get('profile_key')} "
             f"final={profile.get('width')}x{profile.get('height')} steps={profile.get('steps')} "
             f"guidance={profile.get('guidance')} fp16={profile.get('fp16')} "
             f"cpu_offload={profile.get('cpu_offload')} attn_slicing={profile.get('attention_slicing')} "
