@@ -10,14 +10,11 @@ import threading
 from typing import Any
 
 from app.config import AI_IMAGE_CACHE, SD_GUIDANCE, SD_MODEL, SD_MODEL_ID, SD_SEED, SD_STEPS
-from app.core.quality_autotune import (
-    autotune_sd_profile,
-    base_preset_for_vram,
+from app.core.quality_profiles import (
     detect_hardware,
-    load_cached_profile,
-    profile_key,
+    get_quality_profile,
     sanitize_filename_component,
-    save_cached_profile,
+    save_profile_from_info,
 )
 
 
@@ -94,7 +91,7 @@ def _clamp_dim(value: int) -> int:
 
 def _quality_mode() -> str:
     mode = os.getenv("MONEYOS_QUALITY", "auto").strip().lower()
-    if mode not in {"auto", "max", "fast", "manual"}:
+    if mode not in {"auto", "max", "fast", "manual", "balanced"}:
         return "auto"
     return mode
 
@@ -121,90 +118,25 @@ def _merge_env_overrides(profile: dict[str, Any]) -> dict[str, Any]:
     return overrides
 
 
-def _pipeline_settings(torch_module, settings: SDSettings) -> SDSettings:
-    mode = _quality_mode()
-    if mode == "manual":
-        return settings
-    hardware = detect_hardware(torch_module)
-    vram_gb = hardware.vram_free_gb or hardware.vram_total_gb
-    family = _model_family(settings.model)
-    base_profile = base_preset_for_vram(vram_gb, family)
-    fp16 = _env_bool("MONEYOS_SD_FP16", base_profile["fp16"])
-    cpu_offload = _env_bool("MONEYOS_SD_CPU_OFFLOAD", base_profile["cpu_offload"])
-    attn_slicing = _env_bool("MONEYOS_SD_ATTENTION_SLICING", base_profile["attention_slicing"])
-    vae_slicing = _env_bool("MONEYOS_SD_VAE_SLICING", base_profile["vae_slicing"])
-    return SDSettings(
-        model=settings.model,
-        steps=base_profile["steps"],
-        guidance=base_profile["guidance"],
-        seed=settings.seed,
-        width=base_profile["width"],
-        height=base_profile["height"],
-        fp16=fp16,
-        cpu_offload=cpu_offload,
-        attention_slicing=attn_slicing,
-        vae_slicing=vae_slicing,
-    )
-
-
 def _resolve_profile(torch_module, settings: SDSettings, pipeline) -> tuple[SDSettings, dict[str, Any]]:
     mode = _quality_mode()
     hardware = detect_hardware(torch_module)
-    vram_gb = hardware.vram_free_gb or hardware.vram_total_gb
-    family = _model_family(settings.model)
-    if mode == "manual":
-        base_profile = {
-            "width": _clamp_dim(int(os.getenv("MONEYOS_SD_WIDTH", settings.width))),
-            "height": _clamp_dim(int(os.getenv("MONEYOS_SD_HEIGHT", settings.height))),
-            "steps": int(os.getenv("MONEYOS_SD_STEPS", settings.steps)),
-            "guidance": float(os.getenv("MONEYOS_SD_GUIDANCE", settings.guidance)),
-            "fp16": _env_bool("MONEYOS_SD_FP16", settings.fp16),
-            "cpu_offload": _env_bool("MONEYOS_SD_CPU_OFFLOAD", settings.cpu_offload),
-            "attention_slicing": _env_bool("MONEYOS_SD_ATTENTION_SLICING", settings.attention_slicing),
-            "vae_slicing": _env_bool("MONEYOS_SD_VAE_SLICING", settings.vae_slicing),
-            "xformers": os.getenv("MONEYOS_SD_XFORMERS", "0") == "1",
-        }
-    else:
-        base_profile = base_preset_for_vram(vram_gb, family)
-    base_profile.update(
-        {
-            "model_family": family,
-            "vram_gb": vram_gb,
-            "guidance": base_profile["guidance"],
-            "generator": torch_module.Generator(device="cuda" if torch_module.cuda.is_available() else "cpu")
-            .manual_seed(1234),
-            "pipeline": pipeline,
-        }
-    )
     model_id = _resolve_model_id(settings.model)
-    key = profile_key(hardware, torch_module.__version__, model_id)
-    cached = None
-    source = "probed"
-    if mode != "manual" and os.getenv("MONEYOS_QUALITY_FORCE_PROBE", "0") != "1":
-        cached = load_cached_profile(key)
-        if cached:
-            source = "cache_hit"
-            base_profile.update(cached)
-    if mode != "manual" and not cached:
-        debug = os.getenv("MONEYOS_DEBUG_QUALITY", "0") == "1"
-        base_profile = autotune_sd_profile(
-            base_profile["pipeline"],
-            base_profile,
-            mode,
-            logger=lambda msg: print(f"[ANIME] {msg}"),
-            debug=debug,
-        )
-        save_cached_profile(key, {k: base_profile[k] for k in ["width", "height", "steps", "guidance"]})
-    if mode == "manual":
-        source = "manual"
-    final_profile = _merge_env_overrides(base_profile) if mode != "manual" else base_profile
+    profile, source = get_quality_profile(
+        pipeline,
+        torch_module,
+        model_id,
+        mode,
+        logger=lambda msg: print(f"[ANIME] {msg}"),
+    )
+    final_profile = _merge_env_overrides(profile) if mode != "manual" else profile
     print(
         "[ANIME] hardware="
         f"{sanitize_filename_component(hardware.gpu_name or 'cpu')} "
         f"vram_total={hardware.vram_total_gb:.2f}GB "
         f"vram_free={(hardware.vram_free_gb or 0.0):.2f}GB"
     )
-    print(f"[ANIME] quality_mode={mode} profile_source={source} profile_key={key}")
+    print(f"[ANIME] quality_mode={mode} profile_source={source}")
     print(
         "[ANIME] final profile "
         f"{final_profile['width']}x{final_profile['height']} steps={final_profile['steps']} "
@@ -228,7 +160,7 @@ def _resolve_profile(torch_module, settings: SDSettings, pipeline) -> tuple[SDSe
     _PROFILE_INFO = {
         "quality_mode": mode,
         "profile_source": source,
-        "profile_key": key,
+        "profile_key": final_profile.get("profile_key"),
         "profile": final_profile,
     }
     return settings_out, _PROFILE_INFO
@@ -295,7 +227,7 @@ def generate_image(
         else:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         pipeline = _PIPELINE
-    effective_settings, _ = _resolve_profile(torch, settings, pipeline)
+    effective_settings, profile_info = _resolve_profile(torch, settings, pipeline)
     cache_key = _hash_prompt(prompt, negative_prompt, effective_settings)
     cached_path = cache_dir / f"{cache_key}.png"
     if AI_IMAGE_CACHE and cached_path.exists():
@@ -303,6 +235,8 @@ def generate_image(
     generator = torch.Generator(device=device)
     if effective_settings.seed != 0:
         generator = generator.manual_seed(effective_settings.seed)
+    else:
+        generator = generator.manual_seed(1234)
 
     global _LOGGED_MEMORY
     if not _LOGGED_MEMORY:
@@ -335,28 +269,62 @@ def generate_image(
         )
         return result
 
-    try:
-        if device == "cuda" and effective_settings.fp16:
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
-                result = _run_inference(effective_settings.width, effective_settings.height, effective_settings.steps)
-        else:
-            result = _run_inference(effective_settings.width, effective_settings.height, effective_settings.steps)
-    except RuntimeError as exc:
-        if "out of memory" in str(exc).lower() and device == "cuda":
-            torch.cuda.empty_cache()
-            down_width = _clamp_dim(max(256, int(effective_settings.width * 0.75)))
-            down_height = _clamp_dim(max(256, int(effective_settings.height * 0.75)))
-            down_steps = max(8, int(effective_settings.steps * 0.75))
-            print(
-                "[ANIME] CUDA OOM retry with "
-                f"{down_width}x{down_height} steps={down_steps}"
-            )
-            if effective_settings.fp16:
+    def _degrade_profile(settings_obj: SDSettings) -> SDSettings:
+        size_ladder = [settings_obj.width, 704, 640, 576, 512]
+        step_ladder = [settings_obj.steps, 22, 18, 16, 14]
+        size_ladder = [value for value in size_ladder if value >= 512]
+        step_ladder = [value for value in step_ladder if value >= 14]
+        new_width = size_ladder[1] if len(size_ladder) > 1 else settings_obj.width
+        new_steps = step_ladder[1] if len(step_ladder) > 1 else settings_obj.steps
+        return SDSettings(
+            model=settings_obj.model,
+            steps=new_steps,
+            guidance=settings_obj.guidance,
+            seed=settings_obj.seed,
+            width=new_width,
+            height=new_width,
+            fp16=True,
+            cpu_offload=True,
+            attention_slicing=True,
+            vae_slicing=True,
+        )
+
+    attempt_settings = effective_settings
+    for attempt in range(3):
+        try:
+            if device == "cuda" and attempt_settings.fp16:
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    result = _run_inference(down_width, down_height, down_steps)
+                    result = _run_inference(
+                        attempt_settings.width, attempt_settings.height, attempt_settings.steps
+                    )
             else:
-                result = _run_inference(down_width, down_height, down_steps)
-        else:
+                result = _run_inference(attempt_settings.width, attempt_settings.height, attempt_settings.steps)
+            break
+        except RuntimeError as exc:
+            if "out of memory" in str(exc).lower() and device == "cuda":
+                torch.cuda.empty_cache()
+                print(
+                    "[ANIME] CUDA OOM, degrading profile "
+                    f"({attempt_settings.width}x{attempt_settings.height} -> lower)"
+                )
+                attempt_settings = _degrade_profile(attempt_settings)
+                if attempt == 1:
+                    profile_info = profile_info or {}
+                    profile = profile_info.get("profile", {})
+                    if profile:
+                        profile.update(
+                            {
+                                "width": attempt_settings.width,
+                                "height": attempt_settings.height,
+                                "steps": attempt_settings.steps,
+                                "fp16": attempt_settings.fp16,
+                                "cpu_offload": attempt_settings.cpu_offload,
+                                "attention_slicing": attempt_settings.attention_slicing,
+                                "vae_slicing": attempt_settings.vae_slicing,
+                            }
+                        )
+                        save_profile_from_info(profile_info)
+                continue
             raise
     image = result.images[0]
     image.save(output_path)
