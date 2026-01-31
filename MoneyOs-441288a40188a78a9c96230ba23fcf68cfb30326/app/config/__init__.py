@@ -23,6 +23,30 @@ if TARGET_PLATFORM not in {"tiktok", "youtube"}:
 TARGET_RESOLUTION = (1080, 1920) if TARGET_PLATFORM == "tiktok" else (1920, 1080)
 TARGET_FPS = 30
 MIN_AUDIO_SECONDS = 480
+try:
+    YT_MIN_AUDIO_SECONDS = int(os.getenv("MONEYOS_YT_MIN_AUDIO_SECONDS", "600"))
+except ValueError:
+    YT_MIN_AUDIO_SECONDS = 600
+try:
+    YT_TARGET_AUDIO_SECONDS = int(os.getenv("MONEYOS_YT_TARGET_AUDIO_SECONDS", "720"))
+except ValueError:
+    YT_TARGET_AUDIO_SECONDS = 720
+try:
+    YT_MIN_WORDS = int(os.getenv("MONEYOS_YT_MIN_WORDS", "1800"))
+except ValueError:
+    YT_MIN_WORDS = 1800
+try:
+    YT_EXTEND_CHUNK_SECONDS = int(os.getenv("MONEYOS_YT_EXTEND_CHUNK_SECONDS", "180"))
+except ValueError:
+    YT_EXTEND_CHUNK_SECONDS = 180
+try:
+    YT_MAX_EXTEND_ATTEMPTS = int(os.getenv("MONEYOS_YT_MAX_EXTEND_ATTEMPTS", "4"))
+except ValueError:
+    YT_MAX_EXTEND_ATTEMPTS = 4
+try:
+    YT_WPM = int(os.getenv("MONEYOS_YT_WPM", "155"))
+except ValueError:
+    YT_WPM = 155
 
 VISUAL_MODE = os.getenv("MONEYOS_VISUAL_MODE")
 if VISUAL_MODE:

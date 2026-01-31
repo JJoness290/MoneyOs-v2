@@ -1,12 +1,10 @@
+import math
 import random
 import re
 from dataclasses import dataclass
 
-from app.config import MIN_AUDIO_SECONDS
-
-WORDS_PER_SECOND = 2.8
-TARGET_MIN_WORDS = 1300
-TARGET_MAX_WORDS = 1600
+from app.config import MIN_AUDIO_SECONDS, TARGET_PLATFORM, YT_MIN_WORDS, YT_TARGET_AUDIO_SECONDS, YT_WPM
+from app.core.audio_utils import count_words, estimate_seconds_from_words
 
 
 @dataclass
@@ -15,9 +13,8 @@ class ScriptResult:
     estimated_seconds: float
 
 
-def _estimate_seconds(text: str) -> float:
-    word_count = len(text.split())
-    return word_count / WORDS_PER_SECOND
+def _estimate_seconds(text: str, wpm: int) -> float:
+    return estimate_seconds_from_words(count_words(text), wpm)
 
 
 def sanitize_script(text: str) -> str:
@@ -25,6 +22,55 @@ def sanitize_script(text: str) -> str:
     cleaned = re.sub(r"`{1,3}.*?`{1,3}", " ", cleaned, flags=re.DOTALL)
     lines = [re.sub(r"\s+", " ", line).strip() for line in cleaned.splitlines()]
     return "\n".join(line for line in lines if line).strip()
+
+def _topic_context(script_text: str) -> str:
+    first_line = script_text.strip().splitlines()[0] if script_text.strip() else ""
+    first_sentence = first_line.split(".")[0].strip() if first_line else ""
+    return first_sentence or "the story you are telling"
+
+
+def extend_script_longform(
+    original_script: str,
+    add_seconds: int,
+    topic_context: str,
+    wpm: int = YT_WPM,
+) -> str:
+    add_words = max(0, math.ceil(wpm * (add_seconds / 60.0)))
+    topic_snippet = topic_context.strip().rstrip(".")
+    if not topic_snippet:
+        topic_snippet = "the story you are telling"
+    transition = (
+        f"Before we wrap, let's widen the lens on {topic_snippet} and sit with what it means."
+    )
+    subtopics = [
+        (
+            "First, here's a step-by-step breakdown of how the decision unfolded, "
+            "from the initial warning, to the quiet verification, to the final moment the team chose action."
+        ),
+        (
+            "Second, a quick example makes it tangible: imagine a family waiting on emergency aid, "
+            "and how a short delay feels enormous when the reason stays hidden."
+        ),
+        (
+            "Third, a myth-versus-fact moment matters here: the myth is that secrecy always equals wrongdoing; "
+            "the fact is that sometimes secrecy buys time for protection."
+        ),
+    ]
+    recap = (
+        "Quick recap: the urgency shaped every step, the paperwork hid the intent, and the plan aimed to protect, "
+        "not to disappear the funds. Keep that in mind as we move into the closing thought."
+    )
+    extension_sentences = [transition, *subtopics, recap]
+    extension_text = " ".join(extension_sentences)
+    words_needed = add_words - count_words(extension_text)
+    if words_needed > 0:
+        filler_sentence = (
+            "That extra context deepens the stakes, shows the human cost, and keeps the narrator's promise honest."
+        )
+        repeats = math.ceil(words_needed / max(1, count_words(filler_sentence)))
+        extension_text = " ".join([extension_text] + [filler_sentence] * repeats)
+    return f"{original_script}\n\n{extension_text}".strip()
+
 
 def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
     protagonist = "Mara"
@@ -181,11 +227,32 @@ def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
     script = " ".join(sentences).strip()
     script = f"{script} {landing_text}".strip()
     script = sanitize_script(script)
-    return ScriptResult(text=script, estimated_seconds=_estimate_seconds(script))
+
+    wpm = YT_WPM if TARGET_PLATFORM == "youtube" else int(round(YT_WPM * 1.1))
+    min_words = YT_MIN_WORDS if TARGET_PLATFORM == "youtube" else None
+    target_seconds = YT_TARGET_AUDIO_SECONDS if TARGET_PLATFORM == "youtube" else min_seconds
+
+    if min_words:
+        topic_context = _topic_context(script)
+        while count_words(script) < min_words:
+            missing_words = min_words - count_words(script)
+            add_seconds = math.ceil((missing_words / float(wpm)) * 60.0)
+            script = extend_script_longform(script, add_seconds, topic_context, wpm=wpm)
+            script = sanitize_script(script)
+
+    estimated = _estimate_seconds(script, wpm)
+    if target_seconds and estimated < target_seconds:
+        add_seconds = int(target_seconds - estimated)
+        script = extend_script_longform(script, add_seconds, _topic_context(script), wpm=wpm)
+        script = sanitize_script(script)
+        estimated = _estimate_seconds(script, wpm)
+
+    return ScriptResult(text=script, estimated_seconds=estimated)
 
 
 def expand_script_once(script_text: str) -> ScriptResult:
-    return ScriptResult(text=script_text, estimated_seconds=_estimate_seconds(script_text))
+    wpm = YT_WPM if TARGET_PLATFORM == "youtube" else int(round(YT_WPM * 1.1))
+    return ScriptResult(text=script_text, estimated_seconds=_estimate_seconds(script_text, wpm))
 
 
 def generate_titles(script_text: str) -> list[str]:
