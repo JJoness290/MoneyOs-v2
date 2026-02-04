@@ -47,6 +47,10 @@ def ensure_dependencies() -> None:
         _log("Auto-install disabled via MONEYOS_AUTO_PIP=0")
         return
 
+    from app.core.paths import get_assets_root, get_output_root
+
+    _log(f"assets_root={get_assets_root()}")
+    _log(f"output_root={get_output_root()}")
     _log(f"Virtualenv detected={_in_virtualenv()}")
     missing = []
     for module, version in _REQUIRED_PACKAGES.items():

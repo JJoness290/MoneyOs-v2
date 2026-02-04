@@ -20,7 +20,6 @@ from app.config import (
     ANIME3D_TEXTURE_MODE,
     ANIME3D_OUTLINE_MODE,
     ANIME3D_RESOLUTION,
-    ASSETS_DIR,
     AUTO_CHARACTERS_DIR,
     CHARACTERS_DIR,
     OUTPUT_DIR,
@@ -28,6 +27,7 @@ from app.config import (
     VIDEO_DIR,
     VISUAL_MODE,
 )
+from app.core.paths import get_assets_root, get_output_root, get_repo_root
 from app.core.assets.harvester.cache import get_cache_paths
 from app.core.assets.harvester.harvester import harvest_assets
 from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, status as autopilot_status
@@ -240,23 +240,28 @@ async def health() -> JSONResponse:
 @app.get("/debug/status")
 async def debug_status() -> JSONResponse:
     blender = detect_blender()
+    assets_root = get_assets_root()
     required_assets = {
-        "characters/hero.blend": (ASSETS_DIR / "characters" / "hero.blend"),
-        "characters/enemy.blend": (ASSETS_DIR / "characters" / "enemy.blend"),
-        "envs/city.blend": (ASSETS_DIR / "envs" / "city.blend"),
-        "anims/idle.fbx": (ASSETS_DIR / "anims" / "idle.fbx"),
-        "anims/run.fbx": (ASSETS_DIR / "anims" / "run.fbx"),
-        "anims/punch.fbx": (ASSETS_DIR / "anims" / "punch.fbx"),
-        "vfx/explosion.png": (ASSETS_DIR / "vfx" / "explosion.png"),
-        "vfx/energy_arc.png": (ASSETS_DIR / "vfx" / "energy_arc.png"),
-        "vfx/smoke.png": (ASSETS_DIR / "vfx" / "smoke.png"),
+        "characters/hero.blend": (assets_root / "characters" / "hero.blend"),
+        "characters/enemy.blend": (assets_root / "characters" / "enemy.blend"),
+        "envs/city.blend": (assets_root / "envs" / "city.blend"),
+        "anims/idle.fbx": (assets_root / "anims" / "idle.fbx"),
+        "anims/run.fbx": (assets_root / "anims" / "run.fbx"),
+        "anims/punch.fbx": (assets_root / "anims" / "punch.fbx"),
+        "vfx/explosion.png": (assets_root / "vfx" / "explosion.png"),
+        "vfx/energy_arc.png": (assets_root / "vfx" / "energy_arc.png"),
+        "vfx/smoke.png": (assets_root / "vfx" / "smoke.png"),
     }
     vram_gb = None
     payload = {
         "autopilot": autopilot_status(),
         "visual_mode": VISUAL_MODE,
-        "assets_dir": str(ASSETS_DIR),
+        "cwd": str(Path.cwd()),
+        "repo_root": str(get_repo_root()),
+        "assets_root": str(assets_root),
+        "output_root": str(get_output_root()),
         "assets_ready": {key: path.exists() for key, path in required_assets.items()},
+        "assets_missing": [key for key, path in required_assets.items() if not path.exists()],
         "asset_mode": ANIME3D_ASSET_MODE,
         "texture_mode": ANIME3D_TEXTURE_MODE,
         "sd_model_used": SD_MODEL_PATH,
@@ -343,6 +348,12 @@ async def generate_anime_episode_3d_60s(
     _ = req
     if VISUAL_MODE != "anime_3d":
         raise HTTPException(status_code=400, detail="MONEYOS_VISUAL_MODE must be anime_3d")
+    from app.core.visuals.anime_3d.render_pipeline import _ensure_assets  # noqa: WPS433
+
+    try:
+        _ensure_assets()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     job_id = uuid.uuid4().hex
     _set_status(job_id, "Queued 3D render")
     thread = threading.Thread(target=_run_anime_3d_60s, args=(job_id,), daemon=True)

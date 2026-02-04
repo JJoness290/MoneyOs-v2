@@ -16,9 +16,9 @@ from app.config import (
     ANIME3D_STYLE_PRESET,
     ANIME3D_OUTLINE_MODE,
     ANIME3D_POSTFX,
-    ASSETS_DIR,
     OUTPUT_DIR,
 )
+from app.core.paths import get_assets_root
 from app.core.tts import generate_tts
 from app.core.visuals.anime_3d.blender_runner import BlenderCommand, run_blender_capture
 from app.core.visuals.anime_3d.validators import validate_episode
@@ -38,16 +38,17 @@ def anime_3d_output_dir(job_id: str) -> Path:
 
 
 def _required_asset_paths() -> dict[str, Path]:
+    assets_root = get_assets_root()
     return {
-        "characters/hero.blend": ASSETS_DIR / "characters" / "hero.blend",
-        "characters/enemy.blend": ASSETS_DIR / "characters" / "enemy.blend",
-        "envs/city.blend": ASSETS_DIR / "envs" / "city.blend",
-        "anims/idle.fbx": ASSETS_DIR / "anims" / "idle.fbx",
-        "anims/run.fbx": ASSETS_DIR / "anims" / "run.fbx",
-        "anims/punch.fbx": ASSETS_DIR / "anims" / "punch.fbx",
-        "vfx/explosion.png": ASSETS_DIR / "vfx" / "explosion.png",
-        "vfx/energy_arc.png": ASSETS_DIR / "vfx" / "energy_arc.png",
-        "vfx/smoke.png": ASSETS_DIR / "vfx" / "smoke.png",
+        "characters/hero.blend": assets_root / "characters" / "hero.blend",
+        "characters/enemy.blend": assets_root / "characters" / "enemy.blend",
+        "envs/city.blend": assets_root / "envs" / "city.blend",
+        "anims/idle.fbx": assets_root / "anims" / "idle.fbx",
+        "anims/run.fbx": assets_root / "anims" / "run.fbx",
+        "anims/punch.fbx": assets_root / "anims" / "punch.fbx",
+        "vfx/explosion.png": assets_root / "vfx" / "explosion.png",
+        "vfx/energy_arc.png": assets_root / "vfx" / "energy_arc.png",
+        "vfx/smoke.png": assets_root / "vfx" / "smoke.png",
     }
 
 
@@ -56,7 +57,9 @@ def _ensure_assets() -> None:
         return
     missing = [key for key, path in _required_asset_paths().items() if not path.exists()]
     if missing:
-        message = "Missing assets:\n" + "\n".join(f"- {key}" for key in missing)
+        message = f"Missing assets (assets_root={get_assets_root()}):\n" + "\n".join(
+            f"- {key}" for key in missing
+        )
         raise RuntimeError(message)
 
 
@@ -116,7 +119,7 @@ def render_anime_3d_60s(job_id: str) -> Anime3DResult:
                 "--report",
                 str(report_path),
                 "--assets-dir",
-                str(ASSETS_DIR),
+                str(get_assets_root()),
                 "--asset-mode",
                 ANIME3D_ASSET_MODE,
                 "--style-preset",

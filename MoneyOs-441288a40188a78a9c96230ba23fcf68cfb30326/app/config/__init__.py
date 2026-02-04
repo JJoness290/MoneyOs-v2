@@ -1,15 +1,14 @@
 import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
-OUTPUT_DIR = BASE_DIR / "output"
+from app.core.paths import get_assets_root, get_output_root, get_repo_root
+
+BASE_DIR = get_repo_root()
+OUTPUT_DIR = get_output_root()
 VIDEO_DIR = OUTPUT_DIR / "videos"
 AUDIO_DIR = OUTPUT_DIR / "audio"
 BROLL_DIR = OUTPUT_DIR / "broll"
-_assets_env = os.getenv("MONEYOS_ASSETS_DIR", r"C:\MO_ASSETS\anime3d")
-ASSETS_DIR = Path(_assets_env)
-if not ASSETS_DIR.is_absolute():
-    ASSETS_DIR = BASE_DIR / ASSETS_DIR
+ASSETS_DIR = get_assets_root()
 CHARACTERS_DIR = BASE_DIR / os.getenv("MONEYOS_CHARACTERS_DIR", "assets/characters_3d")
 ANIMATIONS_DIR = BASE_DIR / os.getenv("MONEYOS_ANIMATIONS_DIR", "assets/animations")
 ANIMATION_PACKS_DIR = BASE_DIR / "assets" / "animation_packs"

@@ -114,7 +114,7 @@ GET /debug/status
 | `MONEYOS_RENDER_RES` | `1920x1080` | Render resolution (auto caps by hardware). |
 | `MONEYOS_RENDER_FPS` | `30` | Render fps. |
 | `MONEYOS_TOON_SHADER` | `1` | Enable toon shader mode. |
-| `MONEYOS_ASSETS_DIR` | `assets/` | Base assets folder. |
+| `MONEYOS_ASSETS_DIR` | `assets/` | Base assets folder. Defaults to repo `assets` if set; otherwise uses `MONEYOS_OUTPUT_ROOT/assets` or repo root. Example: `set MONEYOS_ASSETS_DIR=C:\Users\joshu\Documents\MoneyOs-codex-create-moneyos-local-tiktok-video-generator\assets`. |
 | `MONEYOS_CHARACTERS_DIR` | `assets/characters_3d/` | Rigged characters source. |
 | `MONEYOS_ANIMATIONS_DIR` | `assets/animations/` | Animation clips output. |
 | `MONEYOS_VFX_DIR` | `assets/vfx/` | VFX assets directory. |

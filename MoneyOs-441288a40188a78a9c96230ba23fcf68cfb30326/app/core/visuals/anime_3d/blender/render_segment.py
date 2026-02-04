@@ -384,7 +384,7 @@ def main() -> None:
         ]
         missing = [str(path) for path in required if not path.exists()]
         if missing:
-            raise RuntimeError("Missing assets:\n" + "\n".join(missing))
+            raise RuntimeError(f"Missing assets (assets_root={assets_dir}):\n" + "\n".join(missing))
 
     _clear_scene()
     scene = bpy.context.scene
