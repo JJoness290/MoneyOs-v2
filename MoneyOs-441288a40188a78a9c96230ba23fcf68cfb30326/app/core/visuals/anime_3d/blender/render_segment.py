@@ -45,6 +45,16 @@ def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _safe_set(obj: object, attr: str, value: object) -> bool:
+    if hasattr(obj, attr):
+        try:
+            setattr(obj, attr, value)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+    return False
+
+
 def _load_rms_envelope(audio_path: Path, fps: int, frame_count: int) -> list[float]:
     if not audio_path.exists():
         return [0.0 for _ in range(frame_count)]
@@ -375,8 +385,32 @@ def _setup_compositor(scene: bpy.types.Scene) -> None:
     tree.links.new(glare.outputs["Image"], composite.inputs["Image"])
 
 
+def _configure_eevee(scene: bpy.types.Scene, quality: str) -> None:
+    eevee = getattr(scene, "eevee", None)
+    if not eevee:
+        return
+    major_version = bpy.app.version[0]
+    bloom_enabled = False
+    if _safe_set(eevee, "use_bloom", True):
+        bloom_enabled = True
+    elif major_version >= 5:
+        print("[WARN] EEVEE bloom not available on this Blender version; continuing.")
+    _safe_set(eevee, "bloom_intensity", 0.05)
+    _safe_set(eevee, "use_motion_blur", True)
+    if quality == "max":
+        _safe_set(eevee, "taa_render_samples", 64)
+        _safe_set(eevee, "shadow_cube_size", "2048")
+        _safe_set(eevee, "shadow_cascade_size", "2048")
+    else:
+        _safe_set(eevee, "taa_render_samples", 32)
+    if major_version >= 5 and not bloom_enabled:
+        pass
+
+
 def main() -> None:
     args = _parse_args()
+    print(bpy.app.version_string)
+    print(f"Render engine: {args.engine}")
     output_path = Path(args.output)
     report_path = Path(args.report)
     assets_dir = Path(args.assets_dir)
@@ -419,15 +453,7 @@ def main() -> None:
     if hasattr(scene.render, "line_thickness"):
         scene.render.line_thickness = 1.5
     if hasattr(scene, "eevee"):
-        scene.eevee.use_bloom = True
-        scene.eevee.bloom_intensity = 0.05
-        scene.eevee.use_motion_blur = True
-        if args.quality == "max":
-            scene.eevee.taa_render_samples = 64
-            scene.eevee.shadow_cube_size = "2048"
-            scene.eevee.shadow_cascade_size = "2048"
-        else:
-            scene.eevee.taa_render_samples = 32
+        _configure_eevee(scene, args.quality)
 
     objects = _create_scene(assets_dir, args.asset_mode)
     _add_vfx(assets_dir)
