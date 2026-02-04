@@ -10,8 +10,8 @@
 | `MONEYOS_NVENC_MODE` | `cq` | `cq` for constant quality or `vbr` for target bitrate. |
 | `MONEYOS_NVENC_CQ` | auto | Defaults to 22 (balanced) or 18 (max). |
 | `MONEYOS_NVENC_VBR` | `16M` | Target bitrate for VBR mode. |
-| `MONEYOS_NVENC_MAXRATE` | `24M` | VBR max rate. |
-| `MONEYOS_NVENC_BUFSIZE` | `48M` | VBR buffer size. |
+| `MONEYOS_NVENC_MAXRATE` | `24M` | VBR max rate (max mode default 50M). |
+| `MONEYOS_NVENC_BUFSIZE` | `48M` | VBR buffer size (max mode default 100M). |
 | `MONEYOS_NVENC_PRESET` | auto | Overrides preset; otherwise `p5`/`p7` based on quality. |
 
 NVENC always outputs `yuv420p` and adds `-movflags +faststart` for mp4 files. If NVENC fails, MoneyOS falls back to `libx264`.
@@ -36,6 +36,8 @@ Low RAM mode keeps ffmpeg threads at 1 and favors sequential segment rendering w
 | `MONEYOS_SD_MODEL_LOCAL_PATH` | `output/models/anime/animagine-xl-3.1.safetensors` | Path for local checkpoints. |
 | `MONEYOS_ANIME_LORA_PATHS` | empty | Semicolon-separated LoRA paths (not yet implemented). |
 | `MONEYOS_ANIME_LORA_WEIGHTS` | empty | Semicolon-separated weights (not yet implemented). |
+| `MONEYOS_SD_HIRES` | `1` (max mode) | Enable optional hires pass in max profile. |
+| `MONEYOS_VRAM_TARGET_GB` | `22` | Target VRAM usage for max profile nudges. |
 
 If `MONEYOS_SD_MODEL_SOURCE=local_ckpt` and the checkpoint path is missing, MoneyOS will raise a clear error with instructions.
 
@@ -74,6 +76,8 @@ Use `/docs` for interactive API testing.
 | `MONEYOS_AUTOPILOT_INTERVAL_MINUTES` | `180` | Interval between autopilot runs. |
 | `MONEYOS_AUTOPILOT_MAX_ACTIVE_JOBS` | auto | Defaults to 1 in low RAM mode, 2 in normal. |
 | `MONEYOS_RUN_WINDOW` | empty | Optional time window like `22:00-08:00`. |
+| `MONEYOS_GPU_UTIL_CAP` | `100` | GPU utilization cap; set <100 to throttle. |
+| `MONEYOS_GPU_TEMP_LIMIT` | `83` | Temperature guard (C). |
 
 ## Example usage
 

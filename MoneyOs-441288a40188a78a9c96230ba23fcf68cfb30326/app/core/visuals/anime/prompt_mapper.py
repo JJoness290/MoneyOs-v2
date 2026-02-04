@@ -21,18 +21,16 @@ _STYLE_DESCRIPTORS = {
 }
 
 _BASE_STYLE = (
-    "masterpiece, best quality, ultra-detailed, high-impact anime key visual, "
-    "cinematic anime illustration, anime movie style, dynamic action pose, "
-    "dramatic perspective, explosive energy effects, strong rim lighting, "
-    "volumetric lighting, cinematic color grading, warm highlights, cool shadows, "
-    "foreground action background chaos, depth of field, clean lineart, "
-    "detailed shading, promotional key art"
+    "masterpiece, best quality, cinematic anime key visual, promotional key art, "
+    "dynamic perspective, dramatic rim lighting, volumetric lighting, "
+    "explosive energy effects, sharp focus, detailed shading, clean lineart, "
+    "depth of field, subtle film grain, 16:9"
 )
 
 _BASE_NEGATIVE = (
     "worst quality, low quality, blurry, flat lighting, bad anatomy, extra fingers, "
-    "missing fingers, deformed hands, deformed face, 3d render, photorealistic, "
-    "western cartoon, chibi, watermark, text, logo"
+    "missing fingers, deformed hands, watermark, text, logo, 3d render, "
+    "photorealistic, chibi"
 )
 
 _SCENE_TEMPLATES: list[tuple[str, str]] = [
@@ -62,18 +60,48 @@ def _find_scene(text: str) -> str:
     return "focused analyst in office, investigative mood"
 
 
+def _split_identity(text: str) -> tuple[str, str]:
+    parts = [part.strip() for part in text.split(".", 1)]
+    if len(parts) == 2 and parts[0]:
+        return parts[0], parts[1]
+    return text.strip(), ""
+
+
+def _limit_prompt(prompt: str, identity: str, max_words: int = 70) -> tuple[str, bool]:
+    words = [word for word in prompt.split() if word.strip()]
+    if len(words) <= max_words:
+        return prompt, False
+    tail_parts = prompt.split(",")
+    keep = []
+    removed = False
+    for part in tail_parts:
+        if identity and identity in part:
+            keep.append(part)
+        elif len(" ".join(keep).split()) < max_words:
+            keep.append(part)
+        else:
+            removed = True
+    trimmed = ", ".join([part.strip() for part in keep if part.strip()])
+    return trimmed, removed
+
+
 def build_prompt(text: str) -> PromptPayload:
     style_descriptor = _STYLE_DESCRIPTORS.get(ANIME_STYLE, _STYLE_DESCRIPTORS["thriller"])
     scene = _find_scene(text)
+    identity, scene_action = _split_identity(text)
     prefix = os.getenv("MONEYOS_STYLE_PROMPT_PREFIX", "").strip()
     suffix = os.getenv("MONEYOS_STYLE_PROMPT_SUFFIX", "").strip()
-    prompt = (
-        f"{_BASE_STYLE}, {style_descriptor}, {scene}, 16:9 composition, "
-        "depth of field, atmospheric lighting, high detail, no readable text, no logos"
-    )
+    prompt = f"{_BASE_STYLE}, {identity}"
+    if scene_action:
+        prompt = f"{prompt}, {scene_action}"
+    if scene:
+        prompt = f"{prompt}, {scene}"
+    prompt = f"{prompt}, {style_descriptor}"
     if prefix:
         prompt = f"{prefix}, {prompt}"
     if suffix:
         prompt = f"{prompt}, {suffix}"
+    prompt, trimmed = _limit_prompt(prompt, identity)
+    print(f"[ANIME_PROMPT] words={len(prompt.split())} trimmed={trimmed}")
     negative_prompt = _BASE_NEGATIVE
     return PromptPayload(prompt=prompt, negative_prompt=negative_prompt)

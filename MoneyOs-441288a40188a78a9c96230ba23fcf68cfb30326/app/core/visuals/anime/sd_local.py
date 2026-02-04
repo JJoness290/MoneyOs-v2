@@ -183,7 +183,7 @@ def _sd_profile_settings(base: SDSettings) -> SDSettings:
             guidance=6.5,
             seed=base.seed,
             width=1024,
-            height=1024,
+            height=576,
             fp16=True,
             cpu_offload=False,
             attention_slicing=False,
@@ -375,6 +375,22 @@ def generate_image(
             batch_size=settings.batch_size,
         )
     profile_settings = _sd_profile_settings(settings)
+    vram_target = float(os.getenv("MONEYOS_VRAM_TARGET_GB", "22"))
+    hires_enabled = os.getenv("MONEYOS_SD_HIRES", "1" if SD_PROFILE == "max" else "0") == "1"
+    if SD_PROFILE == "max" and hires_enabled and profile_settings.width < 1152:
+        profile_settings = SDSettings(
+            model=profile_settings.model,
+            steps=profile_settings.steps,
+            guidance=profile_settings.guidance,
+            seed=profile_settings.seed,
+            width=1152,
+            height=648,
+            fp16=profile_settings.fp16,
+            cpu_offload=profile_settings.cpu_offload,
+            attention_slicing=profile_settings.attention_slicing,
+            vae_slicing=profile_settings.vae_slicing,
+            batch_size=profile_settings.batch_size,
+        )
     pipeline_settings = _pipeline_settings(torch, profile_settings)
     with _PIPELINE_LOCK:
         if _PIPELINE is None or _PIPELINE_MODEL != pipeline_settings.model:
@@ -422,6 +438,8 @@ def generate_image(
         f"attn_slicing={effective_settings.attention_slicing} "
         f"vae_slicing={effective_settings.vae_slicing}"
     )
+    if SD_PROFILE == "max":
+        print(f"[ANIME] vram_target_gb={vram_target:.1f} hires_enabled={hires_enabled}")
 
     def _run_inference(width_val: int, height_val: int, steps_val: int, batch_size: int):
         if device == "cuda":
@@ -511,6 +529,21 @@ def generate_image(
                         batch_size=1,
                     )
                     downgraded = True
+                elif SD_PROFILE == "max" and attempt_settings.width >= 1152:
+                    attempt_settings = SDSettings(
+                        model=attempt_settings.model,
+                        steps=attempt_settings.steps,
+                        guidance=attempt_settings.guidance,
+                        seed=attempt_settings.seed,
+                        width=1024,
+                        height=576,
+                        fp16=attempt_settings.fp16,
+                        cpu_offload=attempt_settings.cpu_offload,
+                        attention_slicing=attempt_settings.attention_slicing,
+                        vae_slicing=attempt_settings.vae_slicing,
+                        batch_size=attempt_settings.batch_size,
+                    )
+                    downgraded = True
                 elif SD_PROFILE == "max" and attempt_settings.width >= 1024:
                     attempt_settings = SDSettings(
                         model=attempt_settings.model,
@@ -518,7 +551,7 @@ def generate_image(
                         guidance=attempt_settings.guidance,
                         seed=attempt_settings.seed,
                         width=896,
-                        height=896,
+                        height=504,
                         fp16=attempt_settings.fp16,
                         cpu_offload=attempt_settings.cpu_offload,
                         attention_slicing=attempt_settings.attention_slicing,
@@ -551,6 +584,39 @@ def generate_image(
         print("[ANIME] max profile downgraded after OOM (batch size/resolution reduced)")
     image = result.images[0]
     image.save(output_path)
+    if SD_PROFILE == "max" and hires_enabled:
+        try:
+            diffusers = importlib.import_module("diffusers")
+            if hasattr(diffusers, "StableDiffusionImg2ImgPipeline"):
+                img2img = diffusers.StableDiffusionImg2ImgPipeline.from_pipe(pipeline)
+                scale = 1.8
+                width = int(round(attempt_settings.width * scale))
+                height = int(round(attempt_settings.height * scale))
+                if device == "cuda":
+                    torch.cuda.reset_peak_memory_stats()
+                result = img2img(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    image=image,
+                    strength=0.4,
+                    num_inference_steps=max(15, attempt_settings.steps // 2),
+                    guidance_scale=attempt_settings.guidance,
+                    width=width,
+                    height=height,
+                )
+                image = result.images[0]
+                image.save(output_path)
+                if device == "cuda":
+                    peak = torch.cuda.max_memory_allocated() / (1024**3)
+                    print(f"[ANIME] hires peak_vram={peak:.2f}GB")
+        except RuntimeError as exc:
+            if "out of memory" in str(exc).lower() and device == "cuda":
+                torch.cuda.empty_cache()
+                print("[ANIME] hires pass OOM, disabling hires for this image")
+            else:
+                raise
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ANIME] hires pass skipped ({exc})")
     if AI_IMAGE_CACHE:
         cached_path.write_bytes(output_path.read_bytes())
         return cached_path

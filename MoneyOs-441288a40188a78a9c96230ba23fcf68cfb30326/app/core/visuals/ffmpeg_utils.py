@@ -47,9 +47,9 @@ def _nvenc_cq_value(mode: str) -> str:
 
 
 def _nvenc_vbr_values(mode: str) -> tuple[str, str, str]:
-    default_rate = "20M" if mode == "max" else "16M"
-    default_max = "30M" if mode == "max" else "24M"
-    default_buf = "60M" if mode == "max" else "48M"
+    default_rate = "35M" if mode == "max" else "16M"
+    default_max = "50M" if mode == "max" else "24M"
+    default_buf = "100M" if mode == "max" else "48M"
     bitrate = os.getenv("MONEYOS_NVENC_VBR", default_rate)
     maxrate = os.getenv("MONEYOS_NVENC_MAXRATE", default_max)
     bufsize = os.getenv("MONEYOS_NVENC_BUFSIZE", default_buf)

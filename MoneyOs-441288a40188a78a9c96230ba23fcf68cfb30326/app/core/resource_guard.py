@@ -36,6 +36,30 @@ def _get_gpu_percent() -> float | None:
     return max(values)
 
 
+def _get_gpu_temp() -> float | None:
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    values = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            values.append(float(line))
+        except ValueError:
+            continue
+    if not values:
+        return None
+    return max(values)
+
 def _set_low_priority() -> None:
     if os.name != "nt":
         return
@@ -50,6 +74,7 @@ class ResourceSnapshot:
     cpu_percent: float
     ram_percent: float
     gpu_percent: float | None
+    gpu_temp: float | None
 
 
 class ResourceGuard:
@@ -73,6 +98,11 @@ class ResourceGuard:
     def _monitor(self) -> None:
         while not self._stop_event.is_set():
             snapshot = self._capture()
+            temp_limit = float(os.getenv("MONEYOS_GPU_TEMP_LIMIT", "83"))
+            if snapshot.gpu_temp is not None and snapshot.gpu_temp >= temp_limit:
+                self._log(snapshot)
+                time.sleep(5.0)
+                continue
             if self._should_throttle(snapshot):
                 self._log(snapshot)
                 time.sleep(performance.CHECK_INTERVAL_SEC)
@@ -82,14 +112,16 @@ class ResourceGuard:
         cpu = psutil.cpu_percent(interval=None)
         ram = psutil.virtual_memory().percent
         gpu = _get_gpu_percent()
-        return ResourceSnapshot(cpu_percent=cpu, ram_percent=ram, gpu_percent=gpu)
+        gpu_temp = _get_gpu_temp()
+        return ResourceSnapshot(cpu_percent=cpu, ram_percent=ram, gpu_percent=gpu, gpu_temp=gpu_temp)
 
     def _should_throttle(self, snapshot: ResourceSnapshot) -> bool:
         if snapshot.cpu_percent >= performance.MAX_CPU_PERCENT:
             return True
         if snapshot.ram_percent >= performance.MAX_RAM_PERCENT:
             return True
-        if snapshot.gpu_percent is not None and snapshot.gpu_percent >= performance.MAX_GPU_PERCENT:
+        gpu_cap = int(os.getenv("MONEYOS_GPU_UTIL_CAP", "100"))
+        if gpu_cap < 100 and snapshot.gpu_percent is not None and snapshot.gpu_percent >= gpu_cap:
             return True
         return False
 
@@ -99,9 +131,10 @@ class ResourceGuard:
             return
         self._last_log = now
         gpu_value = "-" if snapshot.gpu_percent is None else f"{snapshot.gpu_percent:.0f}%"
+        gpu_temp = "-" if snapshot.gpu_temp is None else f"{snapshot.gpu_temp:.0f}C"
         print(
             f"[ResourceGuard] Throttling: CPU={snapshot.cpu_percent:.0f}% "
-            f"RAM={snapshot.ram_percent:.0f}% GPU={gpu_value} "
+            f"RAM={snapshot.ram_percent:.0f}% GPU={gpu_value} TEMP={gpu_temp} "
             f"(cap {performance.MAX_CPU_PERCENT}%)"
         )
 
