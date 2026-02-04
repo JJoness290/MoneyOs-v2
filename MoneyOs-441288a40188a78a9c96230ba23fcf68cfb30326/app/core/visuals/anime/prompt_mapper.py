@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+import os
+
 from app.config import ANIME_STYLE
 
 
@@ -17,6 +19,21 @@ _STYLE_DESCRIPTORS = {
     "clean": "cinematic anime illustration, clean modern look, crisp linework, soft lighting, minimal noise",
     "cyberpunk": "cinematic anime illustration, neon cyberpunk palette, high-contrast lighting, futuristic tech glow",
 }
+
+_BASE_STYLE = (
+    "masterpiece, best quality, ultra-detailed, high-impact anime key visual, "
+    "cinematic anime illustration, anime movie style, dynamic action pose, "
+    "dramatic perspective, explosive energy effects, strong rim lighting, "
+    "volumetric lighting, cinematic color grading, warm highlights, cool shadows, "
+    "foreground action background chaos, depth of field, clean lineart, "
+    "detailed shading, promotional key art"
+)
+
+_BASE_NEGATIVE = (
+    "worst quality, low quality, blurry, flat lighting, bad anatomy, extra fingers, "
+    "missing fingers, deformed hands, deformed face, 3d render, photorealistic, "
+    "western cartoon, chibi, watermark, text, logo"
+)
 
 _SCENE_TEMPLATES: list[tuple[str, str]] = [
     ("audit", "forensic audit room, documents spread, investigator reviewing ledgers"),
@@ -48,12 +65,15 @@ def _find_scene(text: str) -> str:
 def build_prompt(text: str) -> PromptPayload:
     style_descriptor = _STYLE_DESCRIPTORS.get(ANIME_STYLE, _STYLE_DESCRIPTORS["thriller"])
     scene = _find_scene(text)
+    prefix = os.getenv("MONEYOS_STYLE_PROMPT_PREFIX", "").strip()
+    suffix = os.getenv("MONEYOS_STYLE_PROMPT_SUFFIX", "").strip()
     prompt = (
-        f"{style_descriptor}, {scene}, 16:9 composition, "
+        f"{_BASE_STYLE}, {style_descriptor}, {scene}, 16:9 composition, "
         "depth of field, atmospheric lighting, high detail, no readable text, no logos"
     )
-    negative_prompt = (
-        "text, watermark, signature, logo, deformed anatomy, extra limbs, lowres, blurry, "
-        "bad proportions, duplicate face, readable text"
-    )
+    if prefix:
+        prompt = f"{prefix}, {prompt}"
+    if suffix:
+        prompt = f"{prompt}, {suffix}"
+    negative_prompt = _BASE_NEGATIVE
     return PromptPayload(prompt=prompt, negative_prompt=negative_prompt)

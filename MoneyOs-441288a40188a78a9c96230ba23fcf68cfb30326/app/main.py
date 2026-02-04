@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from app.config import VIDEO_DIR
+from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, status as autopilot_status
 from app.core.bootstrap import ensure_dependencies
 from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
 from app.core.pipeline import PipelineResult, run_pipeline
@@ -29,6 +30,7 @@ _jobs: Dict[str, dict] = {}
 @app.on_event("startup")
 def bootstrap_dependencies() -> None:
     ensure_dependencies()
+    start_autopilot()
 
 
 def _format_mmss(seconds: float) -> str:
@@ -101,6 +103,27 @@ async def system_specs() -> JSONResponse:
     return JSONResponse(get_system_specs())
 
 
+@app.get("/health")
+async def health() -> JSONResponse:
+    return JSONResponse({"status": "ok"})
+
+
+@app.get("/debug/status")
+async def debug_status() -> JSONResponse:
+    payload = {"autopilot": autopilot_status()}
+    try:
+        import torch  # noqa: WPS433
+
+        payload["torch"] = {
+            "version": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        }
+    except Exception as exc:  # noqa: BLE001
+        payload["torch"] = {"error": str(exc)}
+    return JSONResponse(payload)
+
+
 @app.post("/generate")
 async def generate() -> JSONResponse:
     job_id = uuid.uuid4().hex
@@ -117,6 +140,13 @@ async def generate_anime_episode() -> JSONResponse:
     thread = threading.Thread(target=_run_anime_episode, args=(job_id,), daemon=True)
     thread.start()
     return JSONResponse({"job_id": job_id})
+
+
+@app.post("/jobs/anime-episode-10m-autopilot")
+async def enqueue_anime_episode_autopilot() -> JSONResponse:
+    job_id = uuid.uuid4().hex
+    autopilot_enqueue(job_id)
+    return JSONResponse({"job_id": job_id, "status": "queued"})
 
 
 @app.get("/status/{job_id}")

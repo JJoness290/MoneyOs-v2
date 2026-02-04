@@ -66,6 +66,15 @@ POST http://127.0.0.1:8000/jobs/anime-episode-10m
 
 Use `/docs` for interactive API testing.
 
+## Autopilot
+
+| Env var | Default | Notes |
+| --- | --- | --- |
+| `MONEYOS_AUTOPILOT` | `0` | Set to `1` to start the autopilot loop. |
+| `MONEYOS_AUTOPILOT_INTERVAL_MINUTES` | `180` | Interval between autopilot runs. |
+| `MONEYOS_AUTOPILOT_MAX_ACTIVE_JOBS` | auto | Defaults to 1 in low RAM mode, 2 in normal. |
+| `MONEYOS_RUN_WINDOW` | empty | Optional time window like `22:00-08:00`. |
+
 ## Example usage
 
 ```
@@ -81,4 +90,11 @@ Run a quick environment check without generating media:
 
 ```
 python -m app.tools.self_check
+```
+
+## Debug endpoints
+
+```
+GET /health
+GET /debug/status
 ```

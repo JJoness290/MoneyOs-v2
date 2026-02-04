@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import math
 import os
 from pathlib import Path
+import random
 import time
 
 from moviepy.editor import AudioClip, AudioFileClip, concatenate_audioclips
@@ -20,6 +22,103 @@ from app.core.resource_guard import monitored_threads
 
 TARGET_EPISODE_SECONDS = 600
 MAX_EXTEND_ATTEMPTS = 4
+
+
+def _episode_id() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _deterministic_seed() -> int | None:
+    if os.getenv("MONEYOS_DETERMINISTIC", "0") == "1":
+        try:
+            return int(os.getenv("MONEYOS_STYLE_SEED", "42"))
+        except ValueError:
+            return 42
+    return None
+
+
+def _topic_lanes() -> list[str]:
+    env = os.getenv(
+        "MONEYOS_TOPIC_LANES",
+        "power awakening|betrayal|tournament|monster threat|lost artifact|city collapse",
+    )
+    return [lane.strip() for lane in env.split("|") if lane.strip()]
+
+
+def _select_topic() -> str:
+    lanes = _topic_lanes()
+    if not lanes:
+        return "an original anime adventure with rising stakes"
+    seed = _deterministic_seed()
+    rng = random.Random(seed)
+    return rng.choice(lanes)
+
+
+def _style_bible(output_dir: Path) -> dict:
+    seed = _deterministic_seed() or random.randint(1, 9999)
+    bible = {
+        "palette": "warm highlights, cool shadows, teal accents",
+        "lighting_rules": "strong rim light, volumetric glow, dramatic contrast",
+        "camera_rules": "dynamic angles, dutch tilt sparingly, cinematic depth of field",
+        "lineart_rules": "clean lineart, detailed shading, high contrast",
+        "forbidden_traits": ["photorealistic", "3d render", "chibi"],
+        "prompt_prefix": "original characters, original universe",
+        "prompt_suffix": "cinematic anime key visual, promotional key art",
+        "seed": seed,
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "style_bible.json").write_text(json.dumps(bible, indent=2), encoding="utf-8")
+    os.environ["MONEYOS_STYLE_PROMPT_PREFIX"] = bible["prompt_prefix"]
+    os.environ["MONEYOS_STYLE_PROMPT_SUFFIX"] = bible["prompt_suffix"]
+    return bible
+
+
+def _build_character_bible(output_dir: Path, seed: int | None) -> list[dict]:
+    rng = random.Random(seed)
+    archetypes = [
+        ("protagonist", "brave", "amber eyes", "black hair"),
+        ("antagonist", "cold", "crimson eyes", "silver hair"),
+        ("ally", "optimistic", "emerald eyes", "chestnut hair"),
+    ]
+    characters = []
+    for idx, (role, personality, eyes, hair) in enumerate(archetypes, start=1):
+        token = f"char{idx:02d}"
+        characters.append(
+            {
+                "id": token,
+                "name": f"Character {idx}",
+                "role": role,
+                "age": rng.randint(17, 28),
+                "personality": personality,
+                "powers": "energy surge",
+                "outfit": "stylized combat uniform",
+                "hair": hair,
+                "eyes": eyes,
+                "colors": "navy, gold, white",
+                "must_keep": [
+                    hair,
+                    eyes,
+                    "clean lineart",
+                    "anime movie style",
+                    "rim lighting",
+                    "dynamic pose",
+                    "dramatic perspective",
+                    "distinct silhouette",
+                ],
+                "avoid": ["photorealistic", "3d render", "chibi"],
+                "token": token,
+                "base_seed": rng.randint(1000, 9999),
+                "reference_images": [],
+            }
+        )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "character_bible.json").write_text(json.dumps(characters, indent=2), encoding="utf-8")
+    return characters
+
+
+def _apply_character_traits(text: str, character: dict) -> str:
+    traits = ", ".join(character.get("must_keep", []))
+    return f"{character['token']}, {traits}. {text}"
 
 
 @dataclass
@@ -41,12 +140,8 @@ class EpisodeResult:
     total_video_seconds: float
 
 
-def _timestamp() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-
 def _build_output_dir() -> Path:
-    output_dir = OUTPUT_DIR / "anime_episode_10m" / _timestamp()
+    output_dir = OUTPUT_DIR / "episodes" / _episode_id()
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir
 
@@ -136,6 +231,12 @@ def generate_anime_episode_10m(status_callback=_log) -> EpisodeResult:
     start_time = time.perf_counter()
     output_dir = _build_output_dir()
     status_callback("[EPISODE] start anime_episode_10m")
+    seed = _deterministic_seed()
+    if seed is not None:
+        random.seed(seed)
+    topic = _select_topic()
+    style_bible = _style_bible(output_dir)
+    characters = _build_character_bible(output_dir / "characters", seed)
 
     stage_start = time.perf_counter()
     status_callback("[EPISODE] generating script")
@@ -153,7 +254,9 @@ def generate_anime_episode_10m(status_callback=_log) -> EpisodeResult:
     while total_duration < TARGET_EPISODE_SECONDS and attempt <= MAX_EXTEND_ATTEMPTS:
         for text in segment_texts[len(segments) :]:
             index = len(segments) + 1
-            prompt_payload = build_prompt(text)
+            character = characters[(index - 1) % len(characters)]
+            segment_text = _apply_character_traits(text, character)
+            prompt_payload = build_prompt(segment_text)
             on_screen = text.split(".")[0].strip()[:80] or f"Segment {index}"
             audio_path = output_dir / "audio_segments" / f"segment_{index:02d}.mp3"
             audio_path.parent.mkdir(parents=True, exist_ok=True)
@@ -213,7 +316,8 @@ def generate_anime_episode_10m(status_callback=_log) -> EpisodeResult:
         if visual_total + duration > TARGET_EPISODE_SECONDS:
             duration = max(1.0, TARGET_EPISODE_SECONDS - visual_total)
         visual_path = visuals_dir / f"segment_{segment.index:02d}.mp4"
-        renderer.render_segment_background(segment.text, duration, visual_path)
+        character = characters[(segment.index - 1) % len(characters)]
+        renderer.render_segment_background(_apply_character_traits(segment.text, character), duration, visual_path)
         visual_paths.append(visual_path)
         visual_total += duration
 
@@ -273,6 +377,32 @@ def generate_anime_episode_10m(status_callback=_log) -> EpisodeResult:
         f"[EPISODE] done audio={audio_seconds:.2f}s video={video_seconds:.2f}s diff_ms={diff_ms:.0f}"
     )
     _write_outline(output_dir, segments)
+    (output_dir / "episode.json").write_text(
+        json.dumps(
+            {
+                "topic": topic,
+                "style_bible": style_bible,
+                "characters": characters,
+                "segments": [segment.__dict__ for segment in segments],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "tags.json").write_text(
+        json.dumps(
+            {
+                "title": f"Original Anime Episode: {topic.title()}",
+                "description": "An original anime episode generated by MoneyOS.",
+                "tags": ["anime", "original", "episode", "action"],
+                "hashtags": ["#anime", "#original", "#MoneyOS"],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "credits.txt").write_text("Generated by MoneyOS. Models: Animagine XL 3.1.\n", encoding="utf-8")
+    (output_dir / "UPLOAD_READY.txt").write_text("Upload package ready.\n", encoding="utf-8")
     status_callback(f"[EPISODE] total_runtime={time.perf_counter() - start_time:.2f}s")
     return EpisodeResult(
         output_dir=output_dir,
