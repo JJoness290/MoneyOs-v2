@@ -22,6 +22,10 @@ class Anime3DResult:
     duration_seconds: float
 
 
+def anime_3d_output_dir(job_id: str) -> Path:
+    return (OUTPUT_DIR / "episodes" / job_id).resolve()
+
+
 def _generate_base_tone(path: Path, duration_s: float, sample_rate: int = 44100) -> None:
     total_frames = int(duration_s * sample_rate)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,7 +63,7 @@ def _generate_audio(output_dir: Path, duration_s: float) -> Path:
 
 def render_anime_3d_60s(job_id: str) -> Anime3DResult:
     duration_s = 60.0
-    output_dir = OUTPUT_DIR / "episodes" / job_id
+    output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     audio_path = _generate_audio(output_dir, duration_s)
     video_path = output_dir / "segment.mp4"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 import wave
 from pathlib import Path
 
@@ -10,15 +11,20 @@ import bpy
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Render anime_3d segment")
+    argv = sys.argv
+    if "--" in argv:
+        argv = argv[argv.index("--") + 1 :]
+    else:
+        argv = []
+    parser = argparse.ArgumentParser()
     parser.add_argument("--engine", default="eevee")
     parser.add_argument("--gpu", default="1")
-    parser.add_argument("--audio")
+    parser.add_argument("--audio", default=None)
     parser.add_argument("--output", required=True)
     parser.add_argument("--report", required=True)
     parser.add_argument("--duration", type=float, default=60.0)
     parser.add_argument("--fps", type=int, default=30)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def _clear_scene() -> None:
@@ -129,6 +135,7 @@ def main() -> None:
                 "mouth_keyframes": mouth_keyframes,
                 "frame_end": scene.frame_end,
                 "fps": scene.render.fps,
+                "parsed_args": vars(args),
             },
             indent=2,
         ),

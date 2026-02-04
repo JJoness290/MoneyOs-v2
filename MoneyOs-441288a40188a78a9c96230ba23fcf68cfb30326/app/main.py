@@ -20,7 +20,11 @@ from app.core.bootstrap import ensure_dependencies
 from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
 from app.core.visuals.anime_3d.animation_library import rebuild_animation_library
 from app.core.visuals.anime_3d.blender_runner import detect_blender
-from app.core.visuals.anime_3d.render_pipeline import Anime3DResult, render_anime_3d_60s
+from app.core.visuals.anime_3d.render_pipeline import (
+    Anime3DResult,
+    anime_3d_output_dir,
+    render_anime_3d_60s,
+)
 from app.core.pipeline import PipelineResult, run_pipeline
 from app.core.system_specs import get_system_specs
 
@@ -303,7 +307,7 @@ async def generate_anime_episode_3d_60s(
     _set_status(job_id, "Queued 3D render")
     thread = threading.Thread(target=_run_anime_3d_60s, args=(job_id,), daemon=True)
     thread.start()
-    output_dir = OUTPUT_DIR / "episodes" / job_id
+    output_dir = anime_3d_output_dir(job_id)
     return JSONResponse(
         {
             "job_id": job_id,

@@ -57,7 +57,7 @@ def build_blender_command(script_path: Path, args: Iterable[str]) -> list[str]:
     return [
         str(blender_path),
         "-b",
-        "--python",
+        "-P",
         str(script_path),
         "--",
         "--engine",
