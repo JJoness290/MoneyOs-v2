@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import time
 import wave
+import os
 from typing import Callable
 
 from moviepy.editor import AudioFileClip, CompositeAudioClip
@@ -28,7 +29,7 @@ from app.core.paths import get_assets_root
 from app.core.tts import generate_tts
 from app.core.visuals.anime_3d.blender_runner import build_blender_command
 from app.core.visuals.anime_3d.validators import validate_episode
-from app.core.visuals.ffmpeg_utils import run_ffmpeg, select_video_encoder
+from app.core.visuals.ffmpeg_utils import has_nvenc, run_ffmpeg
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,61 @@ def _emit_status(
         "extra": extra,
     }
     status_callback(payload)
+
+
+def _assemble_frames_video(
+    frames_dir: Path,
+    frame_pattern: str,
+    fps: int,
+    audio_path: Path,
+    output_path: Path,
+) -> None:
+    frame_count = len(list(frames_dir.glob("frame_*.png")))
+    if frame_count < 2:
+        raise RuntimeError(f"Insufficient frames rendered ({frame_count}) in {frames_dir}")
+    use_gpu = os.getenv("MONEYOS_USE_GPU", "0") == "1"
+    use_nvenc = use_gpu and has_nvenc()
+    print(f"[ENC] frames={frame_count} encoder={'h264_nvenc' if use_nvenc else 'libx264'}")
+    args = [
+        "ffmpeg",
+        "-y",
+        "-framerate",
+        str(fps),
+        "-i",
+        frame_pattern,
+    ]
+    if audio_path.exists() and audio_path.stat().st_size > 0:
+        args += ["-i", str(audio_path)]
+    else:
+        print(f"[WARN] audio missing or empty: {audio_path}")
+    if use_nvenc:
+        quality = os.getenv("MONEYOS_NVENC_QUALITY", "balanced").strip().lower()
+        preset = "p7" if quality == "max" else "p5"
+        cq = "18" if quality == "max" else "22"
+        args += [
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            preset,
+            "-cq",
+            cq,
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    else:
+        args += [
+            "-c:v",
+            "libx264",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    if audio_path.exists() and audio_path.stat().st_size > 0:
+        args += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
+    args.append(str(output_path))
+    print("[ENC] ffmpeg:", " ".join(args))
+    run_ffmpeg(args)
 
 
 def _generate_audio(output_dir: Path, duration_s: float, status_callback: StatusCallback) -> Path:
@@ -233,43 +289,17 @@ def render_anime_3d_60s(job_id: str, status_callback: StatusCallback = None) -> 
             f"Stderr (tail):\n{tail_stderr}"
         )
     _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
-    encode_args, _ = select_video_encoder()
-    frame_pattern = str(frames_dir / "frame_%06d.png")
-    args = [
-        "ffmpeg",
-        "-y",
-        "-framerate",
-        str(ANIME3D_FPS),
-        "-i",
+    frame_pattern = str(frames_dir / "frame_%05d.png")
+    _assemble_frames_video(
+        frames_dir,
         frame_pattern,
-        *encode_args,
-        str(video_path),
-    ]
-    run_ffmpeg(args)
+        ANIME3D_FPS,
+        audio_path,
+        video_path,
+    )
     if not video_path.exists():
         raise RuntimeError("segment.mp4 missing after frame encode")
-    final_path = output_dir / "final.mp4"
-    _emit_status(status_callback, stage_key="mux", status="Muxing audio", progress_pct=98)
-    args = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(video_path),
-        "-i",
-        str(audio_path),
-        "-map",
-        "0:v:0",
-        "-map",
-        "1:a:0",
-        *encode_args,
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-shortest",
-        str(final_path),
-    ]
-    run_ffmpeg(args)
+    final_path = video_path
     validation = validate_episode(final_path, audio_path, report_path)
     if not validation.valid:
         raise RuntimeError(validation.message)

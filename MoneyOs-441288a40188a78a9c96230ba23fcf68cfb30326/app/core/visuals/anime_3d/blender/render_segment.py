@@ -374,32 +374,41 @@ def _apply_vfx_material(
     image_path: Path,
     emission_strength: float,
 ) -> None:
-    material = bpy.data.materials.new(name=f"VFX_{image_path.stem}")
+    material = bpy.data.materials.new(name="VFX_MAT")
     material.use_nodes = True
-    nodes = material.node_tree.nodes
+    node_tree = material.node_tree
+    nodes = node_tree.nodes
+    links = node_tree.links
     nodes.clear()
+
     output = nodes.new(type="ShaderNodeOutputMaterial")
+    tex = nodes.new(type="ShaderNodeTexImage")
+    tex.image = bpy.data.images.load(str(image_path))
+    tex.image.colorspace_settings.name = "sRGB"
+
     emission = nodes.new(type="ShaderNodeEmission")
-    emission.inputs["Strength"].default_value = emission_strength
-    image_node = nodes.new(type="ShaderNodeTexImage")
-    image_node.image = bpy.data.images.load(str(image_path))
-    image_node.image.colorspace_settings.name = "sRGB"
-    separate_rgba = nodes.new(type="ShaderNodeSeparateRGBA")
-    mix = nodes.new(type="ShaderNodeMixShader")
+    emission.inputs["Strength"].default_value = float(emission_strength)
     transparent = nodes.new(type="ShaderNodeBsdfTransparent")
-    material.node_tree.links.new(image_node.outputs["Color"], emission.inputs["Color"])
-    material.node_tree.links.new(image_node.outputs["Color"], separate_rgba.inputs["Image"])
-    material.node_tree.links.new(separate_rgba.outputs["A"], mix.inputs[0])
-    material.node_tree.links.new(transparent.outputs["BSDF"], mix.inputs[1])
-    material.node_tree.links.new(emission.outputs["Emission"], mix.inputs[2])
-    material.node_tree.links.new(mix.outputs["Shader"], output.inputs["Surface"])
+    mix = nodes.new(type="ShaderNodeMixShader")
+
+    links.new(tex.outputs["Color"], emission.inputs["Color"])
+    if "Alpha" in tex.outputs:
+        links.new(tex.outputs["Alpha"], mix.inputs["Fac"])
+    else:
+        mix.inputs["Fac"].default_value = 1.0
+    links.new(transparent.outputs["BSDF"], mix.inputs[1])
+    links.new(emission.outputs["Emission"], mix.inputs[2])
+    links.new(mix.outputs["Shader"], output.inputs["Surface"])
+
     material.blend_method = "BLEND"
     material.shadow_method = "NONE"
     material.use_backface_culling = False
     if hasattr(material, "alpha_threshold"):
         material.alpha_threshold = 0.0
-    plane.data.materials.clear()
-    plane.data.materials.append(material)
+    if plane.data.materials:
+        plane.data.materials[0] = material
+    else:
+        plane.data.materials.append(material)
     print("[VFX] emissive material applied:", image_path.name, "strength", emission_strength)
 
 
@@ -439,7 +448,11 @@ def _add_vfx(
         item_offset = right * (location[0] * 0.15) + up * (location[1] * 0.15)
         bpy.ops.mesh.primitive_plane_add(size=1.0, location=vfx_center + vfx_offset + item_offset)
         plane = bpy.context.active_object
-        _apply_vfx_material(plane, image_path, emission_strength)
+        try:
+            _apply_vfx_material(plane, image_path, emission_strength)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[VFX] Skipped due to error: {exc}")
+            continue
         plane.rotation_euler = camera.rotation_euler
         plane.scale = (scale_x, scale_y, 1.0)
         plane.location = vfx_center + vfx_offset + item_offset
@@ -565,7 +578,7 @@ def main() -> None:
     scene.render.image_settings.file_format = "PNG"
     frames_dir = output_path.parent / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
-    scene.render.filepath = str(frames_dir / "frame_######")
+    scene.render.filepath = str(frames_dir / "frame_%05d")
 
     scene.render.use_freestyle = args.outline_mode == "freestyle"
     if hasattr(scene.render, "line_thickness"):

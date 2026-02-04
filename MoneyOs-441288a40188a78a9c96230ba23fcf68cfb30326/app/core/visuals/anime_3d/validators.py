@@ -49,6 +49,42 @@ def _has_audio_stream(payload: dict) -> bool:
     return any(stream.get("codec_type") == "audio" for stream in payload.get("streams", []))
 
 
+def _audio_duration_seconds(path: Path) -> float | None:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _audio_valid(audio_path: Path) -> bool:
+    if not audio_path.exists():
+        return False
+    if audio_path.stat().st_size == 0:
+        return False
+    duration = _audio_duration_seconds(audio_path)
+    if duration is None:
+        print("[WARN] audio duration parse failed; accepting non-empty audio.wav")
+        return True
+    return duration > 0.1
+
+
 def _check_motion(video_path: Path, output_dir: Path) -> bool:
     frame_a = output_dir / "frame_a.png"
     frame_b = output_dir / "frame_b.png"
@@ -136,8 +172,8 @@ def _check_mouth(report_path: Path) -> bool:
 def validate_episode(video_path: Path, audio_path: Path, report_path: Path) -> ValidationReport:
     if not video_path.exists():
         return ValidationReport(valid=False, message="final video missing")
-    if not audio_path.exists():
-        return ValidationReport(valid=False, message="audio missing")
+    if not _audio_valid(audio_path):
+        return ValidationReport(valid=False, message="audio invalid")
     if video_path.stat().st_size == 0:
         return ValidationReport(valid=False, message="final video empty")
     payload = _ffprobe_streams(video_path)
