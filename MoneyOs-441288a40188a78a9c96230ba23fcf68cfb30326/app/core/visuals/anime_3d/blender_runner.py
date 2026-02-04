@@ -78,6 +78,16 @@ def run_blender(command: BlenderCommand) -> subprocess.CompletedProcess[str]:
     )
 
 
+def run_blender_capture(command: BlenderCommand) -> subprocess.CompletedProcess[str]:
+    full_command = build_blender_command(command.script_path, command.args)
+    return subprocess.run(
+        full_command,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+
 def detect_blender() -> BlenderDetection:
     try:
         path = _resolve_blender_path()

@@ -9,7 +9,7 @@ from moviepy.editor import AudioFileClip, CompositeAudioClip
 
 from app.config import OUTPUT_DIR, RENDER_FPS
 from app.core.tts import generate_tts
-from app.core.visuals.anime_3d.blender_runner import BlenderCommand, run_blender
+from app.core.visuals.anime_3d.blender_runner import BlenderCommand, run_blender_capture
 from app.core.visuals.anime_3d.validators import validate_episode
 from app.core.visuals.ffmpeg_utils import run_ffmpeg, select_video_encoder
 
@@ -68,8 +68,9 @@ def render_anime_3d_60s(job_id: str) -> Anime3DResult:
     audio_path = _generate_audio(output_dir, duration_s)
     video_path = output_dir / "segment.mp4"
     report_path = output_dir / "render_report.json"
+    frames_dir = output_dir / "frames"
     script_path = Path(__file__).parent / "blender" / "render_segment.py"
-    run_blender(
+    result = run_blender_capture(
         BlenderCommand(
             script_path=script_path,
             args=[
@@ -86,8 +87,30 @@ def render_anime_3d_60s(job_id: str) -> Anime3DResult:
             ],
         )
     )
-    final_path = output_dir / "final.mp4"
+    (output_dir / "blender_stdout.txt").write_text(result.stdout or "", encoding="utf-8")
+    (output_dir / "blender_stderr.txt").write_text(result.stderr or "", encoding="utf-8")
+    if result.returncode != 0:
+        raise RuntimeError(f"Blender render failed: {result.stderr.strip()}")
+    frame_list = sorted(frames_dir.glob("frame_*.png"))
+    if not frame_list:
+        contents = "\n".join(path.name for path in frames_dir.glob("*"))
+        raise RuntimeError(f"No frames rendered in {frames_dir}. Contents:\n{contents}")
     encode_args, _ = select_video_encoder()
+    frame_pattern = str(frames_dir / "frame_%04d.png")
+    args = [
+        "ffmpeg",
+        "-y",
+        "-framerate",
+        str(RENDER_FPS),
+        "-i",
+        frame_pattern,
+        *encode_args,
+        str(video_path),
+    ]
+    run_ffmpeg(args)
+    if not video_path.exists():
+        raise RuntimeError("segment.mp4 missing after frame encode")
+    final_path = output_dir / "final.mp4"
     args = [
         "ffmpeg",
         "-y",

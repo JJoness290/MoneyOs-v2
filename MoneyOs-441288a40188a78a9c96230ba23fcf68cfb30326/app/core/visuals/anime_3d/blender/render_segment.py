@@ -108,20 +108,24 @@ def main() -> None:
     report_path = Path(args.report)
     _ensure_parent(output_path)
     _ensure_parent(report_path)
+    report_path.write_text(
+        json.dumps({"parsed_args": vars(args)}, indent=2),
+        encoding="utf-8",
+    )
 
     _clear_scene()
     scene = bpy.context.scene
     scene.render.engine = "BLENDER_EEVEE" if args.engine == "eevee" else "CYCLES"
     scene.render.fps = args.fps
+    total_frames = int(round(args.duration * args.fps))
     scene.frame_start = 1
-    scene.frame_end = int(round(args.duration * args.fps))
+    scene.frame_end = total_frames
     scene.render.resolution_x = 1280
     scene.render.resolution_y = 720
-    scene.render.image_settings.file_format = "FFMPEG"
-    scene.render.ffmpeg.format = "MPEG4"
-    scene.render.ffmpeg.codec = "H264"
-    scene.render.ffmpeg.constant_rate_factor = "HIGH"
-    scene.render.filepath = str(output_path)
+    scene.render.image_settings.file_format = "PNG"
+    frames_dir = output_path.parent / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    scene.render.filepath = str(frames_dir / "frame_")
 
     objects = _create_scene()
     envelope = _load_rms_envelope(Path(args.audio) if args.audio else Path(), args.fps, scene.frame_end)
