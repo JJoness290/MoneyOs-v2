@@ -6,7 +6,10 @@ OUTPUT_DIR = BASE_DIR / "output"
 VIDEO_DIR = OUTPUT_DIR / "videos"
 AUDIO_DIR = OUTPUT_DIR / "audio"
 BROLL_DIR = OUTPUT_DIR / "broll"
-ASSETS_DIR = BASE_DIR / os.getenv("MONEYOS_ASSETS_DIR", "assets")
+_assets_env = os.getenv("MONEYOS_ASSETS_DIR", r"C:\MO_ASSETS\anime3d")
+ASSETS_DIR = Path(_assets_env)
+if not ASSETS_DIR.is_absolute():
+    ASSETS_DIR = BASE_DIR / ASSETS_DIR
 CHARACTERS_DIR = BASE_DIR / os.getenv("MONEYOS_CHARACTERS_DIR", "assets/characters_3d")
 ANIMATIONS_DIR = BASE_DIR / os.getenv("MONEYOS_ANIMATIONS_DIR", "assets/animations")
 ANIMATION_PACKS_DIR = BASE_DIR / "assets" / "animation_packs"

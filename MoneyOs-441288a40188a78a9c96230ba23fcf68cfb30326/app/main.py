@@ -12,7 +12,7 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from app.config import AUTO_CHARACTERS_DIR, CHARACTERS_DIR, OUTPUT_DIR, VIDEO_DIR, VISUAL_MODE
+from app.config import ASSETS_DIR, AUTO_CHARACTERS_DIR, CHARACTERS_DIR, OUTPUT_DIR, VIDEO_DIR, VISUAL_MODE
 from app.core.assets.harvester.cache import get_cache_paths
 from app.core.assets.harvester.harvester import harvest_assets
 from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, status as autopilot_status
@@ -225,9 +225,22 @@ async def health() -> JSONResponse:
 @app.get("/debug/status")
 async def debug_status() -> JSONResponse:
     blender = detect_blender()
+    required_assets = {
+        "characters/hero.blend": (ASSETS_DIR / "characters" / "hero.blend"),
+        "characters/enemy.blend": (ASSETS_DIR / "characters" / "enemy.blend"),
+        "envs/city.blend": (ASSETS_DIR / "envs" / "city.blend"),
+        "anims/idle.fbx": (ASSETS_DIR / "anims" / "idle.fbx"),
+        "anims/run.fbx": (ASSETS_DIR / "anims" / "run.fbx"),
+        "anims/punch.fbx": (ASSETS_DIR / "anims" / "punch.fbx"),
+        "vfx/explosion.png": (ASSETS_DIR / "vfx" / "explosion.png"),
+        "vfx/energy_arc.png": (ASSETS_DIR / "vfx" / "energy_arc.png"),
+        "vfx/smoke.png": (ASSETS_DIR / "vfx" / "smoke.png"),
+    }
     payload = {
         "autopilot": autopilot_status(),
         "visual_mode": VISUAL_MODE,
+        "assets_dir": str(ASSETS_DIR),
+        "assets_ready": {key: path.exists() for key, path in required_assets.items()},
         "blender": {
             "found": blender.found,
             "path": blender.path,

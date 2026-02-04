@@ -7,7 +7,7 @@ import wave
 
 from moviepy.editor import AudioFileClip, CompositeAudioClip
 
-from app.config import OUTPUT_DIR, RENDER_FPS
+from app.config import ASSETS_DIR, OUTPUT_DIR, RENDER_FPS
 from app.core.tts import generate_tts
 from app.core.visuals.anime_3d.blender_runner import BlenderCommand, run_blender_capture
 from app.core.visuals.anime_3d.validators import validate_episode
@@ -24,6 +24,27 @@ class Anime3DResult:
 
 def anime_3d_output_dir(job_id: str) -> Path:
     return (OUTPUT_DIR / "episodes" / job_id).resolve()
+
+
+def _required_asset_paths() -> dict[str, Path]:
+    return {
+        "characters/hero.blend": ASSETS_DIR / "characters" / "hero.blend",
+        "characters/enemy.blend": ASSETS_DIR / "characters" / "enemy.blend",
+        "envs/city.blend": ASSETS_DIR / "envs" / "city.blend",
+        "anims/idle.fbx": ASSETS_DIR / "anims" / "idle.fbx",
+        "anims/run.fbx": ASSETS_DIR / "anims" / "run.fbx",
+        "anims/punch.fbx": ASSETS_DIR / "anims" / "punch.fbx",
+        "vfx/explosion.png": ASSETS_DIR / "vfx" / "explosion.png",
+        "vfx/energy_arc.png": ASSETS_DIR / "vfx" / "energy_arc.png",
+        "vfx/smoke.png": ASSETS_DIR / "vfx" / "smoke.png",
+    }
+
+
+def _ensure_assets() -> None:
+    missing = [key for key, path in _required_asset_paths().items() if not path.exists()]
+    if missing:
+        message = "Missing assets:\n" + "\n".join(f"- {key}" for key in missing)
+        raise RuntimeError(message)
 
 
 def _generate_base_tone(path: Path, duration_s: float, sample_rate: int = 44100) -> None:
@@ -63,6 +84,7 @@ def _generate_audio(output_dir: Path, duration_s: float) -> Path:
 
 def render_anime_3d_60s(job_id: str) -> Anime3DResult:
     duration_s = 60.0
+    _ensure_assets()
     output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     audio_path = _generate_audio(output_dir, duration_s)
@@ -80,6 +102,8 @@ def render_anime_3d_60s(job_id: str) -> Anime3DResult:
                 str(audio_path),
                 "--report",
                 str(report_path),
+                "--assets-dir",
+                str(ASSETS_DIR),
                 "--duration",
                 f"{duration_s:.2f}",
                 "--fps",
