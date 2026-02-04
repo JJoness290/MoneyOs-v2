@@ -14,7 +14,7 @@ if not hasattr(Image, "ANTIALIAS"):
 
 from moviepy.editor import AudioFileClip, ImageClip
 
-from app.config import OUTPUT_DIR, TARGET_FPS, TARGET_PLATFORM, TARGET_RESOLUTION, VISUAL_MODE
+from app.config import OUTPUT_DIR, TARGET_FPS, TARGET_PLATFORM, TARGET_RESOLUTION, VISUAL_MODE, performance
 from app.core.broll.resolver import ensure_broll_pool, select_broll_clip
 from app.core.resource_guard import monitored_threads
 from app.core.visual_validator import generate_fallback_visuals, validate_visuals
@@ -474,6 +474,10 @@ def build_video(
     if audio_duration <= 0:
         audio_clip.close()
         raise RuntimeError("Audio duration is zero.")
+    _log_status(
+        status_callback,
+        f"[VIDEO] ram_mode={performance.ram_mode()} ffmpeg_threads={performance.ffmpeg_threads()}",
+    )
     if VISUAL_MODE == "broll":
         _build_visual_track(script_text, audio_duration, audio_path, output_path, status_callback=status_callback)
     else:

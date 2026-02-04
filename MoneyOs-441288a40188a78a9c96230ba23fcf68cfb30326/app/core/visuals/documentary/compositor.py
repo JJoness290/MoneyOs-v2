@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import gc
 import hashlib
 import json
 from pathlib import Path
@@ -25,6 +26,7 @@ from app.config import (
     TARGET_FPS,
     TARGET_RESOLUTION,
     VISUAL_MODE,
+    performance,
 )
 from app.core.resource_guard import monitored_threads
 from app.core.visuals.anime.beat_renderer import AnimeBeatVisuals
@@ -443,8 +445,14 @@ def build_documentary_video_from_segments(
     cache_dir = OUTPUT_DIR / "debug" / "doc_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     clip_entries: list[Path] = []
+    if status_callback:
+        status_callback(
+            f"[DOC] ram_mode={performance.ram_mode()} segment_workers={performance.segment_workers()}"
+        )
     for segment in segments:
         clip_entries.append(render_documentary_segment(segment, cache_dir, status_callback))
+        if performance.ram_mode() == "low":
+            gc.collect()
 
     concat_list = output_path.with_suffix(".txt")
     concat_list.write_text(

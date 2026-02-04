@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import gc
 import math
+import os
 from pathlib import Path
 
 from app.config import (
@@ -16,6 +18,7 @@ from app.config import (
     TARGET_FPS,
     TARGET_RESOLUTION,
 )
+from app.config import performance
 from app.core.resource_guard import monitored_threads
 from app.core.visuals.anime.prompt_mapper import build_prompt
 from app.core.visuals.anime.sd_local import SDSettings, generate_image, is_sd_available
@@ -130,6 +133,10 @@ class AnimeBeatVisuals:
     def render_segment_background(self, segment_text: str, duration: float, output_path: Path) -> Path:
         beats = _split_beats(segment_text, duration)
         debug_log_settings(self.status_callback, len(beats))
+        if self.status_callback:
+            self.status_callback(
+                f"[ANIME] ram_mode={performance.ram_mode()} segment_workers={performance.segment_workers()}"
+            )
         beat_dir = output_path.parent / "anime_beats"
         beat_dir.mkdir(parents=True, exist_ok=True)
         cache_dir = OUTPUT_DIR / "debug" / "anime_cache"
@@ -191,6 +198,15 @@ class AnimeBeatVisuals:
                     self.status_callback(f"[ANIME] beat {beat.index} failed ({exc}); using fallback")
                 _build_fallback_clip(beat.duration, clip_path, self.status_callback)
             clips.append(clip_path)
+            gc.collect()
+            try:
+                if os.getenv("MONEYOS_USE_GPU", "0") == "1":
+                    import torch  # noqa: WPS433
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+            except Exception:  # noqa: BLE001
+                pass
 
         concat_list = output_path.with_suffix(".txt")
         concat_list.write_text("\n".join([f"file '{clip.as_posix()}'" for clip in clips]), encoding="utf-8")

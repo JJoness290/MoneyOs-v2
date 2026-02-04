@@ -6,6 +6,9 @@ import subprocess
 import sys
 from typing import Iterable
 
+from app.config import performance
+from app.core.visuals.ffmpeg_utils import encoder_self_check
+
 
 _REQUIRED_PACKAGES = {
     "diffusers": "0.30.3",
@@ -60,16 +63,41 @@ def ensure_dependencies() -> None:
             "Torch is not installed. Install it manually from https://pytorch.org/get-started/locally/ "
             "to enable anime visuals."
         )
+        _log(
+            "Runtime settings: "
+            f"MONEYOS_USE_GPU={os.getenv('MONEYOS_USE_GPU', '0')} "
+            f"MONEYOS_NVENC_CODEC={os.getenv('MONEYOS_NVENC_CODEC', 'h264')} "
+            f"MONEYOS_NVENC_QUALITY={os.getenv('MONEYOS_NVENC_QUALITY', 'balanced')} "
+            f"MONEYOS_RAM_MODE={performance.ram_mode()}"
+        )
+        _log(f"Encoder check: {encoder_self_check()}")
         return
     _log("Torch already installed.")
-    if os.getenv("MONEYOS_USE_GPU", "0") == "1":
-        try:
-            import torch  # noqa: WPS433
+    import torch  # noqa: WPS433
 
-            if not torch.cuda.is_available():
-                _log(
-                    "MONEYOS_USE_GPU=1 but CUDA is unavailable. Install a CUDA-enabled torch build "
-                    "from https://pytorch.org/get-started/locally/."
-                )
-        except Exception as exc:  # noqa: BLE001
-            _log(f"Unable to verify CUDA availability: {exc}")
+    cuda_available = torch.cuda.is_available()
+    gpu_name = "Unknown GPU"
+    if cuda_available:
+        try:
+            gpu_name = torch.cuda.get_device_name(0)
+        except Exception:  # noqa: BLE001
+            gpu_name = "Unknown GPU"
+    _log(
+        "Torch status "
+        f"torch={torch.__version__} "
+        f"cuda_available={cuda_available} "
+        f"gpu={gpu_name}"
+    )
+    if os.getenv("MONEYOS_USE_GPU", "0") == "1" and not cuda_available:
+        _log(
+            "MONEYOS_USE_GPU=1 but CUDA is unavailable. Install a CUDA-enabled torch build "
+            "from https://pytorch.org/get-started/locally/."
+        )
+    _log(
+        "Runtime settings: "
+        f"MONEYOS_USE_GPU={os.getenv('MONEYOS_USE_GPU', '0')} "
+        f"MONEYOS_NVENC_CODEC={os.getenv('MONEYOS_NVENC_CODEC', 'h264')} "
+        f"MONEYOS_NVENC_QUALITY={os.getenv('MONEYOS_NVENC_QUALITY', 'balanced')} "
+        f"MONEYOS_RAM_MODE={performance.ram_mode()}"
+    )
+    _log(f"Encoder check: {encoder_self_check()}")

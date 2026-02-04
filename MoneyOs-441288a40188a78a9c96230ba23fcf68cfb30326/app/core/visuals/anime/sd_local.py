@@ -223,7 +223,8 @@ def _resolve_profile(torch_module, settings: SDSettings, pipeline) -> tuple[SDSe
 def _prepare_pipeline(settings: SDSettings):
     torch = importlib.import_module("torch")
     diffusers = importlib.import_module("diffusers")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    use_gpu = os.getenv("MONEYOS_USE_GPU", "0") == "1"
+    device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     model_id = _resolve_model_id(settings.model)
@@ -233,6 +234,16 @@ def _prepare_pipeline(settings: SDSettings):
         pipeline.enable_model_cpu_offload()
     else:
         pipeline = pipeline.to(device)
+    if device == "cuda":
+        try:
+            if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+                torch.backends.cuda.enable_flash_sdp(True)
+            if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+                torch.backends.cuda.enable_mem_efficient_sdp(True)
+            if hasattr(torch.backends.cuda, "enable_math_sdp"):
+                torch.backends.cuda.enable_math_sdp(True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ANIME] SDP attention config failed ({exc})")
     if os.getenv("MONEYOS_SD_XFORMERS", "0") == "1" and hasattr(
         pipeline, "enable_xformers_memory_efficient_attention"
     ):
@@ -327,6 +338,11 @@ def generate_image(
         _LOGGED_MEMORY = True
 
     def _run_inference(width_val: int, height_val: int, steps_val: int):
+        if device == "cuda":
+            try:
+                torch.cuda.reset_peak_memory_stats()
+            except Exception:  # noqa: BLE001
+                pass
         result = pipeline(
             prompt=prompt,
             negative_prompt=negative_prompt,
@@ -336,6 +352,12 @@ def generate_image(
             height=height_val,
             generator=generator,
         )
+        if device == "cuda":
+            try:
+                peak = torch.cuda.max_memory_allocated() / (1024**3)
+                print(f"[ANIME] device={device} dtype={pipeline.unet.dtype} peak_vram={peak:.2f}GB")
+            except Exception:  # noqa: BLE001
+                pass
         return result
 
     def _degrade_profile(settings_obj: SDSettings) -> SDSettings:
