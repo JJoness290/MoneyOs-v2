@@ -23,6 +23,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True)
     parser.add_argument("--report", required=True)
     parser.add_argument("--assets-dir", required=True)
+    parser.add_argument("--asset-mode", default="auto")
+    parser.add_argument("--style-preset", default="key_art")
+    parser.add_argument("--outline-mode", default="freestyle")
+    parser.add_argument("--postfx", default="on")
+    parser.add_argument("--quality", default="balanced")
+    parser.add_argument("--res", default="1920x1080")
     parser.add_argument("--duration", type=float, default=60.0)
     parser.add_argument("--fps", type=int, default=30)
     return parser.parse_args(argv)
@@ -116,6 +122,44 @@ def _apply_toon_material(obj: bpy.types.Object, outline_material: bpy.types.Mate
     modifier.material_offset = len(obj.data.materials) - 1
 
 
+def _create_city_env(outline_material: bpy.types.Material) -> None:
+    bpy.ops.mesh.primitive_plane_add(size=60, location=(0, 0, 0))
+    ground = bpy.context.active_object
+    ground.scale = (1, 1, 1)
+    _apply_toon_material(ground, outline_material)
+    for x in range(-5, 6):
+        for y in range(-3, 6):
+            height = 2 + (abs(x) + abs(y)) % 5
+            bpy.ops.mesh.primitive_cube_add(size=2, location=(x * 4, y * 4, height / 2))
+            building = bpy.context.active_object
+            building.scale.z = height
+            if (x + y) % 3 == 0:
+                building.scale.x *= 0.8
+                building.scale.y *= 0.7
+            _apply_toon_material(building, outline_material)
+    for _ in range(40):
+        bpy.ops.mesh.primitive_cube_add(size=0.4, location=(math.sin(_) * 6, math.cos(_) * 6, 0.2))
+        _apply_toon_material(bpy.context.active_object, outline_material)
+
+
+def _create_character(name: str, location: tuple[float, float, float]) -> dict[str, bpy.types.Object]:
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.4, depth=1.2, location=(location[0], location[1], location[2] + 1.2))
+    body = bpy.context.active_object
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.45, location=(location[0], location[1], location[2] + 2.2))
+    head = bpy.context.active_object
+    bpy.ops.mesh.primitive_cube_add(size=0.25, location=(location[0], location[1] + 0.35, location[2] + 2.0))
+    jaw = bpy.context.active_object
+    for offset in (-0.5, 0.5):
+        bpy.ops.mesh.primitive_cylinder_add(radius=0.15, depth=0.8, location=(location[0] + offset, location[1], location[2] + 0.6))
+        leg = bpy.context.active_object
+        leg.rotation_euler.x = math.radians(90)
+    for offset in (-0.6, 0.6):
+        bpy.ops.mesh.primitive_cylinder_add(radius=0.12, depth=0.9, location=(location[0] + offset, location[1], location[2] + 1.6))
+        arm = bpy.context.active_object
+        arm.rotation_euler.y = math.radians(90)
+    return {"body": body, "head": head, "jaw": jaw}
+
+
 def _create_outline_material() -> bpy.types.Material:
     material = bpy.data.materials.new(name="OutlineMaterial")
     material.use_nodes = True
@@ -157,25 +201,36 @@ def _find_mouth_shapekey(mesh_objects: list[bpy.types.Object]) -> tuple[bpy.type
     return None
 
 
-def _create_scene(assets_dir: Path) -> dict[str, bpy.types.Object | None]:
+def _create_scene(assets_dir: Path, asset_mode: str) -> dict[str, bpy.types.Object | None]:
     scene = bpy.context.scene
     outline_material = _create_outline_material()
 
-    env_collections = _append_collections(assets_dir / "envs" / "city.blend")
-    hero_collections = _append_collections(assets_dir / "characters" / "hero.blend")
-    enemy_collections = _append_collections(assets_dir / "characters" / "enemy.blend")
+    hero_armature = None
+    enemy_armature = None
+    hero_jaw = None
+    if asset_mode == "local":
+        env_collections = _append_collections(assets_dir / "envs" / "city.blend")
+        hero_collections = _append_collections(assets_dir / "characters" / "hero.blend")
+        enemy_collections = _append_collections(assets_dir / "characters" / "enemy.blend")
 
-    hero_armature = _find_armature(hero_collections)
-    enemy_armature = _find_armature(enemy_collections)
+        hero_armature = _find_armature(hero_collections)
+        enemy_armature = _find_armature(enemy_collections)
 
-    for collection in hero_collections + enemy_collections:
-        for obj in collection.all_objects:
+        for collection in hero_collections + enemy_collections:
+            for obj in collection.all_objects:
+                _apply_toon_material(obj, outline_material)
+
+        if hero_armature:
+            hero_armature.location = (0, 0, 0)
+        if enemy_armature:
+            enemy_armature.location = (3, -2, 0)
+    else:
+        _create_city_env(outline_material)
+        hero = _create_character("hero", (0, 0, 0))
+        enemy = _create_character("enemy", (2.5, -2.0, 0))
+        hero_jaw = hero["jaw"]
+        for obj in (hero["body"], hero["head"], hero["jaw"], enemy["body"], enemy["head"], enemy["jaw"]):
             _apply_toon_material(obj, outline_material)
-
-    if hero_armature:
-        hero_armature.location = (0, 0, 0)
-    if enemy_armature:
-        enemy_armature.location = (3, -2, 0)
 
     bpy.ops.object.light_add(type="SUN", location=(5, -5, 8))
     key_light = bpy.context.active_object
@@ -184,10 +239,14 @@ def _create_scene(assets_dir: Path) -> dict[str, bpy.types.Object | None]:
     bpy.ops.object.camera_add(location=(4, -6, 2.5), rotation=(math.radians(75), 0, math.radians(35)))
     camera = bpy.context.active_object
     scene.camera = camera
+    if camera.data:
+        camera.data.dof.use_dof = True
+        camera.data.dof.focus_distance = 3.0
 
     return {
         "hero_armature": hero_armature,
         "enemy_armature": enemy_armature,
+        "hero_jaw": hero_jaw,
         "camera": camera,
     }
 
@@ -202,7 +261,9 @@ def _animate(
     camera = objects["camera"]
     frame_count = len(envelope)
     mouth_keyframes = 0
-    action = _import_action(assets_dir / "anims" / "run.fbx")
+    action = None
+    if assets_dir.exists():
+        action = _import_action(assets_dir / "anims" / "run.fbx")
     _apply_action(hero_armature, action)
     mesh_objects = []
     if hero_armature:
@@ -233,6 +294,12 @@ def _animate(
             jaw_bone.keyframe_insert(data_path="rotation_euler", index=0)
             if envelope[frame] > 0.02:
                 mouth_keyframes += 1
+        elif objects.get("hero_jaw"):
+            jaw_obj = objects["hero_jaw"]
+            jaw_obj.rotation_euler.x = -envelope[frame] * 0.6
+            jaw_obj.keyframe_insert(data_path="rotation_euler", index=0)
+            if envelope[frame] > 0.02:
+                mouth_keyframes += 1
         elif mouth_key:
             _, key = mouth_key
             key.value = min(1.0, envelope[frame] * 1.2)
@@ -250,8 +317,6 @@ def _add_vfx(assets_dir: Path) -> None:
     ]
     for filename, location in vfx_items:
         image_path = assets_dir / "vfx" / filename
-        if not image_path.exists():
-            continue
         bpy.ops.mesh.primitive_plane_add(size=1.5, location=location)
         plane = bpy.context.active_object
         material = bpy.data.materials.new(name=f"VFX_{filename}")
@@ -261,11 +326,22 @@ def _add_vfx(assets_dir: Path) -> None:
         output = nodes.new(type="ShaderNodeOutputMaterial")
         emission = nodes.new(type="ShaderNodeEmission")
         image_node = nodes.new(type="ShaderNodeTexImage")
-        image_node.image = bpy.data.images.load(str(image_path))
+        if image_path.exists():
+            image_node.image = bpy.data.images.load(str(image_path))
+        else:
+            noise = nodes.new(type="ShaderNodeTexNoise")
+            noise.inputs["Scale"].default_value = 6.0
+            color_ramp = nodes.new(type="ShaderNodeValToRGB")
+            color_ramp.color_ramp.elements[0].position = 0.2
+            color_ramp.color_ramp.elements[1].position = 0.6
+            material.node_tree.links.new(noise.outputs["Fac"], color_ramp.inputs["Fac"])
+            material.node_tree.links.new(color_ramp.outputs["Color"], emission.inputs["Color"])
+            image_node = None
         mix = nodes.new(type="ShaderNodeMixShader")
         transparent = nodes.new(type="ShaderNodeBsdfTransparent")
-        material.node_tree.links.new(image_node.outputs["Color"], emission.inputs["Color"])
-        material.node_tree.links.new(image_node.outputs["Alpha"], mix.inputs[0])
+        if image_node:
+            material.node_tree.links.new(image_node.outputs["Color"], emission.inputs["Color"])
+            material.node_tree.links.new(image_node.outputs["Alpha"], mix.inputs[0])
         material.node_tree.links.new(transparent.outputs["BSDF"], mix.inputs[1])
         material.node_tree.links.new(emission.outputs["Emission"], mix.inputs[2])
         material.node_tree.links.new(mix.outputs["Shader"], output.inputs["Surface"])
@@ -300,14 +376,15 @@ def main() -> None:
         json.dumps({"parsed_args": vars(args)}, indent=2),
         encoding="utf-8",
     )
-    required = [
-        assets_dir / "characters" / "hero.blend",
-        assets_dir / "envs" / "city.blend",
-        assets_dir / "anims" / "run.fbx",
-    ]
-    missing = [str(path) for path in required if not path.exists()]
-    if missing:
-        raise RuntimeError("Missing assets:\n" + "\n".join(missing))
+    if args.asset_mode == "local":
+        required = [
+            assets_dir / "characters" / "hero.blend",
+            assets_dir / "envs" / "city.blend",
+            assets_dir / "anims" / "run.fbx",
+        ]
+        missing = [str(path) for path in required if not path.exists()]
+        if missing:
+            raise RuntimeError("Missing assets:\n" + "\n".join(missing))
 
     _clear_scene()
     scene = bpy.context.scene
@@ -316,24 +393,36 @@ def main() -> None:
     total_frames = int(round(args.duration * args.fps))
     scene.frame_start = 1
     scene.frame_end = total_frames
-    scene.render.resolution_x = 1280
-    scene.render.resolution_y = 720
+    try:
+        width_str, height_str = args.res.lower().split("x", 1)
+        scene.render.resolution_x = int(width_str)
+        scene.render.resolution_y = int(height_str)
+    except ValueError:
+        scene.render.resolution_x = 1280
+        scene.render.resolution_y = 720
     scene.render.image_settings.file_format = "PNG"
     frames_dir = output_path.parent / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     scene.render.filepath = str(frames_dir / "frame_")
 
-    scene.render.use_freestyle = True
+    scene.render.use_freestyle = args.outline_mode == "freestyle"
     if hasattr(scene.render, "line_thickness"):
         scene.render.line_thickness = 1.5
     if hasattr(scene, "eevee"):
         scene.eevee.use_bloom = True
         scene.eevee.bloom_intensity = 0.05
         scene.eevee.use_motion_blur = True
+        if args.quality == "max":
+            scene.eevee.taa_render_samples = 64
+            scene.eevee.shadow_cube_size = "2048"
+            scene.eevee.shadow_cascade_size = "2048"
+        else:
+            scene.eevee.taa_render_samples = 32
 
-    objects = _create_scene(assets_dir)
+    objects = _create_scene(assets_dir, args.asset_mode)
     _add_vfx(assets_dir)
-    _setup_compositor(scene)
+    if args.postfx == "on":
+        _setup_compositor(scene)
     envelope = _load_rms_envelope(Path(args.audio) if args.audio else Path(), args.fps, scene.frame_end)
     mouth_keyframes = _animate(objects, envelope, args.fps, assets_dir)
 

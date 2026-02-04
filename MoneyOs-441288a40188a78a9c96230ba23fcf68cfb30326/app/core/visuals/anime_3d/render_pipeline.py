@@ -7,7 +7,18 @@ import wave
 
 from moviepy.editor import AudioFileClip, CompositeAudioClip
 
-from app.config import ASSETS_DIR, OUTPUT_DIR, RENDER_FPS
+from app.config import (
+    ANIME3D_ASSET_MODE,
+    ANIME3D_FPS,
+    ANIME3D_QUALITY,
+    ANIME3D_RESOLUTION,
+    ANIME3D_SECONDS,
+    ANIME3D_STYLE_PRESET,
+    ANIME3D_OUTLINE_MODE,
+    ANIME3D_POSTFX,
+    ASSETS_DIR,
+    OUTPUT_DIR,
+)
 from app.core.tts import generate_tts
 from app.core.visuals.anime_3d.blender_runner import BlenderCommand, run_blender_capture
 from app.core.visuals.anime_3d.validators import validate_episode
@@ -41,6 +52,8 @@ def _required_asset_paths() -> dict[str, Path]:
 
 
 def _ensure_assets() -> None:
+    if ANIME3D_ASSET_MODE != "local":
+        return
     missing = [key for key, path in _required_asset_paths().items() if not path.exists()]
     if missing:
         message = "Missing assets:\n" + "\n".join(f"- {key}" for key in missing)
@@ -83,7 +96,7 @@ def _generate_audio(output_dir: Path, duration_s: float) -> Path:
 
 
 def render_anime_3d_60s(job_id: str) -> Anime3DResult:
-    duration_s = 60.0
+    duration_s = float(ANIME3D_SECONDS)
     _ensure_assets()
     output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -104,10 +117,22 @@ def render_anime_3d_60s(job_id: str) -> Anime3DResult:
                 str(report_path),
                 "--assets-dir",
                 str(ASSETS_DIR),
+                "--asset-mode",
+                ANIME3D_ASSET_MODE,
+                "--style-preset",
+                ANIME3D_STYLE_PRESET,
+                "--outline-mode",
+                ANIME3D_OUTLINE_MODE,
+                "--postfx",
+                "on" if ANIME3D_POSTFX else "off",
+                "--quality",
+                ANIME3D_QUALITY,
+                "--res",
+                f"{ANIME3D_RESOLUTION[0]}x{ANIME3D_RESOLUTION[1]}",
                 "--duration",
                 f"{duration_s:.2f}",
                 "--fps",
-                str(RENDER_FPS),
+                str(ANIME3D_FPS),
             ],
         )
     )
@@ -125,7 +150,7 @@ def render_anime_3d_60s(job_id: str) -> Anime3DResult:
         "ffmpeg",
         "-y",
         "-framerate",
-        str(RENDER_FPS),
+        str(ANIME3D_FPS),
         "-i",
         frame_pattern,
         *encode_args,

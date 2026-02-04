@@ -12,7 +12,22 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from app.config import ASSETS_DIR, AUTO_CHARACTERS_DIR, CHARACTERS_DIR, OUTPUT_DIR, VIDEO_DIR, VISUAL_MODE
+from app.config import (
+    ANIME3D_ASSET_MODE,
+    ANIME3D_POSTFX,
+    ANIME3D_QUALITY,
+    ANIME3D_STYLE_PRESET,
+    ANIME3D_TEXTURE_MODE,
+    ANIME3D_OUTLINE_MODE,
+    ANIME3D_RESOLUTION,
+    ASSETS_DIR,
+    AUTO_CHARACTERS_DIR,
+    CHARACTERS_DIR,
+    OUTPUT_DIR,
+    SD_MODEL_PATH,
+    VIDEO_DIR,
+    VISUAL_MODE,
+)
 from app.core.assets.harvester.cache import get_cache_paths
 from app.core.assets.harvester.harvester import harvest_assets
 from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, status as autopilot_status
@@ -236,11 +251,20 @@ async def debug_status() -> JSONResponse:
         "vfx/energy_arc.png": (ASSETS_DIR / "vfx" / "energy_arc.png"),
         "vfx/smoke.png": (ASSETS_DIR / "vfx" / "smoke.png"),
     }
+    vram_gb = None
     payload = {
         "autopilot": autopilot_status(),
         "visual_mode": VISUAL_MODE,
         "assets_dir": str(ASSETS_DIR),
         "assets_ready": {key: path.exists() for key, path in required_assets.items()},
+        "asset_mode": ANIME3D_ASSET_MODE,
+        "texture_mode": ANIME3D_TEXTURE_MODE,
+        "sd_model_used": SD_MODEL_PATH,
+        "texture_resolution": f"{ANIME3D_RESOLUTION[0]}x{ANIME3D_RESOLUTION[1]}",
+        "style_preset": ANIME3D_STYLE_PRESET,
+        "outline_mode": ANIME3D_OUTLINE_MODE,
+        "postfx": ANIME3D_POSTFX,
+        "quality": ANIME3D_QUALITY,
         "blender": {
             "found": blender.found,
             "path": blender.path,
@@ -253,11 +277,14 @@ async def debug_status() -> JSONResponse:
     try:
         import torch  # noqa: WPS433
 
+        if torch.cuda.is_available():
+            vram_gb = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 2)
         payload["torch"] = {
             "version": torch.__version__,
             "cuda_available": torch.cuda.is_available(),
             "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         }
+        payload["vram_detected"] = vram_gb
     except Exception as exc:  # noqa: BLE001
         payload["torch"] = {"error": str(exc)}
     return JSONResponse(payload)

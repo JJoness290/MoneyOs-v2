@@ -98,6 +98,34 @@ def _check_motion(video_path: Path, output_dir: Path) -> bool:
     return bbox is not None
 
 
+def _check_vfx_emissive(video_path: Path, output_dir: Path) -> bool:
+    frame_vfx = output_dir / "frame_vfx.png"
+    if frame_vfx.exists():
+        frame_vfx.unlink()
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            "select=eq(n\\,300)",
+            "-vframes",
+            "1",
+            str(frame_vfx),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if not frame_vfx.exists():
+        return False
+    image = Image.open(frame_vfx)
+    pixels = image.convert("RGB").getdata()
+    image.close()
+    return any(max(pixel) > 235 for pixel in pixels)
+
+
 def _check_mouth(report_path: Path) -> bool:
     if not report_path.exists():
         return False
@@ -123,6 +151,8 @@ def validate_episode(video_path: Path, audio_path: Path, report_path: Path) -> V
         return ValidationReport(valid=False, message="audio/video duration mismatch")
     if not _check_motion(video_path, video_path.parent):
         return ValidationReport(valid=False, message="motion check failed")
+    if not _check_vfx_emissive(video_path, video_path.parent):
+        return ValidationReport(valid=False, message="vfx emissive check failed")
     if not _check_mouth(report_path):
         return ValidationReport(valid=False, message="mouth movement missing")
     return ValidationReport(valid=True, message="ok")

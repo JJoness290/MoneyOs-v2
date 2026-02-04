@@ -155,6 +155,36 @@ except ValueError:
 TOON_SHADER = os.getenv("MONEYOS_TOON_SHADER", "1") != "0"
 VFX_ENABLE = os.getenv("MONEYOS_VFX_ENABLE", "1") != "0"
 
+ANIME3D_ASSET_MODE = os.getenv("MONEYOS_ANIME3D_ASSET_MODE", "auto").strip().lower()
+if ANIME3D_ASSET_MODE not in {"auto", "local"}:
+    ANIME3D_ASSET_MODE = "auto"
+ANIME3D_TEXTURE_MODE = os.getenv("MONEYOS_ANIME3D_TEXTURE_MODE", "sd_local").strip().lower()
+if ANIME3D_TEXTURE_MODE not in {"sd_local", "procedural"}:
+    ANIME3D_TEXTURE_MODE = "sd_local"
+ANIME3D_STYLE_PRESET = os.getenv("MONEYOS_ANIME3D_STYLE_PRESET", "key_art").strip().lower()
+ANIME3D_SFX_MODE = os.getenv("MONEYOS_ANIME3D_SFX_MODE", "auto").strip().lower()
+ANIME3D_OUTLINE_MODE = os.getenv("MONEYOS_ANIME3D_OUTLINE_MODE", "freestyle").strip().lower()
+if ANIME3D_OUTLINE_MODE not in {"freestyle", "inverted_hull"}:
+    ANIME3D_OUTLINE_MODE = "freestyle"
+ANIME3D_POSTFX = os.getenv("MONEYOS_ANIME3D_POSTFX", "on").strip().lower() != "off"
+ANIME3D_QUALITY = os.getenv("MONEYOS_ANIME3D_QUALITY", "balanced").strip().lower()
+if ANIME3D_QUALITY not in {"balanced", "max"}:
+    ANIME3D_QUALITY = "balanced"
+try:
+    ANIME3D_FPS = int(os.getenv("MONEYOS_ANIME3D_FPS", "30"))
+except ValueError:
+    ANIME3D_FPS = 30
+try:
+    ANIME3D_SECONDS = int(os.getenv("MONEYOS_ANIME3D_SECONDS", "60"))
+except ValueError:
+    ANIME3D_SECONDS = 60
+ANIME3D_RES = os.getenv("MONEYOS_ANIME3D_RES", "1920x1080").lower()
+try:
+    ANIME3D_RESOLUTION = tuple(int(value) for value in ANIME3D_RES.split("x", 1))
+except ValueError:
+    ANIME3D_RESOLUTION = (1920, 1080)
+SD_MODEL_PATH = os.getenv("MONEYOS_SD_MODEL_PATH")
+
 ASSET_HARVEST = os.getenv("MONEYOS_ASSET_HARVEST", "0") == "1"
 ASSET_LICENSE_MODE = os.getenv("MONEYOS_ASSET_LICENSE_MODE", "cc0_only").strip().lower()
 if ASSET_LICENSE_MODE not in {"cc0_only", "cc0_or_ccby"}:
