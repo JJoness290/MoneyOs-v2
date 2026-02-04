@@ -395,8 +395,11 @@ def _add_vfx(assets_dir: Path) -> None:
 
 
 def _setup_compositor(scene: bpy.types.Scene) -> None:
-    scene.use_nodes = True
-    tree = scene.node_tree
+    tree = _get_scene_node_tree(scene)
+    print("[POSTFX] tree=", tree)
+    if tree is None:
+        print("[WARN] Compositor node_tree not available; skipping postfx.")
+        return
     tree.nodes.clear()
     render_layers = tree.nodes.new(type="CompositorNodeRLayers")
     glare = tree.nodes.new(type="CompositorNodeGlare")
@@ -405,6 +408,28 @@ def _setup_compositor(scene: bpy.types.Scene) -> None:
     composite = tree.nodes.new(type="CompositorNodeComposite")
     tree.links.new(render_layers.outputs["Image"], glare.inputs["Image"])
     tree.links.new(glare.outputs["Image"], composite.inputs["Image"])
+
+
+def _get_scene_node_tree(scene: bpy.types.Scene) -> bpy.types.NodeTree | None:
+    try:
+        bpy.context.view_layer.update()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        scene.use_nodes = True
+    except Exception:  # noqa: BLE001
+        return None
+    tree = None
+    try:
+        tree = bpy.context.scene.node_tree
+    except Exception:  # noqa: BLE001
+        tree = None
+    if tree is None:
+        try:
+            tree = scene.node_tree
+        except Exception:  # noqa: BLE001
+            tree = None
+    return tree
 
 
 def _configure_eevee(scene: bpy.types.Scene, quality: str) -> None:
@@ -479,6 +504,7 @@ def main() -> None:
 
     objects = _create_scene(assets_dir, args.asset_mode)
     _add_vfx(assets_dir)
+    print("[POSTFX] enabled=", args.postfx)
     if args.postfx == "on":
         _setup_compositor(scene)
     envelope = _load_rms_envelope(Path(args.audio) if args.audio else Path(), args.fps, scene.frame_end)
