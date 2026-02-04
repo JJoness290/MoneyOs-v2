@@ -55,6 +55,28 @@ def _safe_set(obj: object, attr: str, value: object) -> bool:
     return False
 
 
+def _ensure_material(slot_collection: object, mat: bpy.types.Material) -> None:
+    if slot_collection is None:
+        return
+    mat_name = getattr(mat, "name", None)
+    try:
+        existing_names = {item.name for item in slot_collection if item is not None}
+    except Exception:  # noqa: BLE001
+        existing_names = set()
+    if mat_name and mat_name in existing_names:
+        return
+    try:
+        slot_collection.append(mat)
+    except Exception:  # noqa: BLE001
+        try:
+            if len(slot_collection) == 0:
+                slot_collection.append(mat)
+            else:
+                slot_collection[0] = mat
+        except Exception:  # noqa: BLE001
+            return
+
+
 def _load_rms_envelope(audio_path: Path, fps: int, frame_count: int) -> list[float]:
     if not audio_path.exists():
         return [0.0 for _ in range(frame_count)]
@@ -124,8 +146,8 @@ def _apply_toon_material(obj: bpy.types.Object, outline_material: bpy.types.Mate
         obj.data.materials[0] = material
     else:
         obj.data.materials.append(material)
-    if outline_material not in obj.data.materials:
-        obj.data.materials.append(outline_material)
+    _ensure_material(obj.data.materials, outline_material)
+    print("[MAT] applied outline material to", obj.name)
     modifier = obj.modifiers.new(name="Outline", type="SOLIDIFY")
     modifier.thickness = 0.02
     modifier.use_flip_normals = True
