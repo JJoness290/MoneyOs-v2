@@ -14,6 +14,8 @@ from app.core.anime_episode import generate_anime_episode_10m
 class AutopilotJob:
     job_id: str
     status: str
+    topic_hint: str | None = None
+    lane: str | None = None
     started_at: float | None = None
     completed_at: float | None = None
 
@@ -24,9 +26,9 @@ _active_jobs: dict[str, AutopilotJob] = {}
 _autopilot_thread: threading.Thread | None = None
 
 
-def enqueue(job_id: str) -> None:
+def enqueue(job_id: str, topic_hint: str | None = None, lane: str | None = None) -> None:
     with _queue_lock:
-        _queue.append(AutopilotJob(job_id=job_id, status="queued"))
+        _queue.append(AutopilotJob(job_id=job_id, status="queued", topic_hint=topic_hint, lane=lane))
 
 
 def _run_window_allows() -> bool:
@@ -66,7 +68,7 @@ def _worker(job: AutopilotJob) -> None:
     job.status = "running"
     job.started_at = time.time()
     try:
-        generate_anime_episode_10m()
+        generate_anime_episode_10m(topic_hint=job.topic_hint, lane=job.lane)
         job.status = "completed"
     except Exception as exc:  # noqa: BLE001
         job.status = f"failed: {exc}"

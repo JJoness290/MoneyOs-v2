@@ -45,12 +45,16 @@ def _topic_lanes() -> list[str]:
     return [lane.strip() for lane in env.split("|") if lane.strip()]
 
 
-def _select_topic() -> str:
+def _select_topic(topic_hint: str | None, lane: str | None) -> str:
+    if topic_hint:
+        return topic_hint.strip()
     lanes = _topic_lanes()
     if not lanes:
         return "an original anime adventure with rising stakes"
     seed = _deterministic_seed()
     rng = random.Random(seed)
+    if lane and lane in lanes:
+        return lane
     return rng.choice(lanes)
 
 
@@ -227,14 +231,18 @@ def _concat_videos(segment_paths: list[Path], output_path: Path) -> None:
     run_ffmpeg(args)
 
 
-def generate_anime_episode_10m(status_callback=_log) -> EpisodeResult:
+def generate_anime_episode_10m(
+    status_callback=_log,
+    topic_hint: str | None = None,
+    lane: str | None = None,
+) -> EpisodeResult:
     start_time = time.perf_counter()
     output_dir = _build_output_dir()
     status_callback("[EPISODE] start anime_episode_10m")
     seed = _deterministic_seed()
     if seed is not None:
         random.seed(seed)
-    topic = _select_topic()
+    topic = _select_topic(topic_hint, lane)
     style_bible = _style_bible(output_dir)
     characters = _build_character_bible(output_dir / "characters", seed)
 

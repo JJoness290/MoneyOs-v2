@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import threading
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
 from app.config import VIDEO_DIR
 from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, status as autopilot_status
@@ -25,6 +27,11 @@ STATUS_DONE = "Done"
 
 _jobs_lock = threading.Lock()
 _jobs: Dict[str, dict] = {}
+
+
+class AnimeEpisodeRequest(BaseModel):
+    topic_hint: Optional[str] = None
+    lane: Optional[str] = None
 
 
 @app.on_event("startup")
@@ -48,6 +55,8 @@ def _set_status(
     with _jobs_lock:
         payload = _jobs.setdefault(job_id, {"status": STATUS_IDLE})
         payload["status"] = status
+        payload["stage"] = status
+        payload["updated_at"] = datetime.now().isoformat()
         if result:
             payload["video_path"] = str(result.video.output_path.resolve())
             payload["duration"] = result.video.duration_seconds
@@ -84,9 +93,13 @@ def _run_job(job_id: str) -> None:
         _set_error(job_id, f"Error: {exc}")
 
 
-def _run_anime_episode(job_id: str) -> None:
+def _run_anime_episode(job_id: str, topic_hint: str | None, lane: str | None) -> None:
     try:
-        result = generate_anime_episode_10m(lambda status: _set_status(job_id, status))
+        result = generate_anime_episode_10m(
+            lambda status: _set_status(job_id, status),
+            topic_hint=topic_hint,
+            lane=lane,
+        )
         _set_status(job_id, STATUS_DONE, episode_result=result)
     except Exception as exc:  # noqa: BLE001
         _set_error(job_id, f"Error: {exc}")
@@ -134,19 +147,40 @@ async def generate() -> JSONResponse:
 
 
 @app.post("/jobs/anime-episode-10m")
-async def generate_anime_episode() -> JSONResponse:
+async def generate_anime_episode(
+    req: AnimeEpisodeRequest = Body(default=AnimeEpisodeRequest()),
+) -> JSONResponse:
     job_id = uuid.uuid4().hex
     _set_status(job_id, "Generating anime episode...")
-    thread = threading.Thread(target=_run_anime_episode, args=(job_id,), daemon=True)
+    thread = threading.Thread(
+        target=_run_anime_episode,
+        args=(job_id, req.topic_hint, req.lane),
+        daemon=True,
+    )
     thread.start()
-    return JSONResponse({"job_id": job_id})
+    return JSONResponse(
+        {
+            "job_id": job_id,
+            "queued": False,
+            "endpoint": "anime-episode-10m",
+        }
+    )
 
 
 @app.post("/jobs/anime-episode-10m-autopilot")
-async def enqueue_anime_episode_autopilot() -> JSONResponse:
+async def enqueue_anime_episode_autopilot(
+    req: AnimeEpisodeRequest = Body(default=AnimeEpisodeRequest()),
+) -> JSONResponse:
     job_id = uuid.uuid4().hex
-    autopilot_enqueue(job_id)
-    return JSONResponse({"job_id": job_id, "status": "queued"})
+    _set_status(job_id, "Queued (autopilot)")
+    autopilot_enqueue(job_id, topic_hint=req.topic_hint, lane=req.lane)
+    return JSONResponse(
+        {
+            "job_id": job_id,
+            "queued": True,
+            "endpoint": "anime-episode-10m-autopilot",
+        }
+    )
 
 
 @app.get("/status/{job_id}")
