@@ -7,7 +7,7 @@ import sys
 from typing import Iterable
 
 from app.config import performance
-from app.core.visuals.ffmpeg_utils import encoder_self_check
+from app.core.visuals.ffmpeg_utils import encoder_self_check, has_nvenc
 
 
 _REQUIRED_PACKAGES = {
@@ -63,6 +63,7 @@ def ensure_dependencies() -> None:
         _log("All required packages already installed.")
 
     if not _has_module("torch"):
+        _log(f"GPU check: cuda_available=False ffmpeg_nvenc={has_nvenc()}")
         _log(
             "Torch is not installed. Install it manually from https://pytorch.org/get-started/locally/ "
             "to enable anime visuals."
@@ -93,6 +94,7 @@ def ensure_dependencies() -> None:
         f"cuda_available={cuda_available} "
         f"gpu={gpu_name}"
     )
+    _log(f"GPU check: cuda_available={cuda_available} ffmpeg_nvenc={has_nvenc()}")
     if os.getenv("MONEYOS_USE_GPU", "0") == "1" and not cuda_available:
         _log(
             "MONEYOS_USE_GPU=1 but CUDA is unavailable. Install a CUDA-enabled torch build "

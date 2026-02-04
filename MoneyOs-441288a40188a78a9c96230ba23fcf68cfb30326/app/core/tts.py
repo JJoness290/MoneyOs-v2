@@ -48,6 +48,8 @@ def _generate_sentence_audio(
     rate: str | None,
     pitch: str | None,
 ) -> float:
+    temp_path = output_path.with_suffix(f"{output_path.suffix}.tmp")
+
     async def _run() -> None:
         settings: dict[str, str] = {}
         if rate:
@@ -59,9 +61,14 @@ def _generate_sentence_audio(
             voice=voice,
             **settings,
         )
-        await communicate.save(str(output_path))
+        await communicate.save(str(temp_path))
 
     asyncio.run(_run())
+    if not temp_path.exists() or temp_path.stat().st_size == 0:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise RuntimeError("Generated TTS chunk was empty.")
+    temp_path.replace(output_path)
     audio = AudioFileClip(str(output_path))
     duration = float(audio.duration)
     audio.close()
@@ -102,6 +109,9 @@ def generate_tts(script_text: str, output_path: Path, voice: str = DEFAULT_VOICE
             except Exception:
                 duration = None
 
+        if chunk_path.exists() and chunk_path.stat().st_size == 0:
+            print(f"[WARN] TTS chunk empty; removing {chunk_path}")
+            chunk_path.unlink()
         if duration is not None and chunk_path.exists():
             chunk_paths.append(chunk_path)
             chunk_durations.append(duration)
@@ -134,6 +144,11 @@ def generate_tts(script_text: str, output_path: Path, voice: str = DEFAULT_VOICE
     for path in chunk_paths:
         if path.exists():
             path.unlink()
+    for index in range(len(sentences)):
+        chunk_path = output_path.with_name(f"{output_path.stem}_chunk{index}.mp3")
+        if chunk_path.exists() and chunk_path.stat().st_size == 0:
+            print(f"[WARN] Removing zero-byte TTS chunk {chunk_path}")
+            chunk_path.unlink()
 
     return TTSResult(
         audio_path=output_path,

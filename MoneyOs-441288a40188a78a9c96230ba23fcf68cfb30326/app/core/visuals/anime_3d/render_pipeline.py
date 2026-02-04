@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from pathlib import Path
+import subprocess
+import time
 import wave
+from typing import Callable
 
 from moviepy.editor import AudioFileClip, CompositeAudioClip
 
@@ -20,11 +23,7 @@ from app.config import (
 )
 from app.core.paths import get_assets_root
 from app.core.tts import generate_tts
-from app.core.visuals.anime_3d.blender_runner import (
-    BlenderCommand,
-    build_blender_command,
-    run_blender_capture,
-)
+from app.core.visuals.anime_3d.blender_runner import build_blender_command
 from app.core.visuals.anime_3d.validators import validate_episode
 from app.core.visuals.ffmpeg_utils import run_ffmpeg, select_video_encoder
 
@@ -35,6 +34,9 @@ class Anime3DResult:
     final_video: Path
     audio_path: Path
     duration_seconds: float
+
+
+StatusCallback = Callable[[dict], None] | None
 
 
 def anime_3d_output_dir(job_id: str) -> Path:
@@ -81,7 +83,27 @@ def _generate_base_tone(path: Path, duration_s: float, sample_rate: int = 44100)
             handle.writeframes(sample.to_bytes(2, byteorder="little", signed=True))
 
 
-def _generate_audio(output_dir: Path, duration_s: float) -> Path:
+def _emit_status(
+    status_callback: StatusCallback,
+    *,
+    stage_key: str,
+    status: str,
+    progress_pct: int | None = None,
+    extra: dict | None = None,
+) -> None:
+    if not status_callback:
+        return
+    payload = {
+        "stage_key": stage_key,
+        "status": status,
+        "progress_pct": progress_pct,
+        "extra": extra,
+    }
+    status_callback(payload)
+
+
+def _generate_audio(output_dir: Path, duration_s: float, status_callback: StatusCallback) -> Path:
+    _emit_status(status_callback, stage_key="audio", status="Generating audio", progress_pct=8)
     base_tone = output_dir / "base_tone.wav"
     _generate_base_tone(base_tone, duration_s)
     tts_path = output_dir / "tts.wav"
@@ -99,15 +121,16 @@ def _generate_audio(output_dir: Path, duration_s: float) -> Path:
     composite.close()
     for clip in clips:
         clip.close()
+    _emit_status(status_callback, stage_key="audio", status="Generating audio", progress_pct=12)
     return final_path
 
 
-def render_anime_3d_60s(job_id: str) -> Anime3DResult:
+def render_anime_3d_60s(job_id: str, status_callback: StatusCallback = None) -> Anime3DResult:
     duration_s = float(ANIME3D_SECONDS)
     _ensure_assets()
     output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
-    audio_path = _generate_audio(output_dir, duration_s)
+    audio_path = _generate_audio(output_dir, duration_s, status_callback)
     video_path = output_dir / "segment.mp4"
     report_path = output_dir / "render_report.json"
     frames_dir = output_dir / "frames"
@@ -141,19 +164,44 @@ def render_anime_3d_60s(job_id: str) -> Anime3DResult:
         "--fps",
         str(ANIME3D_FPS),
     ]
-    result = run_blender_capture(
-        BlenderCommand(
-            script_path=script_copy_path,
-            args=blender_args,
-        )
-    )
     cmd = build_blender_command(script_copy_path, blender_args)
-    (output_dir / "blender_cmd.txt").write_text(" ".join(cmd), encoding="utf-8")
-    (output_dir / "blender_stdout.txt").write_text(result.stdout or "", encoding="utf-8")
-    (output_dir / "blender_stderr.txt").write_text(result.stderr or "", encoding="utf-8")
-    if result.returncode != 0:
-        tail_stdout = (result.stdout or "")[-2000:]
-        tail_stderr = (result.stderr or "")[-2000:]
+    blender_cmd_path = output_dir / "blender_cmd.txt"
+    blender_stdout_path = output_dir / "blender_stdout.txt"
+    blender_stderr_path = output_dir / "blender_stderr.txt"
+    blender_cmd_path.write_text(" ".join(cmd), encoding="utf-8")
+
+    _emit_status(status_callback, stage_key="blender", status="Launching Blender", progress_pct=15)
+    with blender_stdout_path.open("w", encoding="utf-8") as stdout_handle, blender_stderr_path.open(
+        "w", encoding="utf-8"
+    ) as stderr_handle:
+        process = subprocess.Popen(
+            cmd,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            text=True,
+        )
+        total_frames = max(1, int(round(duration_s * ANIME3D_FPS)))
+        last_update = 0.0
+        while process.poll() is None:
+            now = time.time()
+            if now - last_update >= 2.0:
+                frame_count = len(list(frames_dir.glob("frame_*.png")))
+                progress = 10 + int(min(frame_count / total_frames, 1.0) * 84)
+                _emit_status(
+                    status_callback,
+                    stage_key="frames",
+                    status="Rendering frames",
+                    progress_pct=progress,
+                    extra={"frames_rendered": frame_count, "total_frames": total_frames},
+                )
+                last_update = now
+            time.sleep(0.2)
+        returncode = process.wait()
+    stdout_text = blender_stdout_path.read_text(encoding="utf-8") if blender_stdout_path.exists() else ""
+    stderr_text = blender_stderr_path.read_text(encoding="utf-8") if blender_stderr_path.exists() else ""
+    if returncode != 0:
+        tail_stdout = stdout_text[-2000:]
+        tail_stderr = stderr_text[-2000:]
         raise RuntimeError(
             "Blender render failed.\n"
             f"Command: {' '.join(cmd)}\n"
@@ -165,8 +213,8 @@ def render_anime_3d_60s(job_id: str) -> Anime3DResult:
         frame_list = sorted(frames_dir.glob("*.png"))
     if len(frame_list) < 2:
         contents = "\n".join(path.name for path in list(frames_dir.glob("*"))[:200])
-        tail_stdout = (result.stdout or "")[-2000:]
-        tail_stderr = (result.stderr or "")[-2000:]
+        tail_stdout = stdout_text[-2000:]
+        tail_stderr = stderr_text[-2000:]
         raise RuntimeError(
             "No frames rendered.\n"
             f"Command: {' '.join(cmd)}\n"
@@ -175,6 +223,7 @@ def render_anime_3d_60s(job_id: str) -> Anime3DResult:
             f"Stdout (tail):\n{tail_stdout}\n"
             f"Stderr (tail):\n{tail_stderr}"
         )
+    _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
     encode_args, _ = select_video_encoder()
     frame_pattern = str(frames_dir / "frame_%06d.png")
     args = [
@@ -191,6 +240,7 @@ def render_anime_3d_60s(job_id: str) -> Anime3DResult:
     if not video_path.exists():
         raise RuntimeError("segment.mp4 missing after frame encode")
     final_path = output_dir / "final.mp4"
+    _emit_status(status_callback, stage_key="mux", status="Muxing audio", progress_pct=98)
     args = [
         "ffmpeg",
         "-y",

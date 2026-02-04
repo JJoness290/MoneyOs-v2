@@ -56,7 +56,7 @@ _jobs: Dict[str, dict] = {}
 _perf_lock = threading.Lock()
 _perf_history_path = OUTPUT_DIR / "perf_history.json"
 
-_STAGE_ORDER = ["script", "broll", "render", "done"]
+_STAGE_ORDER = ["script", "broll", "render", "audio", "blender", "frames", "encode", "mux", "done"]
 _STAGE_ALIASES = {
     "generating script": "script",
     "downloading b-roll": "broll",
@@ -64,10 +64,27 @@ _STAGE_ALIASES = {
     "generating anime episode": "script",
     "queued 3d render": "script",
     "rendering anime 3d episode": "render",
+    "generating audio": "audio",
+    "audio": "audio",
+    "blender": "blender",
+    "rendering frames": "frames",
+    "encoding video": "encode",
+    "muxing audio": "mux",
     "queued": "script",
     "done": "done",
+    "complete": "done",
 }
-_STAGE_PROGRESS = {"script": 10, "broll": 40, "render": 85, "done": 100}
+_STAGE_PROGRESS = {
+    "script": 10,
+    "broll": 40,
+    "render": 85,
+    "audio": 10,
+    "blender": 20,
+    "frames": 50,
+    "encode": 95,
+    "mux": 98,
+    "done": 100,
+}
 
 
 class AnimeEpisodeRequest(BaseModel):
@@ -123,6 +140,8 @@ def _estimate_eta(stage: str) -> float | None:
     history = _load_perf_history()
     if stage not in history:
         return None
+    if stage not in _STAGE_ORDER:
+        return None
     remaining = 0.0
     for stage_key in _STAGE_ORDER[_STAGE_ORDER.index(stage) :]:
         remaining += history.get(stage_key, {}).get("avg_seconds", 0.0)
@@ -135,27 +154,32 @@ def _set_status(
     result: Optional[PipelineResult] = None,
     episode_result: Optional[EpisodeResult] = None,
     anime_3d_result: Optional[Anime3DResult] = None,
+    stage_key: str | None = None,
+    progress_pct: int | None = None,
+    extra: dict | None = None,
 ) -> None:
     with _jobs_lock:
         payload = _jobs.setdefault(job_id, {"status": STATUS_IDLE})
-        stage_key = _stage_key(status)
+        resolved_stage = stage_key or _stage_key(status)
         now = datetime.now()
         previous_stage = payload.get("stage_key")
         previous_start = payload.get("stage_started_at")
-        if previous_stage and previous_start and previous_stage != stage_key:
+        if previous_stage and previous_start and previous_stage != resolved_stage:
             elapsed = now.timestamp() - previous_start
             _record_stage_duration(previous_stage, elapsed)
             payload["stage_started_at"] = now.timestamp()
         elif previous_stage is None:
             payload["stage_started_at"] = now.timestamp()
-        payload["stage_key"] = stage_key
+        payload["stage_key"] = resolved_stage
         payload["status"] = status
         payload["stage"] = status
         payload["updated_at"] = now.isoformat()
-        payload["progress_pct"] = _STAGE_PROGRESS.get(stage_key, 5)
-        eta_seconds = _estimate_eta(stage_key)
+        payload["progress_pct"] = progress_pct if progress_pct is not None else _STAGE_PROGRESS.get(resolved_stage, 5)
+        eta_seconds = _estimate_eta(resolved_stage)
         payload["eta_seconds"] = eta_seconds
         payload["eta_mmss"] = _format_mmss(eta_seconds) if eta_seconds is not None else None
+        if extra:
+            payload.update(extra)
         if result:
             payload["video_path"] = str(result.video.output_path.resolve())
             payload["duration"] = result.video.duration_seconds
@@ -177,6 +201,7 @@ def _set_status(
             payload["success"] = True
         if anime_3d_result:
             payload["video_path"] = str(anime_3d_result.final_video.resolve())
+            payload["final_video"] = str(anime_3d_result.final_video.resolve())
             payload["output_dir"] = str(anime_3d_result.output_dir.resolve())
             payload["audio_path"] = str(anime_3d_result.audio_path.resolve())
             payload["duration"] = anime_3d_result.duration_seconds
@@ -184,12 +209,26 @@ def _set_status(
             payload["success"] = True
 
 
-def _set_error(job_id: str, message: str) -> None:
+def _tail_file(path: Path, max_chars: int = 2000) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")[-max_chars:]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _set_error(job_id: str, message: str, extra: dict | None = None) -> None:
     with _jobs_lock:
         payload = _jobs.setdefault(job_id, {"status": STATUS_IDLE})
         payload["status"] = message
         payload["progress_pct"] = payload.get("progress_pct", 0)
         payload["success"] = False
+        payload["updated_at"] = datetime.now().isoformat()
+        payload["stage_key"] = "error"
+        payload["stage"] = "Error"
+        if extra:
+            payload.update(extra)
 
 
 def _run_job(job_id: str) -> None:
@@ -213,12 +252,30 @@ def _run_anime_episode(job_id: str, topic_hint: str | None, lane: str | None) ->
 
 
 def _run_anime_3d_60s(job_id: str) -> None:
+    def _update(payload: dict) -> None:
+        _set_status(
+            job_id,
+            payload.get("status", "Rendering anime 3D episode..."),
+            stage_key=payload.get("stage_key"),
+            progress_pct=payload.get("progress_pct"),
+            extra=payload.get("extra"),
+        )
+
     try:
-        _set_status(job_id, "Rendering anime 3D episode...")
-        result = render_anime_3d_60s(job_id)
-        _set_status(job_id, STATUS_DONE, anime_3d_result=result)
+        _set_status(job_id, "Generating audio", stage_key="audio", progress_pct=5)
+        result = render_anime_3d_60s(job_id, status_callback=_update)
+        _set_status(job_id, "Complete", anime_3d_result=result, stage_key="done", progress_pct=100)
     except Exception as exc:  # noqa: BLE001
-        _set_error(job_id, f"Error: {exc}")
+        output_dir = anime_3d_output_dir(job_id)
+        extra = {
+            "output_dir": str(output_dir.resolve()),
+            "blender_cmd": str((output_dir / "blender_cmd.txt").resolve()),
+            "blender_stdout": str((output_dir / "blender_stdout.txt").resolve()),
+            "blender_stderr": str((output_dir / "blender_stderr.txt").resolve()),
+            "blender_stderr_tail": _tail_file(output_dir / "blender_stderr.txt"),
+            "blender_stdout_tail": _tail_file(output_dir / "blender_stdout.txt"),
+        }
+        _set_error(job_id, f"Error: {exc}", extra=extra)
 
 
 @app.get("/")
