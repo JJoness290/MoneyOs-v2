@@ -20,6 +20,9 @@ from app.config import (
     ANIME3D_OUTLINE_MODE,
     ANIME3D_POSTFX,
     OUTPUT_DIR,
+    VFX_EMISSION_STRENGTH,
+    VFX_SCALE,
+    VFX_SCREEN_COVERAGE,
 )
 from app.core.paths import get_assets_root
 from app.core.tts import generate_tts
@@ -163,6 +166,12 @@ def render_anime_3d_60s(job_id: str, status_callback: StatusCallback = None) -> 
         f"{duration_s:.2f}",
         "--fps",
         str(ANIME3D_FPS),
+        "--vfx-emission-strength",
+        str(VFX_EMISSION_STRENGTH),
+        "--vfx-scale",
+        str(VFX_SCALE),
+        "--vfx-screen-coverage",
+        str(VFX_SCREEN_COVERAGE),
     ]
     cmd = build_blender_command(script_copy_path, blender_args)
     blender_cmd_path = output_dir / "blender_cmd.txt"

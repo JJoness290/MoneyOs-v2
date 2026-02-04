@@ -153,6 +153,18 @@ except ValueError:
     RENDER_FPS = 30
 TOON_SHADER = os.getenv("MONEYOS_TOON_SHADER", "1") != "0"
 VFX_ENABLE = os.getenv("MONEYOS_VFX_ENABLE", "1") != "0"
+try:
+    VFX_EMISSION_STRENGTH = float(os.getenv("MONEYOS_VFX_EMISSION_STRENGTH", "50"))
+except ValueError:
+    VFX_EMISSION_STRENGTH = 50.0
+try:
+    VFX_SCALE = float(os.getenv("MONEYOS_VFX_SCALE", "1.0"))
+except ValueError:
+    VFX_SCALE = 1.0
+try:
+    VFX_SCREEN_COVERAGE = float(os.getenv("MONEYOS_VFX_SCREEN_COVERAGE", "0.35"))
+except ValueError:
+    VFX_SCREEN_COVERAGE = 0.35
 
 ANIME3D_ASSET_MODE = os.getenv("MONEYOS_ANIME3D_ASSET_MODE", "auto").strip().lower()
 if ANIME3D_ASSET_MODE not in {"auto", "local"}:

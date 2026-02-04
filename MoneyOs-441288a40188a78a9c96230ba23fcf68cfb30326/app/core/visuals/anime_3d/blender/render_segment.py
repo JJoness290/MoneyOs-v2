@@ -8,6 +8,7 @@ import wave
 from pathlib import Path
 
 import bpy
+from mathutils import Vector
 
 
 def _parse_args() -> argparse.Namespace:
@@ -31,6 +32,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--res", default="1920x1080")
     parser.add_argument("--duration", type=float, default=60.0)
     parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--vfx-emission-strength", type=float, default=50.0)
+    parser.add_argument("--vfx-scale", type=float, default=1.0)
+    parser.add_argument("--vfx-screen-coverage", type=float, default=0.35)
     return parser.parse_args(argv)
 
 
@@ -351,47 +355,114 @@ def _animate(
     return mouth_keyframes
 
 
-def _add_vfx(assets_dir: Path) -> None:
+def _ensure_vfx_collection(scene: bpy.types.Scene) -> bpy.types.Collection:
+    collection = bpy.data.collections.get("VFX")
+    if collection is None:
+        collection = bpy.data.collections.new("VFX")
+        scene.collection.children.link(collection)
+    elif collection.name not in scene.collection.children:
+        scene.collection.children.link(collection)
+    if hasattr(collection, "hide_viewport"):
+        collection.hide_viewport = False
+    if hasattr(collection, "hide_render"):
+        collection.hide_render = False
+    return collection
+
+
+def _apply_vfx_material(
+    plane: bpy.types.Object,
+    image_path: Path,
+    emission_strength: float,
+) -> None:
+    material = bpy.data.materials.new(name=f"VFX_{image_path.stem}")
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    nodes.clear()
+    output = nodes.new(type="ShaderNodeOutputMaterial")
+    emission = nodes.new(type="ShaderNodeEmission")
+    emission.inputs["Strength"].default_value = emission_strength
+    image_node = nodes.new(type="ShaderNodeTexImage")
+    image_node.image = bpy.data.images.load(str(image_path))
+    image_node.image.colorspace_settings.name = "sRGB"
+    separate_rgba = nodes.new(type="ShaderNodeSeparateRGBA")
+    mix = nodes.new(type="ShaderNodeMixShader")
+    transparent = nodes.new(type="ShaderNodeBsdfTransparent")
+    material.node_tree.links.new(image_node.outputs["Color"], emission.inputs["Color"])
+    material.node_tree.links.new(image_node.outputs["Color"], separate_rgba.inputs["Image"])
+    material.node_tree.links.new(separate_rgba.outputs["A"], mix.inputs[0])
+    material.node_tree.links.new(transparent.outputs["BSDF"], mix.inputs[1])
+    material.node_tree.links.new(emission.outputs["Emission"], mix.inputs[2])
+    material.node_tree.links.new(mix.outputs["Shader"], output.inputs["Surface"])
+    material.blend_method = "BLEND"
+    material.shadow_method = "NONE"
+    material.use_backface_culling = False
+    if hasattr(material, "alpha_threshold"):
+        material.alpha_threshold = 0.0
+    plane.data.materials.clear()
+    plane.data.materials.append(material)
+    print("[VFX] emissive material applied:", image_path.name, "strength", emission_strength)
+
+
+def _add_vfx(
+    assets_dir: Path,
+    scene: bpy.types.Scene,
+    camera: bpy.types.Object | None,
+    frame_end: int,
+    emission_strength: float,
+    vfx_scale: float,
+    screen_coverage: float,
+) -> None:
+    if camera is None or camera.data is None:
+        return
+    vfx_collection = _ensure_vfx_collection(scene)
     vfx_items = [
         ("explosion.png", (1.5, 0.0, 1.2)),
         ("energy_arc.png", (0.6, 0.3, 1.0)),
         ("smoke.png", (0.0, -0.2, 0.8)),
     ]
+    forward = camera.matrix_world.to_quaternion() @ Vector((0.0, 0.0, -1.0))
+    right = camera.matrix_world.to_quaternion() @ Vector((1.0, 0.0, 0.0))
+    up = camera.matrix_world.to_quaternion() @ Vector((0.0, 1.0, 0.0))
+    distance = 3.0
+    camera_pos = camera.location
+    vfx_center = camera_pos + forward * distance
+    vfx_offset = right * 0.25
+    coverage = max(0.1, min(screen_coverage, 0.9))
+    vfx_width = 2.0 * distance * math.tan(camera.data.angle / 2.0) * coverage
+    vfx_height = vfx_width * (scene.render.resolution_y / scene.render.resolution_x)
+    scale_x = vfx_width * 0.5 * vfx_scale
+    scale_y = vfx_height * 0.5 * vfx_scale
     for filename, location in vfx_items:
         image_path = assets_dir / "vfx" / filename
-        bpy.ops.mesh.primitive_plane_add(size=1.5, location=location)
+        if not image_path.exists():
+            continue
+        item_offset = right * (location[0] * 0.15) + up * (location[1] * 0.15)
+        bpy.ops.mesh.primitive_plane_add(size=1.0, location=vfx_center + vfx_offset + item_offset)
         plane = bpy.context.active_object
-        material = bpy.data.materials.new(name=f"VFX_{filename}")
-        material.use_nodes = True
-        nodes = material.node_tree.nodes
-        nodes.clear()
-        output = nodes.new(type="ShaderNodeOutputMaterial")
-        emission = nodes.new(type="ShaderNodeEmission")
-        image_node = nodes.new(type="ShaderNodeTexImage")
-        if image_path.exists():
-            image_node.image = bpy.data.images.load(str(image_path))
-        else:
-            noise = nodes.new(type="ShaderNodeTexNoise")
-            noise.inputs["Scale"].default_value = 6.0
-            color_ramp = nodes.new(type="ShaderNodeValToRGB")
-            color_ramp.color_ramp.elements[0].position = 0.2
-            color_ramp.color_ramp.elements[1].position = 0.6
-            material.node_tree.links.new(noise.outputs["Fac"], color_ramp.inputs["Fac"])
-            material.node_tree.links.new(color_ramp.outputs["Color"], emission.inputs["Color"])
-            image_node = None
-        mix = nodes.new(type="ShaderNodeMixShader")
-        transparent = nodes.new(type="ShaderNodeBsdfTransparent")
-        if image_node:
-            material.node_tree.links.new(image_node.outputs["Color"], emission.inputs["Color"])
-            material.node_tree.links.new(image_node.outputs["Alpha"], mix.inputs[0])
-        material.node_tree.links.new(transparent.outputs["BSDF"], mix.inputs[1])
-        material.node_tree.links.new(emission.outputs["Emission"], mix.inputs[2])
-        material.node_tree.links.new(mix.outputs["Shader"], output.inputs["Surface"])
-        plane.data.materials.append(material)
-        for frame, scale in ((1, 0.1), (15, 1.0), (30, 1.2), (60, 0.8)):
-            bpy.context.scene.frame_set(frame)
-            plane.scale = (scale, scale, scale)
-            plane.keyframe_insert(data_path="scale")
+        _apply_vfx_material(plane, image_path, emission_strength)
+        plane.rotation_euler = camera.rotation_euler
+        plane.scale = (scale_x, scale_y, 1.0)
+        plane.location = vfx_center + vfx_offset + item_offset
+        plane.keyframe_insert(data_path="location", frame=1)
+        plane.keyframe_insert(data_path="scale", frame=1)
+        plane.keyframe_insert(data_path="location", frame=frame_end)
+        plane.keyframe_insert(data_path="scale", frame=frame_end)
+        if hasattr(plane, "hide_shadow"):
+            plane.hide_shadow = True
+        if hasattr(plane, "visible_shadow"):
+            plane.visible_shadow = False
+        plane.hide_viewport = False
+        plane.hide_render = False
+        try:
+            if plane.name not in vfx_collection.objects:
+                vfx_collection.objects.link(plane)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if plane.name in scene.collection.objects:
+                scene.collection.objects.unlink(plane)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _setup_compositor(scene: bpy.types.Scene) -> None:
@@ -503,7 +574,15 @@ def main() -> None:
         _configure_eevee(scene, args.quality)
 
     objects = _create_scene(assets_dir, args.asset_mode)
-    _add_vfx(assets_dir)
+    _add_vfx(
+        assets_dir,
+        scene,
+        objects.get("camera"),
+        scene.frame_end,
+        args.vfx_emission_strength,
+        args.vfx_scale,
+        args.vfx_screen_coverage,
+    )
     print("[POSTFX] enabled=", args.postfx)
     if args.postfx == "on":
         _setup_compositor(scene)
@@ -518,6 +597,9 @@ def main() -> None:
                 "mouth_keyframes": mouth_keyframes,
                 "frame_end": scene.frame_end,
                 "fps": scene.render.fps,
+                "vfx_emission_strength": args.vfx_emission_strength,
+                "vfx_scale": args.vfx_scale,
+                "vfx_screen_coverage": args.vfx_screen_coverage,
                 "parsed_args": vars(args),
             },
             indent=2,
