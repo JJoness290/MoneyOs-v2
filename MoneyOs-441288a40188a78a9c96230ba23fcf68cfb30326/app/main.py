@@ -12,13 +12,15 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from app.config import AUTO_CHARACTERS_DIR, CHARACTERS_DIR, OUTPUT_DIR, VIDEO_DIR
+from app.config import AUTO_CHARACTERS_DIR, CHARACTERS_DIR, OUTPUT_DIR, VIDEO_DIR, VISUAL_MODE
 from app.core.assets.harvester.cache import get_cache_paths
 from app.core.assets.harvester.harvester import harvest_assets
 from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, status as autopilot_status
 from app.core.bootstrap import ensure_dependencies
 from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
 from app.core.visuals.anime_3d.animation_library import rebuild_animation_library
+from app.core.visuals.anime_3d.blender_runner import detect_blender
+from app.core.visuals.anime_3d.render_pipeline import Anime3DResult, render_anime_3d_60s
 from app.core.pipeline import PipelineResult, run_pipeline
 from app.core.system_specs import get_system_specs
 
@@ -41,6 +43,8 @@ _STAGE_ALIASES = {
     "downloading b-roll": "broll",
     "rendering video": "render",
     "generating anime episode": "script",
+    "queued 3d render": "script",
+    "rendering anime 3d episode": "render",
     "queued": "script",
     "done": "done",
 }
@@ -111,6 +115,7 @@ def _set_status(
     status: str,
     result: Optional[PipelineResult] = None,
     episode_result: Optional[EpisodeResult] = None,
+    anime_3d_result: Optional[Anime3DResult] = None,
 ) -> None:
     with _jobs_lock:
         payload = _jobs.setdefault(job_id, {"status": STATUS_IDLE})
@@ -151,6 +156,13 @@ def _set_status(
             payload["audio_duration_mmss"] = _format_mmss(episode_result.total_audio_seconds)
             payload["output_dir"] = str(episode_result.output_dir.resolve())
             payload["success"] = True
+        if anime_3d_result:
+            payload["video_path"] = str(anime_3d_result.final_video.resolve())
+            payload["output_dir"] = str(anime_3d_result.output_dir.resolve())
+            payload["audio_path"] = str(anime_3d_result.audio_path.resolve())
+            payload["duration"] = anime_3d_result.duration_seconds
+            payload["duration_mmss"] = _format_mmss(anime_3d_result.duration_seconds)
+            payload["success"] = True
 
 
 def _set_error(job_id: str, message: str) -> None:
@@ -181,6 +193,15 @@ def _run_anime_episode(job_id: str, topic_hint: str | None, lane: str | None) ->
         _set_error(job_id, f"Error: {exc}")
 
 
+def _run_anime_3d_60s(job_id: str) -> None:
+    try:
+        _set_status(job_id, "Rendering anime 3D episode...")
+        result = render_anime_3d_60s(job_id)
+        _set_status(job_id, STATUS_DONE, anime_3d_result=result)
+    except Exception as exc:  # noqa: BLE001
+        _set_error(job_id, f"Error: {exc}")
+
+
 @app.get("/")
 async def ui() -> HTMLResponse:
     index_path = Path(__file__).parent / "ui" / "index.html"
@@ -199,7 +220,19 @@ async def health() -> JSONResponse:
 
 @app.get("/debug/status")
 async def debug_status() -> JSONResponse:
-    payload = {"autopilot": autopilot_status()}
+    blender = detect_blender()
+    payload = {
+        "autopilot": autopilot_status(),
+        "visual_mode": VISUAL_MODE,
+        "blender": {
+            "found": blender.found,
+            "path": blender.path,
+            "version": blender.version,
+            "error": blender.error,
+        },
+        "anime_3d_ready": blender.found and VISUAL_MODE == "anime_3d",
+        "last_error": blender.error,
+    }
     try:
         import torch  # noqa: WPS433
 
@@ -255,6 +288,27 @@ async def enqueue_anime_episode_autopilot(
             "job_id": job_id,
             "queued": True,
             "endpoint": "anime-episode-10m-autopilot",
+        }
+    )
+
+
+@app.post("/jobs/anime-episode-60s-3d")
+async def generate_anime_episode_3d_60s(
+    req: AnimeEpisodeRequest = Body(default=AnimeEpisodeRequest()),
+) -> JSONResponse:
+    _ = req
+    if VISUAL_MODE != "anime_3d":
+        raise HTTPException(status_code=400, detail="MONEYOS_VISUAL_MODE must be anime_3d")
+    job_id = uuid.uuid4().hex
+    _set_status(job_id, "Queued 3D render")
+    thread = threading.Thread(target=_run_anime_3d_60s, args=(job_id,), daemon=True)
+    thread.start()
+    output_dir = OUTPUT_DIR / "episodes" / job_id
+    return JSONResponse(
+        {
+            "job_id": job_id,
+            "output_dir": str(output_dir.resolve()),
+            "final_video": str((output_dir / "final.mp4").resolve()),
         }
     )
 
