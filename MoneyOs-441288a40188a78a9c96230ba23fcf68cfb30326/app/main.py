@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import json
 import threading
+import asyncio
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
 from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from app.config import VIDEO_DIR
+from app.config import AUTO_CHARACTERS_DIR, CHARACTERS_DIR, OUTPUT_DIR, VIDEO_DIR
+from app.core.assets.harvester.cache import get_cache_paths
+from app.core.assets.harvester.harvester import harvest_assets
 from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, status as autopilot_status
 from app.core.bootstrap import ensure_dependencies
 from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
+from app.core.visuals.anime_3d.animation_library import rebuild_animation_library
 from app.core.pipeline import PipelineResult, run_pipeline
 from app.core.system_specs import get_system_specs
 
@@ -27,6 +32,19 @@ STATUS_DONE = "Done"
 
 _jobs_lock = threading.Lock()
 _jobs: Dict[str, dict] = {}
+_perf_lock = threading.Lock()
+_perf_history_path = OUTPUT_DIR / "perf_history.json"
+
+_STAGE_ORDER = ["script", "broll", "render", "done"]
+_STAGE_ALIASES = {
+    "generating script": "script",
+    "downloading b-roll": "broll",
+    "rendering video": "render",
+    "generating anime episode": "script",
+    "queued": "script",
+    "done": "done",
+}
+_STAGE_PROGRESS = {"script": 10, "broll": 40, "render": 85, "done": 100}
 
 
 class AnimeEpisodeRequest(BaseModel):
@@ -46,6 +64,48 @@ def _format_mmss(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def _load_perf_history() -> dict:
+    if not _perf_history_path.exists():
+        return {}
+    try:
+        return json.loads(_perf_history_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def _save_perf_history(payload: dict) -> None:
+    _perf_history_path.parent.mkdir(parents=True, exist_ok=True)
+    _perf_history_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _stage_key(status: str) -> str:
+    lowered = status.lower()
+    for phrase, key in _STAGE_ALIASES.items():
+        if phrase in lowered:
+            return key
+    return "script"
+
+
+def _record_stage_duration(stage: str, duration_s: float) -> None:
+    with _perf_lock:
+        history = _load_perf_history()
+        stage_entry = history.get(stage, {"avg_seconds": 0.0, "count": 0})
+        count = stage_entry["count"] + 1
+        avg = (stage_entry["avg_seconds"] * stage_entry["count"] + duration_s) / count
+        history[stage] = {"avg_seconds": avg, "count": count}
+        _save_perf_history(history)
+
+
+def _estimate_eta(stage: str) -> float | None:
+    history = _load_perf_history()
+    if stage not in history:
+        return None
+    remaining = 0.0
+    for stage_key in _STAGE_ORDER[_STAGE_ORDER.index(stage) :]:
+        remaining += history.get(stage_key, {}).get("avg_seconds", 0.0)
+    return remaining if remaining > 0 else None
+
+
 def _set_status(
     job_id: str,
     status: str,
@@ -54,9 +114,24 @@ def _set_status(
 ) -> None:
     with _jobs_lock:
         payload = _jobs.setdefault(job_id, {"status": STATUS_IDLE})
+        stage_key = _stage_key(status)
+        now = datetime.now()
+        previous_stage = payload.get("stage_key")
+        previous_start = payload.get("stage_started_at")
+        if previous_stage and previous_start and previous_stage != stage_key:
+            elapsed = now.timestamp() - previous_start
+            _record_stage_duration(previous_stage, elapsed)
+            payload["stage_started_at"] = now.timestamp()
+        elif previous_stage is None:
+            payload["stage_started_at"] = now.timestamp()
+        payload["stage_key"] = stage_key
         payload["status"] = status
         payload["stage"] = status
-        payload["updated_at"] = datetime.now().isoformat()
+        payload["updated_at"] = now.isoformat()
+        payload["progress_pct"] = _STAGE_PROGRESS.get(stage_key, 5)
+        eta_seconds = _estimate_eta(stage_key)
+        payload["eta_seconds"] = eta_seconds
+        payload["eta_mmss"] = _format_mmss(eta_seconds) if eta_seconds is not None else None
         if result:
             payload["video_path"] = str(result.video.output_path.resolve())
             payload["duration"] = result.video.duration_seconds
@@ -82,6 +157,7 @@ def _set_error(job_id: str, message: str) -> None:
     with _jobs_lock:
         payload = _jobs.setdefault(job_id, {"status": STATUS_IDLE})
         payload["status"] = message
+        payload["progress_pct"] = payload.get("progress_pct", 0)
         payload["success"] = False
 
 
@@ -192,9 +268,91 @@ async def status(job_id: str) -> JSONResponse:
     return JSONResponse(data)
 
 
+@app.get("/events/{job_id}")
+async def events(job_id: str) -> StreamingResponse:
+    async def event_stream():
+        while True:
+            with _jobs_lock:
+                data = _jobs.get(job_id)
+            if not data:
+                yield "event: error\ndata: {\"error\": \"Job not found\"}\n\n"
+                return
+            payload = json.dumps(data)
+            yield f"event: status\ndata: {payload}\n\n"
+            if data.get("success") or (data.get("status") or "").startswith("Error"):
+                return
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 @app.get("/videos/{filename}")
 async def get_video(filename: str) -> FileResponse:
     path = VIDEO_DIR / filename
     if not path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
     return FileResponse(path)
+
+
+class HarvestRequest(BaseModel):
+    query: str
+    style: Optional[str] = None
+    count: int = 10
+
+
+@app.post("/assets/harvest")
+async def harvest(req: HarvestRequest) -> JSONResponse:
+    report = harvest_assets(req.query, req.style or "anime", req.count)
+    return JSONResponse({"candidates": report.candidates, "selected": report.selected})
+
+
+@app.get("/assets/harvest/report")
+async def harvest_report() -> JSONResponse:
+    paths = get_cache_paths()
+    if not paths.report_path.exists():
+        raise HTTPException(status_code=404, detail="Report not found")
+    return JSONResponse(json.loads(paths.report_path.read_text(encoding="utf-8")))
+
+
+@app.get("/assets/characters/auto")
+async def auto_characters() -> JSONResponse:
+    if not AUTO_CHARACTERS_DIR.exists():
+        return JSONResponse({"characters": []})
+    characters = [path.name for path in AUTO_CHARACTERS_DIR.iterdir() if path.is_dir()]
+    return JSONResponse({"characters": characters})
+
+
+class UseCharactersRequest(BaseModel):
+    character_ids: list[str]
+
+
+@app.post("/assets/characters/auto/use")
+async def use_auto_characters(req: UseCharactersRequest) -> JSONResponse:
+    selected = []
+    for character_id in req.character_ids:
+        source = AUTO_CHARACTERS_DIR / character_id
+        target = CHARACTERS_DIR / character_id
+        if source.exists() and source.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            selected.append(character_id)
+    return JSONResponse({"selected": selected})
+
+
+@app.get("/assets/status")
+async def assets_status() -> JSONResponse:
+    characters = [path.name for path in CHARACTERS_DIR.iterdir()] if CHARACTERS_DIR.exists() else []
+    auto_characters = [path.name for path in AUTO_CHARACTERS_DIR.iterdir()] if AUTO_CHARACTERS_DIR.exists() else []
+    index_path = rebuild_animation_library()
+    clips = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else []
+    missing = []
+    for required in ("walk", "talk", "punch"):
+        if not any(clip.get("motion_type") == required for clip in clips):
+            missing.append(required)
+    return JSONResponse(
+        {
+            "characters": characters,
+            "auto_characters": auto_characters,
+            "clips_indexed": len(clips),
+            "missing_categories": missing,
+        }
+    )

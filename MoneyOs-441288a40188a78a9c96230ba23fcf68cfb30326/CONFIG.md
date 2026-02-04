@@ -102,3 +102,52 @@ python -m app.tools.self_check
 GET /health
 GET /debug/status
 ```
+
+## Anime 3D Backend (anime_3d)
+
+| Env var | Default | Notes |
+| --- | --- | --- |
+| `MONEYOS_VISUAL_MODE` | `anime` | Set to `anime_3d` to enable the Blender backend. |
+| `MONEYOS_BLENDER_PATH` | auto | Full path to `blender.exe` if not auto-detected. |
+| `MONEYOS_BLENDER_ENGINE` | `eevee` | `eevee` or `cycles`. |
+| `MONEYOS_BLENDER_GPU` | `1` | Set `0` to force CPU rendering. |
+| `MONEYOS_RENDER_RES` | `1920x1080` | Render resolution (auto caps by hardware). |
+| `MONEYOS_RENDER_FPS` | `30` | Render fps. |
+| `MONEYOS_TOON_SHADER` | `1` | Enable toon shader mode. |
+| `MONEYOS_ASSETS_DIR` | `assets/` | Base assets folder. |
+| `MONEYOS_CHARACTERS_DIR` | `assets/characters_3d/` | Rigged characters source. |
+| `MONEYOS_ANIMATIONS_DIR` | `assets/animations/` | Animation clips output. |
+| `MONEYOS_VFX_DIR` | `assets/vfx/` | VFX assets directory. |
+| `MONEYOS_VFX_ENABLE` | `1` | Disable VFX when set to `0`. |
+
+### 60s 3D smoke test
+
+```
+run_3d_test_60s.bat
+```
+
+## Prompt compiler (77-token fix)
+
+`app/core/prompts/compiler.py` compacts prompts to <=75 tokens. It logs `trimmed=True/False` and the compiled token count.
+
+## Asset Harvester (CC0 default)
+
+| Env var | Default | Notes |
+| --- | --- | --- |
+| `MONEYOS_ASSET_HARVEST` | `0` | Set `1` to enable auto-harvester. |
+| `MONEYOS_ASSET_LICENSE_MODE` | `cc0_only` | `cc0_only` or `cc0_or_ccby`. |
+| `MONEYOS_ASSET_PROVIDERS` | `opengameart` | Comma-separated providers. |
+| `MONEYOS_SKETCHFAB_API_TOKEN` | empty | Required if enabling Sketchfab provider. |
+| `MONEYOS_ASSET_MAX_DOWNLOADS_PER_RUN` | `30` | Max assets per run. |
+| `MONEYOS_ASSET_KEEP_TOP_N` | `5` | Keep top N scored assets. |
+| `MONEYOS_ASSET_STORAGE_DIR` | `assets/characters_3d_auto/` | Auto-harvest storage. |
+| `MONEYOS_ASSET_REVIEW_MODE` | `0` | When `1`, never auto-use. |
+
+### Harvest API
+
+```
+POST /assets/harvest
+GET /assets/harvest/report
+GET /assets/characters/auto
+POST /assets/characters/auto/use
+```

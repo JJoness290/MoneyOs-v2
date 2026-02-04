@@ -6,6 +6,7 @@ import re
 import os
 
 from app.config import ANIME_STYLE
+from app.core.prompts.compiler import compile_prompt
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,10 @@ def build_prompt(text: str) -> PromptPayload:
     if suffix:
         prompt = f"{prompt}, {suffix}"
     prompt, trimmed = _limit_prompt(prompt, identity)
-    print(f"[ANIME_PROMPT] words={len(prompt.split())} trimmed={trimmed}")
     negative_prompt = _BASE_NEGATIVE
-    return PromptPayload(prompt=prompt, negative_prompt=negative_prompt)
+    compiled = compile_prompt(prompt, negative_prompt, max_tokens=75)
+    print(
+        f"[ANIME_PROMPT] words={len(prompt.split())} trimmed={trimmed} "
+        f"compiled_tokens={compiled.token_count} compiled_trimmed={compiled.trimmed}"
+    )
+    return PromptPayload(prompt=compiled.prompt, negative_prompt=compiled.negative_prompt)

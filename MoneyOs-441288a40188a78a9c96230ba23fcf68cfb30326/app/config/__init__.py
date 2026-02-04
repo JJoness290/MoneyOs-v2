@@ -6,6 +6,12 @@ OUTPUT_DIR = BASE_DIR / "output"
 VIDEO_DIR = OUTPUT_DIR / "videos"
 AUDIO_DIR = OUTPUT_DIR / "audio"
 BROLL_DIR = OUTPUT_DIR / "broll"
+ASSETS_DIR = BASE_DIR / os.getenv("MONEYOS_ASSETS_DIR", "assets")
+CHARACTERS_DIR = BASE_DIR / os.getenv("MONEYOS_CHARACTERS_DIR", "assets/characters_3d")
+ANIMATIONS_DIR = BASE_DIR / os.getenv("MONEYOS_ANIMATIONS_DIR", "assets/animations")
+ANIMATION_PACKS_DIR = BASE_DIR / "assets" / "animation_packs"
+VFX_DIR = BASE_DIR / os.getenv("MONEYOS_VFX_DIR", "assets/vfx")
+AUTO_CHARACTERS_DIR = BASE_DIR / os.getenv("MONEYOS_ASSET_STORAGE_DIR", "assets/characters_3d_auto")
 SCRIPT_DIR = BASE_DIR / "outputs" / "scripts"
 MINECRAFT_BG_DIR = BASE_DIR / "assets" / "minecraft"
 
@@ -13,6 +19,8 @@ VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 BROLL_DIR.mkdir(parents=True, exist_ok=True)
 SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+ANIMATION_PACKS_DIR.mkdir(parents=True, exist_ok=True)
+AUTO_CHARACTERS_DIR.mkdir(parents=True, exist_ok=True)
 
 PEXELS_API_KEY_ENV = "PEXELS_API_KEY"
 DEFAULT_VOICE = "en-US-JennyNeural"
@@ -51,7 +59,7 @@ except ValueError:
 VISUAL_MODE = os.getenv("MONEYOS_VISUAL_MODE")
 if VISUAL_MODE:
     VISUAL_MODE = VISUAL_MODE.strip().lower()
-if VISUAL_MODE not in {None, "broll", "documentary", "anime", "hybrid"}:
+if VISUAL_MODE not in {None, "broll", "documentary", "anime", "anime_3d", "hybrid"}:
     VISUAL_MODE = None
 if VISUAL_MODE is None:
     VISUAL_MODE = "anime" if TARGET_PLATFORM == "youtube" else "documentary"
@@ -126,3 +134,36 @@ try:
 except ValueError:
     SD_SEED = 0
 AI_IMAGE_CACHE = os.getenv("MONEYOS_AI_IMAGE_CACHE", "1") != "0"
+
+BLENDER_PATH = os.getenv("MONEYOS_BLENDER_PATH")
+BLENDER_ENGINE = os.getenv("MONEYOS_BLENDER_ENGINE", "eevee").strip().lower()
+if BLENDER_ENGINE not in {"eevee", "cycles"}:
+    BLENDER_ENGINE = "eevee"
+BLENDER_GPU = os.getenv("MONEYOS_BLENDER_GPU", "1") != "0"
+try:
+    RENDER_RES = os.getenv("MONEYOS_RENDER_RES", "1920x1080").lower()
+    RENDER_RESOLUTION = tuple(int(val) for val in RENDER_RES.split("x", 1))
+except ValueError:
+    RENDER_RESOLUTION = (1920, 1080)
+try:
+    RENDER_FPS = int(os.getenv("MONEYOS_RENDER_FPS", "30"))
+except ValueError:
+    RENDER_FPS = 30
+TOON_SHADER = os.getenv("MONEYOS_TOON_SHADER", "1") != "0"
+VFX_ENABLE = os.getenv("MONEYOS_VFX_ENABLE", "1") != "0"
+
+ASSET_HARVEST = os.getenv("MONEYOS_ASSET_HARVEST", "0") == "1"
+ASSET_LICENSE_MODE = os.getenv("MONEYOS_ASSET_LICENSE_MODE", "cc0_only").strip().lower()
+if ASSET_LICENSE_MODE not in {"cc0_only", "cc0_or_ccby"}:
+    ASSET_LICENSE_MODE = "cc0_only"
+ASSET_PROVIDERS = [item.strip() for item in os.getenv("MONEYOS_ASSET_PROVIDERS", "opengameart").split(",") if item.strip()]
+try:
+    ASSET_MAX_DOWNLOADS_PER_RUN = int(os.getenv("MONEYOS_ASSET_MAX_DOWNLOADS_PER_RUN", "30"))
+except ValueError:
+    ASSET_MAX_DOWNLOADS_PER_RUN = 30
+try:
+    ASSET_KEEP_TOP_N = int(os.getenv("MONEYOS_ASSET_KEEP_TOP_N", "5"))
+except ValueError:
+    ASSET_KEEP_TOP_N = 5
+ASSET_REVIEW_MODE = os.getenv("MONEYOS_ASSET_REVIEW_MODE", "0") == "1"
+SKETCHFAB_API_TOKEN = os.getenv("MONEYOS_SKETCHFAB_API_TOKEN")
