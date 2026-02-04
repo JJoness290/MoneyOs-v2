@@ -56,8 +56,9 @@ def build_blender_command(script_path: Path, args: Iterable[str]) -> list[str]:
     gpu_flag = "1" if BLENDER_GPU else "0"
     return [
         str(blender_path),
-        "-b",
-        "-P",
+        "--background",
+        "--factory-startup",
+        "--python",
         str(script_path),
         "--",
         "--engine",

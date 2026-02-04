@@ -20,7 +20,11 @@ from app.config import (
 )
 from app.core.paths import get_assets_root
 from app.core.tts import generate_tts
-from app.core.visuals.anime_3d.blender_runner import BlenderCommand, run_blender_capture
+from app.core.visuals.anime_3d.blender_runner import (
+    BlenderCommand,
+    build_blender_command,
+    run_blender_capture,
+)
 from app.core.visuals.anime_3d.validators import validate_episode
 from app.core.visuals.ffmpeg_utils import run_ffmpeg, select_video_encoder
 
@@ -107,48 +111,72 @@ def render_anime_3d_60s(job_id: str) -> Anime3DResult:
     video_path = output_dir / "segment.mp4"
     report_path = output_dir / "render_report.json"
     frames_dir = output_dir / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
     script_path = Path(__file__).parent / "blender" / "render_segment.py"
+    script_copy_path = output_dir / "blender_script.py"
+    script_copy_path.write_text(script_path.read_text(encoding="utf-8"), encoding="utf-8")
+    blender_args = [
+        "--output",
+        str(video_path),
+        "--audio",
+        str(audio_path),
+        "--report",
+        str(report_path),
+        "--assets-dir",
+        str(get_assets_root()),
+        "--asset-mode",
+        ANIME3D_ASSET_MODE,
+        "--style-preset",
+        ANIME3D_STYLE_PRESET,
+        "--outline-mode",
+        ANIME3D_OUTLINE_MODE,
+        "--postfx",
+        "on" if ANIME3D_POSTFX else "off",
+        "--quality",
+        ANIME3D_QUALITY,
+        "--res",
+        f"{ANIME3D_RESOLUTION[0]}x{ANIME3D_RESOLUTION[1]}",
+        "--duration",
+        f"{duration_s:.2f}",
+        "--fps",
+        str(ANIME3D_FPS),
+    ]
     result = run_blender_capture(
         BlenderCommand(
-            script_path=script_path,
-            args=[
-                "--output",
-                str(video_path),
-                "--audio",
-                str(audio_path),
-                "--report",
-                str(report_path),
-                "--assets-dir",
-                str(get_assets_root()),
-                "--asset-mode",
-                ANIME3D_ASSET_MODE,
-                "--style-preset",
-                ANIME3D_STYLE_PRESET,
-                "--outline-mode",
-                ANIME3D_OUTLINE_MODE,
-                "--postfx",
-                "on" if ANIME3D_POSTFX else "off",
-                "--quality",
-                ANIME3D_QUALITY,
-                "--res",
-                f"{ANIME3D_RESOLUTION[0]}x{ANIME3D_RESOLUTION[1]}",
-                "--duration",
-                f"{duration_s:.2f}",
-                "--fps",
-                str(ANIME3D_FPS),
-            ],
+            script_path=script_copy_path,
+            args=blender_args,
         )
     )
+    cmd = build_blender_command(script_copy_path, blender_args)
+    (output_dir / "blender_cmd.txt").write_text(" ".join(cmd), encoding="utf-8")
     (output_dir / "blender_stdout.txt").write_text(result.stdout or "", encoding="utf-8")
     (output_dir / "blender_stderr.txt").write_text(result.stderr or "", encoding="utf-8")
     if result.returncode != 0:
-        raise RuntimeError(f"Blender render failed: {result.stderr.strip()}")
+        tail_stdout = (result.stdout or "")[-2000:]
+        tail_stderr = (result.stderr or "")[-2000:]
+        raise RuntimeError(
+            "Blender render failed.\n"
+            f"Command: {' '.join(cmd)}\n"
+            f"Stdout (tail):\n{tail_stdout}\n"
+            f"Stderr (tail):\n{tail_stderr}"
+        )
     frame_list = sorted(frames_dir.glob("frame_*.png"))
     if not frame_list:
-        contents = "\n".join(path.name for path in frames_dir.glob("*"))
-        raise RuntimeError(f"No frames rendered in {frames_dir}. Contents:\n{contents}")
+        frame_list = sorted(frames_dir.glob("*.png"))
+    if len(frame_list) < 2:
+        contents = "\n".join(path.name for path in list(frames_dir.glob("*"))[:200])
+        tail_stdout = (result.stdout or "")[-2000:]
+        tail_stderr = (result.stderr or "")[-2000:]
+        raise RuntimeError(
+            "No frames rendered.\n"
+            f"Command: {' '.join(cmd)}\n"
+            f"Frames dir: {frames_dir}\n"
+            f"Contents:\n{contents}\n"
+            f"Stdout (tail):\n{tail_stdout}\n"
+            f"Stderr (tail):\n{tail_stderr}"
+        )
     encode_args, _ = select_video_encoder()
-    frame_pattern = str(frames_dir / "frame_%04d.png")
+    frame_pattern = str(frames_dir / "frame_%06d.png")
     args = [
         "ffmpeg",
         "-y",

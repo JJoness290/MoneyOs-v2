@@ -208,6 +208,7 @@ def _create_scene(assets_dir: Path, asset_mode: str) -> dict[str, bpy.types.Obje
     hero_armature = None
     enemy_armature = None
     hero_jaw = None
+    hero_body = None
     if asset_mode == "local":
         env_collections = _append_collections(assets_dir / "envs" / "city.blend")
         hero_collections = _append_collections(assets_dir / "characters" / "hero.blend")
@@ -229,6 +230,7 @@ def _create_scene(assets_dir: Path, asset_mode: str) -> dict[str, bpy.types.Obje
         hero = _create_character("hero", (0, 0, 0))
         enemy = _create_character("enemy", (2.5, -2.0, 0))
         hero_jaw = hero["jaw"]
+        hero_body = hero["body"]
         for obj in (hero["body"], hero["head"], hero["jaw"], enemy["body"], enemy["head"], enemy["jaw"]):
             _apply_toon_material(obj, outline_material)
 
@@ -247,6 +249,7 @@ def _create_scene(assets_dir: Path, asset_mode: str) -> dict[str, bpy.types.Obje
         "hero_armature": hero_armature,
         "enemy_armature": enemy_armature,
         "hero_jaw": hero_jaw,
+        "hero_body": hero_body,
         "camera": camera,
     }
 
@@ -256,14 +259,17 @@ def _animate(
     envelope: list[float],
     fps: int,
     assets_dir: Path,
+    asset_mode: str,
 ) -> int:
     hero_armature = objects["hero_armature"]
     camera = objects["camera"]
     frame_count = len(envelope)
     mouth_keyframes = 0
     action = None
-    if assets_dir.exists():
-        action = _import_action(assets_dir / "anims" / "run.fbx")
+    if asset_mode == "local":
+        action_path = assets_dir / "anims" / "run.fbx"
+        if action_path.exists():
+            action = _import_action(action_path)
     _apply_action(hero_armature, action)
     mesh_objects = []
     if hero_armature:
@@ -284,6 +290,10 @@ def _animate(
         if hero_armature:
             hero_armature.location.x = t * 0.03
             hero_armature.keyframe_insert(data_path="location", index=0)
+        elif objects.get("hero_body"):
+            hero_body = objects["hero_body"]
+            hero_body.rotation_euler.z = math.sin(t * 2.0) * 0.2
+            hero_body.keyframe_insert(data_path="rotation_euler", index=2)
         if camera:
             camera.location.x = 4 + math.sin(t * 0.8) * 0.4
             camera.location.y = -6 + math.cos(t * 0.7) * 0.4
@@ -403,7 +413,7 @@ def main() -> None:
     scene.render.image_settings.file_format = "PNG"
     frames_dir = output_path.parent / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
-    scene.render.filepath = str(frames_dir / "frame_")
+    scene.render.filepath = str(frames_dir / "frame_######")
 
     scene.render.use_freestyle = args.outline_mode == "freestyle"
     if hasattr(scene.render, "line_thickness"):
@@ -424,7 +434,7 @@ def main() -> None:
     if args.postfx == "on":
         _setup_compositor(scene)
     envelope = _load_rms_envelope(Path(args.audio) if args.audio else Path(), args.fps, scene.frame_end)
-    mouth_keyframes = _animate(objects, envelope, args.fps, assets_dir)
+    mouth_keyframes = _animate(objects, envelope, args.fps, assets_dir, args.asset_mode)
 
     bpy.ops.render.render(animation=True, write_still=False)
 
