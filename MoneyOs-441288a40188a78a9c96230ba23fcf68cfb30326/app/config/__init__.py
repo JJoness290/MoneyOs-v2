@@ -95,7 +95,20 @@ if AI_IMAGE_BACKEND not in {"sd_local"}:
 SD_MODEL = os.getenv("MONEYOS_SD_MODEL", "sd15_anime").strip().lower()
 if SD_MODEL not in {"sd15_anime", "sdxl_anime"}:
     SD_MODEL = "sd15_anime"
-SD_MODEL_ID = os.getenv("MONEYOS_SD_MODEL_ID") or "runwayml/stable-diffusion-v1-5"
+SD_MODEL_ID = os.getenv("MONEYOS_SD_MODEL_ID") or "cagliostrolab/animagine-xl-3.1"
+SD_MODEL_SOURCE = os.getenv("MONEYOS_SD_MODEL_SOURCE", "diffusers_hf").strip().lower()
+if SD_MODEL_SOURCE not in {"local_ckpt", "diffusers_hf", "api"}:
+    SD_MODEL_SOURCE = "diffusers_hf"
+SD_MODEL_LOCAL_PATH = Path(os.getenv("MONEYOS_SD_MODEL_LOCAL_PATH", "output/models/anime/animagine-xl-3.1.safetensors"))
+SD_PROFILE = os.getenv("MONEYOS_SD_PROFILE", "balanced").strip().lower()
+if SD_PROFILE not in {"balanced", "max"}:
+    SD_PROFILE = "balanced"
+try:
+    SD_MAX_BATCH_SIZE = int(os.getenv("MONEYOS_SD_MAX_BATCH_SIZE", "2"))
+except ValueError:
+    SD_MAX_BATCH_SIZE = 2
+ANIME_LORA_PATHS = os.getenv("MONEYOS_ANIME_LORA_PATHS", "")
+ANIME_LORA_WEIGHTS = os.getenv("MONEYOS_ANIME_LORA_WEIGHTS", "")
 try:
     SD_STEPS = int(os.getenv("MONEYOS_SD_STEPS", "18"))
 except ValueError:

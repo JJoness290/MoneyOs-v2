@@ -9,7 +9,20 @@ from pathlib import Path
 import threading
 from typing import Any
 
-from app.config import AI_IMAGE_CACHE, SD_GUIDANCE, SD_MODEL, SD_MODEL_ID, SD_SEED, SD_STEPS
+from app.config import (
+    AI_IMAGE_CACHE,
+    ANIME_LORA_PATHS,
+    ANIME_LORA_WEIGHTS,
+    SD_GUIDANCE,
+    SD_MAX_BATCH_SIZE,
+    SD_MODEL,
+    SD_MODEL_ID,
+    SD_MODEL_LOCAL_PATH,
+    SD_MODEL_SOURCE,
+    SD_PROFILE,
+    SD_SEED,
+    SD_STEPS,
+)
 from app.core.quality_profiles import (
     detect_hardware,
     base_preset_for_vram,
@@ -43,6 +56,7 @@ class SDSettings:
     cpu_offload: bool
     attention_slicing: bool
     vae_slicing: bool
+    batch_size: int
 
 
 def _has_module(name: str) -> bool:
@@ -136,6 +150,8 @@ def _merge_env_overrides(profile: dict[str, Any]) -> dict[str, Any]:
 def _pipeline_settings(torch_module, settings: SDSettings) -> SDSettings:
     if _quality_mode() == "manual":
         return settings
+    if SD_PROFILE == "max":
+        return settings
     hardware = detect_hardware(torch_module)
     vram_gb = hardware.vram_free_gb or hardware.vram_total_gb
     base_profile = base_preset_for_vram(vram_gb)
@@ -154,7 +170,47 @@ def _pipeline_settings(torch_module, settings: SDSettings) -> SDSettings:
         cpu_offload=cpu_offload,
         attention_slicing=attn_slicing,
         vae_slicing=vae_slicing,
+        batch_size=settings.batch_size,
     )
+
+
+def _sd_profile_settings(base: SDSettings) -> SDSettings:
+    profile = SD_PROFILE
+    if profile == "max":
+        return SDSettings(
+            model=base.model,
+            steps=40,
+            guidance=6.5,
+            seed=base.seed,
+            width=1024,
+            height=1024,
+            fp16=True,
+            cpu_offload=False,
+            attention_slicing=False,
+            vae_slicing=False,
+            batch_size=max(1, SD_MAX_BATCH_SIZE),
+        )
+    return SDSettings(
+        model=base.model,
+        steps=max(base.steps, 28),
+        guidance=6.5,
+        seed=base.seed,
+        width=max(base.width, 768),
+        height=max(base.height, 768),
+        fp16=True,
+        cpu_offload=base.cpu_offload,
+        attention_slicing=True,
+        vae_slicing=True,
+        batch_size=1,
+    )
+
+
+def _log_lora_status() -> None:
+    if ANIME_LORA_PATHS:
+        print(
+            "[ANIME] LoRA paths provided but LoRA loading is not implemented yet. "
+            "Set MONEYOS_ANIME_LORA_PATHS empty to silence this warning."
+        )
 
 
 def _resolve_profile(torch_module, settings: SDSettings, pipeline) -> tuple[SDSettings, dict[str, Any]]:
@@ -170,6 +226,7 @@ def _resolve_profile(torch_module, settings: SDSettings, pipeline) -> tuple[SDSe
             "cpu_offload": settings.cpu_offload,
             "attention_slicing": settings.attention_slicing,
             "vae_slicing": settings.vae_slicing,
+            "batch_size": settings.batch_size,
             "xformers": os.getenv("MONEYOS_SD_XFORMERS", "0") == "1",
         }
         final_profile = _merge_env_overrides(profile)
@@ -209,6 +266,7 @@ def _resolve_profile(torch_module, settings: SDSettings, pipeline) -> tuple[SDSe
         cpu_offload=bool(final_profile["cpu_offload"]),
         attention_slicing=bool(final_profile["attention_slicing"]),
         vae_slicing=bool(final_profile["vae_slicing"]),
+        batch_size=int(final_profile.get("batch_size", settings.batch_size)),
     )
     global _PROFILE_INFO
     _PROFILE_INFO = {
@@ -229,11 +287,27 @@ def _prepare_pipeline(settings: SDSettings):
     torch.backends.cudnn.allow_tf32 = True
     model_id = _resolve_model_id(settings.model)
     dtype = torch.float16 if device == "cuda" and settings.fp16 else torch.float32
-    pipeline = diffusers.DiffusionPipeline.from_pretrained(model_id, torch_dtype=dtype)
+    if SD_MODEL_SOURCE == "local_ckpt":
+        if not SD_MODEL_LOCAL_PATH.exists():
+            raise RuntimeError(
+                "Local SD model not found at "
+                f"{SD_MODEL_LOCAL_PATH}. Set MONEYOS_SD_MODEL_LOCAL_PATH "
+                "or use MONEYOS_SD_MODEL_SOURCE=diffusers_hf."
+            )
+        if hasattr(diffusers.DiffusionPipeline, "from_single_file"):
+            pipeline = diffusers.DiffusionPipeline.from_single_file(
+                str(SD_MODEL_LOCAL_PATH),
+                torch_dtype=dtype,
+            )
+        else:
+            raise RuntimeError("Diffusers does not support from_single_file for local_ckpt models.")
+    else:
+        pipeline = diffusers.DiffusionPipeline.from_pretrained(model_id, torch_dtype=dtype)
     if settings.cpu_offload and device == "cuda":
         pipeline.enable_model_cpu_offload()
     else:
         pipeline = pipeline.to(device)
+    _log_lora_status()
     if device == "cuda":
         try:
             if hasattr(torch.backends.cuda, "enable_flash_sdp"):
@@ -278,6 +352,7 @@ def generate_image(
         cpu_offload=False,
         attention_slicing=True,
         vae_slicing=True,
+        batch_size=1,
     )
     cache_dir.mkdir(parents=True, exist_ok=True)
     torch = importlib.import_module("torch")
@@ -297,8 +372,10 @@ def generate_image(
             cpu_offload=settings.cpu_offload,
             attention_slicing=settings.attention_slicing,
             vae_slicing=settings.vae_slicing,
+            batch_size=settings.batch_size,
         )
-    pipeline_settings = _pipeline_settings(torch, settings)
+    profile_settings = _sd_profile_settings(settings)
+    pipeline_settings = _pipeline_settings(torch, profile_settings)
     with _PIPELINE_LOCK:
         if _PIPELINE is None or _PIPELINE_MODEL != pipeline_settings.model:
             pipeline, device = _prepare_pipeline(pipeline_settings)
@@ -307,7 +384,7 @@ def generate_image(
         else:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         pipeline = _PIPELINE
-    effective_settings, profile_info = _resolve_profile(torch, settings, pipeline)
+    effective_settings, profile_info = _resolve_profile(torch, pipeline_settings, pipeline)
     cache_key = _hash_prompt(prompt, negative_prompt, effective_settings)
     cached_path = cache_dir / f"{cache_key}.png"
     if AI_IMAGE_CACHE and cached_path.exists():
@@ -336,8 +413,17 @@ def generate_image(
         except Exception:  # noqa: BLE001
             pass
         _LOGGED_MEMORY = True
+    print(
+        "[ANIME] sd_profile="
+        f"{SD_PROFILE} model_source={SD_MODEL_SOURCE} "
+        f"settings={effective_settings.width}x{effective_settings.height} "
+        f"steps={effective_settings.steps} cfg={effective_settings.guidance} "
+        f"batch_size={effective_settings.batch_size} fp16={effective_settings.fp16} "
+        f"attn_slicing={effective_settings.attention_slicing} "
+        f"vae_slicing={effective_settings.vae_slicing}"
+    )
 
-    def _run_inference(width_val: int, height_val: int, steps_val: int):
+    def _run_inference(width_val: int, height_val: int, steps_val: int, batch_size: int):
         if device == "cuda":
             try:
                 torch.cuda.reset_peak_memory_stats()
@@ -350,6 +436,7 @@ def generate_image(
             guidance_scale=effective_settings.guidance,
             width=width_val,
             height=height_val,
+            num_images_per_prompt=batch_size,
             generator=generator,
         )
         if device == "cuda":
@@ -378,18 +465,29 @@ def generate_image(
             cpu_offload=True,
             attention_slicing=True,
             vae_slicing=True,
+            batch_size=1,
         )
 
     attempt_settings = effective_settings
+    max_retry = 2 if SD_PROFILE == "max" else 1
+    downgraded = False
     for attempt in range(3):
         try:
             if device == "cuda" and attempt_settings.fp16:
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
                     result = _run_inference(
-                        attempt_settings.width, attempt_settings.height, attempt_settings.steps
+                        attempt_settings.width,
+                        attempt_settings.height,
+                        attempt_settings.steps,
+                        attempt_settings.batch_size,
                     )
             else:
-                result = _run_inference(attempt_settings.width, attempt_settings.height, attempt_settings.steps)
+                result = _run_inference(
+                    attempt_settings.width,
+                    attempt_settings.height,
+                    attempt_settings.steps,
+                    attempt_settings.batch_size,
+                )
             break
         except RuntimeError as exc:
             if "out of memory" in str(exc).lower() and device == "cuda":
@@ -398,7 +496,38 @@ def generate_image(
                     "[ANIME] CUDA OOM, degrading profile "
                     f"({attempt_settings.width}x{attempt_settings.height} -> lower)"
                 )
-                attempt_settings = _degrade_profile(attempt_settings)
+                if SD_PROFILE == "max" and attempt_settings.batch_size > 1:
+                    attempt_settings = SDSettings(
+                        model=attempt_settings.model,
+                        steps=attempt_settings.steps,
+                        guidance=attempt_settings.guidance,
+                        seed=attempt_settings.seed,
+                        width=attempt_settings.width,
+                        height=attempt_settings.height,
+                        fp16=attempt_settings.fp16,
+                        cpu_offload=attempt_settings.cpu_offload,
+                        attention_slicing=attempt_settings.attention_slicing,
+                        vae_slicing=attempt_settings.vae_slicing,
+                        batch_size=1,
+                    )
+                    downgraded = True
+                elif SD_PROFILE == "max" and attempt_settings.width >= 1024:
+                    attempt_settings = SDSettings(
+                        model=attempt_settings.model,
+                        steps=attempt_settings.steps,
+                        guidance=attempt_settings.guidance,
+                        seed=attempt_settings.seed,
+                        width=896,
+                        height=896,
+                        fp16=attempt_settings.fp16,
+                        cpu_offload=attempt_settings.cpu_offload,
+                        attention_slicing=attempt_settings.attention_slicing,
+                        vae_slicing=attempt_settings.vae_slicing,
+                        batch_size=attempt_settings.batch_size,
+                    )
+                    downgraded = True
+                else:
+                    attempt_settings = _degrade_profile(attempt_settings)
                 if attempt == 1:
                     profile_info = profile_info or {}
                     profile = profile_info.get("profile", {})
@@ -412,11 +541,14 @@ def generate_image(
                                 "cpu_offload": attempt_settings.cpu_offload,
                                 "attention_slicing": attempt_settings.attention_slicing,
                                 "vae_slicing": attempt_settings.vae_slicing,
+                                "batch_size": attempt_settings.batch_size,
                             }
                         )
                         save_profile_from_info(profile_info)
                 continue
             raise
+    if downgraded:
+        print("[ANIME] max profile downgraded after OOM (batch size/resolution reduced)")
     image = result.images[0]
     image.save(output_path)
     if AI_IMAGE_CACHE:

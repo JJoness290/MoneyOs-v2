@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from app.config import VIDEO_DIR
 from app.core.bootstrap import ensure_dependencies
+from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
 from app.core.pipeline import PipelineResult, run_pipeline
 from app.core.system_specs import get_system_specs
 
@@ -36,7 +37,12 @@ def _format_mmss(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def _set_status(job_id: str, status: str, result: Optional[PipelineResult] = None) -> None:
+def _set_status(
+    job_id: str,
+    status: str,
+    result: Optional[PipelineResult] = None,
+    episode_result: Optional[EpisodeResult] = None,
+) -> None:
     with _jobs_lock:
         payload = _jobs.setdefault(job_id, {"status": STATUS_IDLE})
         payload["status"] = status
@@ -51,6 +57,14 @@ def _set_status(job_id: str, status: str, result: Optional[PipelineResult] = Non
             payload["titles"] = result.titles
             payload["description"] = result.description
             payload["success"] = True
+        if episode_result:
+            payload["video_path"] = str(episode_result.video_path.resolve())
+            payload["duration"] = episode_result.total_video_seconds
+            payload["duration_mmss"] = _format_mmss(episode_result.total_video_seconds)
+            payload["audio_duration"] = episode_result.total_audio_seconds
+            payload["audio_duration_mmss"] = _format_mmss(episode_result.total_audio_seconds)
+            payload["output_dir"] = str(episode_result.output_dir.resolve())
+            payload["success"] = True
 
 
 def _set_error(job_id: str, message: str) -> None:
@@ -64,6 +78,14 @@ def _run_job(job_id: str) -> None:
     try:
         result = run_pipeline(lambda status: _set_status(job_id, status))
         _set_status(job_id, STATUS_DONE, result)
+    except Exception as exc:  # noqa: BLE001
+        _set_error(job_id, f"Error: {exc}")
+
+
+def _run_anime_episode(job_id: str) -> None:
+    try:
+        result = generate_anime_episode_10m(lambda status: _set_status(job_id, status))
+        _set_status(job_id, STATUS_DONE, episode_result=result)
     except Exception as exc:  # noqa: BLE001
         _set_error(job_id, f"Error: {exc}")
 
@@ -84,6 +106,15 @@ async def generate() -> JSONResponse:
     job_id = uuid.uuid4().hex
     _set_status(job_id, STATUS_SCRIPT)
     thread = threading.Thread(target=_run_job, args=(job_id,), daemon=True)
+    thread.start()
+    return JSONResponse({"job_id": job_id})
+
+
+@app.post("/jobs/anime-episode-10m")
+async def generate_anime_episode() -> JSONResponse:
+    job_id = uuid.uuid4().hex
+    _set_status(job_id, "Generating anime episode...")
+    thread = threading.Thread(target=_run_anime_episode, args=(job_id,), daemon=True)
     thread.start()
     return JSONResponse({"job_id": job_id})
 

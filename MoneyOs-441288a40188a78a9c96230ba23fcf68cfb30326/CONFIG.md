@@ -7,6 +7,12 @@
 | `MONEYOS_USE_GPU` | `0` | Enable GPU usage for SD + NVENC when set to `1`. |
 | `MONEYOS_NVENC_CODEC` | `h264` | `h264` (default) or `hevc`. |
 | `MONEYOS_NVENC_QUALITY` | `balanced` | `balanced` = preset `p5`, `cq` 22. `max` = preset `p7`, `cq` 18. |
+| `MONEYOS_NVENC_MODE` | `cq` | `cq` for constant quality or `vbr` for target bitrate. |
+| `MONEYOS_NVENC_CQ` | auto | Defaults to 22 (balanced) or 18 (max). |
+| `MONEYOS_NVENC_VBR` | `16M` | Target bitrate for VBR mode. |
+| `MONEYOS_NVENC_MAXRATE` | `24M` | VBR max rate. |
+| `MONEYOS_NVENC_BUFSIZE` | `48M` | VBR buffer size. |
+| `MONEYOS_NVENC_PRESET` | auto | Overrides preset; otherwise `p5`/`p7` based on quality. |
 
 NVENC always outputs `yuv420p` and adds `-movflags +faststart` for mp4 files. If NVENC fails, MoneyOS falls back to `libx264`.
 
@@ -18,6 +24,20 @@ NVENC always outputs `yuv420p` and adds `-movflags +faststart` for mp4 files. If
 | `MONEYOS_SEGMENT_WORKERS` | auto | Only used in `normal` mode; low mode forces 1. |
 
 Low RAM mode keeps ffmpeg threads at 1 and favors sequential segment rendering with extra GC.
+
+## Stable Diffusion Profiles (Anime)
+
+| Env var | Default | Notes |
+| --- | --- | --- |
+| `MONEYOS_SD_PROFILE` | `balanced` | `balanced` or `max` (push VRAM). |
+| `MONEYOS_SD_MAX_BATCH_SIZE` | `2` | Max batch size for `max` profile; auto-downgrades on OOM. |
+| `MONEYOS_SD_MODEL_ID` | `cagliostrolab/animagine-xl-3.1` | Default anime model id. |
+| `MONEYOS_SD_MODEL_SOURCE` | `diffusers_hf` | `diffusers_hf`, `local_ckpt`, or `api`. |
+| `MONEYOS_SD_MODEL_LOCAL_PATH` | `output/models/anime/animagine-xl-3.1.safetensors` | Path for local checkpoints. |
+| `MONEYOS_ANIME_LORA_PATHS` | empty | Semicolon-separated LoRA paths (not yet implemented). |
+| `MONEYOS_ANIME_LORA_WEIGHTS` | empty | Semicolon-separated weights (not yet implemented). |
+
+If `MONEYOS_SD_MODEL_SOURCE=local_ckpt` and the checkpoint path is missing, MoneyOS will raise a clear error with instructions.
 
 ## YouTube Long-Form Tuning
 
@@ -34,4 +54,31 @@ Low RAM mode keeps ffmpeg threads at 1 and favors sequential segment rendering w
 ```bash
 MONEYOS_USE_GPU=1 MONEYOS_NVENC_CODEC=h264 MONEYOS_NVENC_QUALITY=max MONEYOS_RAM_MODE=normal \\
 python -m app.tools.generate_youtube_longform
+```
+
+## Anime Episode 10-Minute Endpoint
+
+Start the server (see `run_max.bat`) then call:
+
+```
+POST http://127.0.0.1:8000/jobs/anime-episode-10m
+```
+
+Use `/docs` for interactive API testing.
+
+## Example usage
+
+```
+run_max.bat
+# then open http://127.0.0.1:8000/docs and run POST /jobs/anime-episode-10m
+```
+
+Use `run_balanced.bat` for a safer default profile on machines that don't need max VRAM usage.
+
+## Self-check
+
+Run a quick environment check without generating media:
+
+```
+python -m app.tools.self_check
 ```

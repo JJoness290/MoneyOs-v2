@@ -68,6 +68,7 @@ def ensure_dependencies() -> None:
             f"MONEYOS_USE_GPU={os.getenv('MONEYOS_USE_GPU', '0')} "
             f"MONEYOS_NVENC_CODEC={os.getenv('MONEYOS_NVENC_CODEC', 'h264')} "
             f"MONEYOS_NVENC_QUALITY={os.getenv('MONEYOS_NVENC_QUALITY', 'balanced')} "
+            f"MONEYOS_NVENC_MODE={os.getenv('MONEYOS_NVENC_MODE', 'cq')} "
             f"MONEYOS_RAM_MODE={performance.ram_mode()}"
         )
         _log(f"Encoder check: {encoder_self_check()}")
@@ -98,6 +99,7 @@ def ensure_dependencies() -> None:
         f"MONEYOS_USE_GPU={os.getenv('MONEYOS_USE_GPU', '0')} "
         f"MONEYOS_NVENC_CODEC={os.getenv('MONEYOS_NVENC_CODEC', 'h264')} "
         f"MONEYOS_NVENC_QUALITY={os.getenv('MONEYOS_NVENC_QUALITY', 'balanced')} "
+        f"MONEYOS_NVENC_MODE={os.getenv('MONEYOS_NVENC_MODE', 'cq')} "
         f"MONEYOS_RAM_MODE={performance.ram_mode()}"
     )
     _log(f"Encoder check: {encoder_self_check()}")

@@ -25,11 +25,48 @@ def _nvenc_codec() -> str:
     return "h264_nvenc"
 
 
+def _nvenc_rc_mode() -> str:
+    mode = os.getenv("MONEYOS_NVENC_MODE", "cq").strip().lower()
+    if mode not in {"cq", "vbr"}:
+        return "cq"
+    return mode
+
+
+def _nvenc_preset(mode: str) -> str:
+    preset = os.getenv("MONEYOS_NVENC_PRESET")
+    if preset:
+        return preset
+    return "p7" if mode == "max" else "p5"
+
+
+def _nvenc_cq_value(mode: str) -> str:
+    env_value = os.getenv("MONEYOS_NVENC_CQ")
+    if env_value:
+        return env_value
+    return "18" if mode == "max" else "22"
+
+
+def _nvenc_vbr_values(mode: str) -> tuple[str, str, str]:
+    default_rate = "20M" if mode == "max" else "16M"
+    default_max = "30M" if mode == "max" else "24M"
+    default_buf = "60M" if mode == "max" else "48M"
+    bitrate = os.getenv("MONEYOS_NVENC_VBR", default_rate)
+    maxrate = os.getenv("MONEYOS_NVENC_MAXRATE", default_max)
+    bufsize = os.getenv("MONEYOS_NVENC_BUFSIZE", default_buf)
+    return bitrate, maxrate, bufsize
+
+
 def _nvenc_args_for_mode(mode: str) -> list[str]:
     codec = _nvenc_codec()
-    if mode == "max":
-        return ["-c:v", codec, "-pix_fmt", "yuv420p", "-preset", "p7", "-cq", "18"]
-    return ["-c:v", codec, "-pix_fmt", "yuv420p", "-preset", "p5", "-cq", "22"]
+    preset = _nvenc_preset(mode)
+    rc_mode = _nvenc_rc_mode()
+    args = ["-c:v", codec, "-pix_fmt", "yuv420p", "-preset", preset]
+    if rc_mode == "vbr":
+        bitrate, maxrate, bufsize = _nvenc_vbr_values(mode)
+        args += ["-rc:v", "vbr", "-b:v", bitrate, "-maxrate", maxrate, "-bufsize", bufsize]
+    else:
+        args += ["-rc:v", "vbr_hq", "-cq", _nvenc_cq_value(mode)]
+    return args
 
 
 def _remove_flag(args: list[str], flag: str) -> list[str]:
@@ -70,6 +107,7 @@ def _fallback_to_x264(args: list[str]) -> list[str]:
     cleaned = list(args)
     remove_flags = [
         "-rc",
+        "-rc:v",
         "-cq",
         "-b:v",
         "-spatial_aq",
@@ -179,6 +217,15 @@ def select_video_encoder() -> tuple[list[str], str]:
         mode = _nvenc_quality_mode()
         args = _nvenc_args_for_mode(mode)
         encoder = _nvenc_codec()
+        rc_mode = _nvenc_rc_mode()
+        bitrate, maxrate, bufsize = _nvenc_vbr_values(mode)
+        cq_value = _nvenc_cq_value(mode)
+        preset = _nvenc_preset(mode)
+        print(
+            "[ENC] nvenc "
+            f"mode={rc_mode} preset={preset} cq={cq_value} "
+            f"bitrate={bitrate} maxrate={maxrate} bufsize={bufsize}"
+        )
         print(f"[ResourceGuard] Encoder: {encoder} mode={mode} args:", " ".join(args))
         return (args, encoder)
     if use_gpu:

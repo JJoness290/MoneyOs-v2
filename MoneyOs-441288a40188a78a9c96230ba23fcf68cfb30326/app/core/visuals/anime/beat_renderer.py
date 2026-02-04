@@ -163,6 +163,7 @@ class AnimeBeatVisuals:
                     cpu_offload=False,
                     attention_slicing=True,
                     vae_slicing=True,
+                    batch_size=1,
                 )
                 try:
                     generated_path = generate_image(
@@ -184,6 +185,7 @@ class AnimeBeatVisuals:
                         cpu_offload=settings.cpu_offload,
                         attention_slicing=settings.attention_slicing,
                         vae_slicing=settings.vae_slicing,
+                        batch_size=settings.batch_size,
                     )
                     generated_path = generate_image(
                         prompt_payload.prompt,
