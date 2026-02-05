@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
+import os
 from pathlib import Path
+import re
 import subprocess
 import time
 import wave
-import os
 from typing import Callable
 
 from moviepy.editor import AudioFileClip, CompositeAudioClip
@@ -108,14 +110,42 @@ def _emit_status(
 
 def _assemble_frames_video(
     frames_dir: Path,
-    frame_pattern: str,
     fps: int,
     audio_path: Path,
     output_path: Path,
 ) -> None:
-    frame_count = len(list(frames_dir.glob("frame_*.png")))
-    if frame_count < 2:
-        raise RuntimeError(f"Insufficient frames rendered ({frame_count}) in {frames_dir}")
+    encode_report_path = output_path.with_name("encode_report.json")
+    frame_files = sorted(frames_dir.glob("frame_*.png"))
+    if not frame_files:
+        raise RuntimeError(f"No frames found in {frames_dir}")
+    first_frame = frames_dir / "frame_0001.png"
+    if not first_frame.exists():
+        sample = [path.name for path in frame_files[:10]]
+        raise RuntimeError(
+            "Missing expected first frame frame_0001.png. "
+            f"Sample frames: {sample}"
+        )
+    pattern_regex = re.compile(r"frame_(\d+)\.png$")
+    numbers = []
+    pad_width = None
+    for frame in frame_files:
+        match = pattern_regex.match(frame.name)
+        if not match:
+            continue
+        number_str = match.group(1)
+        if pad_width is None:
+            pad_width = len(number_str)
+        numbers.append(int(number_str))
+    if not numbers:
+        raise RuntimeError(f"No frame sequence detected in {frames_dir}")
+    start_number = min(numbers)
+    expected = list(range(start_number, start_number + len(numbers)))
+    if numbers != expected:
+        sample = numbers[:10]
+        raise RuntimeError(f"Frame sequence has gaps. Sample numbers: {sample}")
+    pad_width = pad_width or 4
+    pattern = f"frame_%0{pad_width}d.png"
+    frame_count = len(numbers)
     use_gpu = os.getenv("MONEYOS_USE_GPU", "0") == "1"
     use_nvenc = use_gpu and has_nvenc()
     print(f"[ENC] frames={frame_count} encoder={'h264_nvenc' if use_nvenc else 'libx264'}")
@@ -124,27 +154,30 @@ def _assemble_frames_video(
         "-y",
         "-framerate",
         str(fps),
+        "-start_number",
+        str(start_number),
         "-i",
-        frame_pattern,
+        str(frames_dir / pattern),
     ]
-    if audio_path.exists() and audio_path.stat().st_size > 0:
+    audio_ok = audio_path.exists() and audio_path.stat().st_size > 0
+    if audio_ok:
         args += ["-i", str(audio_path)]
     else:
         print(f"[WARN] audio missing or empty: {audio_path}")
     if use_nvenc:
-        quality = os.getenv("MONEYOS_NVENC_QUALITY", "balanced").strip().lower()
-        preset = "p7" if quality == "max" else "p5"
-        cq = "18" if quality == "max" else "22"
         args += [
             "-c:v",
             "h264_nvenc",
             "-preset",
-            preset,
+            "p7",
             "-cq",
-            cq,
+            "18",
             "-pix_fmt",
             "yuv420p",
+            "-movflags",
+            "+faststart",
         ]
+        encoder_name = "h264_nvenc"
     else:
         args += [
             "-c:v",
@@ -153,12 +186,28 @@ def _assemble_frames_video(
             "20",
             "-pix_fmt",
             "yuv420p",
+            "-movflags",
+            "+faststart",
         ]
-    if audio_path.exists() and audio_path.stat().st_size > 0:
+        encoder_name = "libx264"
+    if audio_ok:
         args += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
     args.append(str(output_path))
     print("[ENC] ffmpeg:", " ".join(args))
-    run_ffmpeg(args)
+    encode_report = {
+        "pattern": pattern,
+        "start_number": start_number,
+        "pad_width": pad_width,
+        "encoder": encoder_name,
+        "ffmpeg_args": args,
+    }
+    try:
+        run_ffmpeg(args)
+    except Exception as exc:  # noqa: BLE001
+        encode_report["error"] = str(exc)
+        encode_report_path.write_text(json.dumps(encode_report, indent=2), encoding="utf-8")
+        raise
+    encode_report_path.write_text(json.dumps(encode_report, indent=2), encoding="utf-8")
 
 
 def _generate_audio(output_dir: Path, duration_s: float, status_callback: StatusCallback) -> Path:
@@ -289,10 +338,8 @@ def render_anime_3d_60s(job_id: str, status_callback: StatusCallback = None) -> 
             f"Stderr (tail):\n{tail_stderr}"
         )
     _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
-    frame_pattern = str(frames_dir / "frame_%05d.png")
     _assemble_frames_video(
         frames_dir,
-        frame_pattern,
         ANIME3D_FPS,
         audio_path,
         video_path,

@@ -578,7 +578,7 @@ def main() -> None:
     scene.render.image_settings.file_format = "PNG"
     frames_dir = output_path.parent / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
-    scene.render.filepath = str(frames_dir / "frame_%05d")
+    scene.render.filepath = str(frames_dir / "frame_")
 
     scene.render.use_freestyle = args.outline_mode == "freestyle"
     if hasattr(scene.render, "line_thickness"):
