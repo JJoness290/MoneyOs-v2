@@ -94,6 +94,19 @@ class AnimeEpisodeRequest(BaseModel):
     lane: Optional[str] = None
 
 
+class Anime3DRequest(BaseModel):
+    duration_seconds: Optional[float] = None
+    fps: Optional[int] = None
+    res: Optional[str] = None
+    quality: Optional[str] = None
+    style_preset: Optional[str] = None
+    outline_mode: Optional[str] = None
+    postfx: Optional[bool] = None
+    vfx_emission_strength: Optional[float] = None
+    vfx_scale: Optional[float] = None
+    vfx_screen_coverage: Optional[float] = None
+
+
 @app.on_event("startup")
 def bootstrap_dependencies() -> None:
     ensure_dependencies()
@@ -254,7 +267,7 @@ def _run_anime_episode(job_id: str, topic_hint: str | None, lane: str | None) ->
         _set_error(job_id, f"Error: {exc}")
 
 
-def _run_anime_3d_60s(job_id: str) -> None:
+def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
     def _update(payload: dict) -> None:
         _set_status(
             job_id,
@@ -266,7 +279,11 @@ def _run_anime_3d_60s(job_id: str) -> None:
 
     try:
         _set_status(job_id, "Generating audio", stage_key="audio", progress_pct=5)
-        result = render_anime_3d_60s(job_id, status_callback=_update)
+        result = render_anime_3d_60s(
+            job_id,
+            status_callback=_update,
+            overrides=req.dict(exclude_none=True),
+        )
         phase = int(os.getenv("MONEYOS_PHASE", "1"))
         strict_vfx = os.getenv("MONEYOS_STRICT_VFX", "0") == "1"
         if "vfx_emissive_check_failed" in result.warnings and not strict_vfx and phase < 2:
@@ -409,9 +426,8 @@ async def enqueue_anime_episode_autopilot(
 
 @app.post("/jobs/anime-episode-60s-3d")
 async def generate_anime_episode_3d_60s(
-    req: AnimeEpisodeRequest = Body(default=AnimeEpisodeRequest()),
+    req: Anime3DRequest = Body(default=Anime3DRequest()),
 ) -> JSONResponse:
-    _ = req
     if VISUAL_MODE != "anime_3d":
         raise HTTPException(status_code=400, detail="MONEYOS_VISUAL_MODE must be anime_3d")
     from app.core.visuals.anime_3d.render_pipeline import _ensure_assets  # noqa: WPS433
@@ -422,7 +438,7 @@ async def generate_anime_episode_3d_60s(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     job_id = uuid.uuid4().hex
     _set_status(job_id, "Queued 3D render")
-    thread = threading.Thread(target=_run_anime_3d_60s, args=(job_id,), daemon=True)
+    thread = threading.Thread(target=_run_anime_3d_60s, args=(job_id, req), daemon=True)
     thread.start()
     output_dir = anime_3d_output_dir(job_id)
     return JSONResponse(

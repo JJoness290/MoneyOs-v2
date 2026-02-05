@@ -267,7 +267,11 @@ def _generate_audio(output_dir: Path, duration_s: float, status_callback: Status
     return final_path
 
 
-def render_anime_3d_60s(job_id: str, status_callback: StatusCallback = None) -> Anime3DResult:
+def render_anime_3d_60s(
+    job_id: str,
+    status_callback: StatusCallback = None,
+    overrides: dict | None = None,
+) -> Anime3DResult:
     warnings: list[str] = []
     fast_proof = os.getenv("MONEYOS_FAST_PROOF", "0") == "1"
     try:
@@ -275,8 +279,43 @@ def render_anime_3d_60s(job_id: str, status_callback: StatusCallback = None) -> 
     except ValueError:
         proof_seconds = 15.0
     duration_s = float(ANIME3D_SECONDS)
+    fps = ANIME3D_FPS
+    res = f"{ANIME3D_RESOLUTION[0]}x{ANIME3D_RESOLUTION[1]}"
+    postfx = "on" if ANIME3D_POSTFX else "off"
+    outline_mode = ANIME3D_OUTLINE_MODE
+    quality = ANIME3D_QUALITY
+    style_preset = ANIME3D_STYLE_PRESET
+    vfx_emission_strength = VFX_EMISSION_STRENGTH
+    vfx_scale = VFX_SCALE
+    vfx_screen_coverage = VFX_SCREEN_COVERAGE
+    overrides = overrides or {}
+    if overrides.get("duration_seconds") is not None:
+        duration_s = float(overrides["duration_seconds"])
+    if overrides.get("fps") is not None:
+        fps = int(overrides["fps"])
+    if overrides.get("res"):
+        res = str(overrides["res"])
+    if overrides.get("quality"):
+        quality = str(overrides["quality"])
+    if overrides.get("style_preset"):
+        style_preset = str(overrides["style_preset"])
+    if overrides.get("outline_mode"):
+        outline_mode = str(overrides["outline_mode"])
+    if overrides.get("postfx") is not None:
+        postfx = "on" if bool(overrides["postfx"]) else "off"
+    if overrides.get("vfx_emission_strength") is not None:
+        vfx_emission_strength = float(overrides["vfx_emission_strength"])
+    if overrides.get("vfx_scale") is not None:
+        vfx_scale = float(overrides["vfx_scale"])
+    if overrides.get("vfx_screen_coverage") is not None:
+        vfx_screen_coverage = float(overrides["vfx_screen_coverage"])
     if fast_proof:
         duration_s = max(5.0, proof_seconds)
+        res = "1280x720"
+        postfx = "off"
+        outline_mode = "off"
+        vfx_emission_strength = 0.0
+        quality = "fast"
     _ensure_assets()
     output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -301,25 +340,25 @@ def render_anime_3d_60s(job_id: str, status_callback: StatusCallback = None) -> 
         "--asset-mode",
         ANIME3D_ASSET_MODE,
         "--style-preset",
-        ANIME3D_STYLE_PRESET,
+        style_preset,
         "--outline-mode",
-        ANIME3D_OUTLINE_MODE,
+        outline_mode,
         "--postfx",
-        "on" if ANIME3D_POSTFX else "off",
+        postfx,
         "--quality",
-        ANIME3D_QUALITY,
+        quality,
         "--res",
-        f"{ANIME3D_RESOLUTION[0]}x{ANIME3D_RESOLUTION[1]}",
+        res,
         "--duration",
         f"{duration_s:.2f}",
         "--fps",
-        str(ANIME3D_FPS),
+        str(fps),
         "--vfx-emission-strength",
-        str(VFX_EMISSION_STRENGTH),
+        str(vfx_emission_strength),
         "--vfx-scale",
-        str(VFX_SCALE),
+        str(vfx_scale),
         "--vfx-screen-coverage",
-        str(VFX_SCREEN_COVERAGE),
+        str(vfx_screen_coverage),
         "--fast-proof" if fast_proof else "",
         "--proof-seconds",
         f"{duration_s:.2f}",
@@ -341,7 +380,7 @@ def render_anime_3d_60s(job_id: str, status_callback: StatusCallback = None) -> 
             stderr=stderr_handle,
             text=True,
         )
-        total_frames = max(1, int(round(duration_s * ANIME3D_FPS)))
+        total_frames = max(1, int(round(duration_s * fps)))
         last_update = 0.0
         while process.poll() is None:
             now = time.time()
@@ -392,7 +431,7 @@ def render_anime_3d_60s(job_id: str, status_callback: StatusCallback = None) -> 
     if not fast_proof:
         _assemble_frames_video(
             frames_dir,
-            ANIME3D_FPS,
+            fps,
             audio_path,
             video_path,
             warnings,
