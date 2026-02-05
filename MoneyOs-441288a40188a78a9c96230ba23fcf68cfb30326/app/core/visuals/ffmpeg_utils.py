@@ -7,6 +7,8 @@ from typing import Callable
 import os
 
 from app.core.resource_guard import ResourceGuard
+from src.utils.cmdlen import estimate_windows_cmd_length
+from src.utils.ffmpeg_script_mode import maybe_externalize_filter_graph
 
 StatusCallback = Callable[[str], None] | None
 
@@ -149,6 +151,9 @@ def run_ffmpeg(args: list[str], status_callback: StatusCallback = None, log_path
     guard.start()
     try:
         args = _ensure_faststart(args)
+        args = maybe_externalize_filter_graph(args)
+        cmd_len = estimate_windows_cmd_length(args)
+        print(f"[ResourceGuard] FFmpeg command length: {cmd_len}")
         command = " ".join(args)
         print("[ResourceGuard] FFmpeg command:", command)
         if "-vf" in args:
