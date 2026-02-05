@@ -105,6 +105,11 @@ class Anime3DRequest(BaseModel):
     vfx_emission_strength: Optional[float] = None
     vfx_scale: Optional[float] = None
     vfx_screen_coverage: Optional[float] = None
+    render_preset: Optional[str] = None
+    environment: Optional[str] = None
+    character_asset: Optional[str] = None
+    disable_overlays: Optional[bool] = None
+    mode: Optional[str] = None
 
 
 @app.on_event("startup")

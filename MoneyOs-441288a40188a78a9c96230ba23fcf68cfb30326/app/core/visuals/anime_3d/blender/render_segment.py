@@ -26,6 +26,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--report", required=True)
     parser.add_argument("--assets-dir", required=True)
     parser.add_argument("--asset-mode", default="auto")
+    parser.add_argument("--environment", default="room")
+    parser.add_argument("--character-asset", default="")
+    parser.add_argument("--mode", default="default")
     parser.add_argument("--style-preset", default="key_art")
     parser.add_argument("--outline-mode", default="freestyle")
     parser.add_argument("--postfx", default="on")
@@ -192,6 +195,10 @@ def _create_character(name: str, location: tuple[float, float, float]) -> dict[s
     head = bpy.context.active_object
     bpy.ops.mesh.primitive_cube_add(size=0.25, location=(location[0], location[1] + 0.35, location[2] + 2.0))
     jaw = bpy.context.active_object
+    if name == "hero":
+        body["mo_role"] = "subject"
+        head["mo_role"] = "subject"
+        jaw["mo_role"] = "subject"
     for offset in (-0.5, 0.5):
         bpy.ops.mesh.primitive_cylinder_add(radius=0.15, depth=0.8, location=(location[0] + offset, location[1], location[2] + 0.6))
         leg = bpy.context.active_object
@@ -266,10 +273,12 @@ def _create_scene(assets_dir: Path, asset_mode: str) -> dict[str, bpy.types.Obje
 
         if hero_armature:
             hero_armature.location = (0, 0, 0)
+            for child in hero_armature.children_recursive:
+                if child.type == "MESH":
+                    child["mo_role"] = "subject"
         if enemy_armature:
             enemy_armature.location = (3, -2, 0)
     else:
-        _create_city_env(outline_material)
         hero = _create_character("hero", (0, 0, 0))
         enemy = _create_character("enemy", (2.5, -2.0, 0))
         hero_jaw = hero["jaw"]
@@ -277,10 +286,6 @@ def _create_scene(assets_dir: Path, asset_mode: str) -> dict[str, bpy.types.Obje
         for obj in (hero["body"], hero["head"], hero["jaw"], enemy["body"], enemy["head"], enemy["jaw"]):
             _apply_toon_material(obj, outline_material)
 
-    bpy.ops.object.light_add(type="SUN", location=(5, -5, 8))
-    key_light = bpy.context.active_object
-    key_light.data.energy = 4.5
-    bpy.ops.object.light_add(type="POINT", location=(-3, 2, 5))
     bpy.ops.object.camera_add(location=(4, -6, 2.5), rotation=(math.radians(75), 0, math.radians(35)))
     camera = bpy.context.active_object
     scene.camera = camera
@@ -297,7 +302,7 @@ def _create_scene(assets_dir: Path, asset_mode: str) -> dict[str, bpy.types.Obje
     }
 
 
-def _setup_fast_proof_world(scene: bpy.types.Scene) -> None:
+def _ensure_world_light(scene: bpy.types.Scene) -> float:
     if scene.world is None:
         scene.world = bpy.data.worlds.new("World")
     world = scene.world
@@ -307,7 +312,8 @@ def _setup_fast_proof_world(scene: bpy.types.Scene) -> None:
     nodes.clear()
     output = nodes.new(type="ShaderNodeOutputWorld")
     background = nodes.new(type="ShaderNodeBackground")
-    background.inputs["Strength"].default_value = 1.6
+    strength = 1.7
+    background.inputs["Strength"].default_value = strength
     gradient = nodes.new(type="ShaderNodeTexGradient")
     ramp = nodes.new(type="ShaderNodeValToRGB")
     ramp.color_ramp.elements[0].color = (0.55, 0.62, 0.7, 1.0)
@@ -319,11 +325,13 @@ def _setup_fast_proof_world(scene: bpy.types.Scene) -> None:
     links.new(gradient.outputs.get("Fac"), ramp.inputs.get("Fac"))
     links.new(ramp.outputs.get("Color"), background.inputs.get("Color"))
     links.new(background.outputs.get("Background"), output.inputs.get("Surface"))
+    return strength
 
 
 def _ensure_ground_plane() -> bpy.types.Object:
     bpy.ops.mesh.primitive_plane_add(size=20.0, location=(0.0, 0.0, 0.0))
     plane = bpy.context.active_object
+    plane["mo_role"] = "ground"
     material = bpy.data.materials.new(name="GroundPlaneMaterial")
     material.use_nodes = True
     nodes = material.node_tree.nodes
@@ -339,7 +347,7 @@ def _ensure_ground_plane() -> bpy.types.Object:
     return plane
 
 
-def _add_fast_proof_lights() -> list[bpy.types.Object]:
+def _ensure_light_rig() -> list[bpy.types.Object]:
     lights: list[bpy.types.Object] = []
     bpy.ops.object.light_add(type="AREA", location=(4.0, -3.5, 4.5))
     key = bpy.context.active_object
@@ -362,8 +370,22 @@ def _add_fast_proof_lights() -> list[bpy.types.Object]:
     return lights
 
 
-def _scene_mesh_bounds() -> tuple[Vector, Vector] | None:
+def _subject_meshes() -> list[bpy.types.Object]:
     meshes = [obj for obj in bpy.data.objects if obj.type == "MESH"]
+    tagged = [obj for obj in meshes if obj.get("mo_role") == "subject"]
+    if tagged:
+        return tagged
+    candidates = [obj for obj in meshes if obj.get("mo_role") != "ground"]
+    if not candidates:
+        return []
+    largest = max(
+        candidates,
+        key=lambda obj: max(obj.dimensions.x * obj.dimensions.y * obj.dimensions.z, 0.0),
+    )
+    return [largest]
+
+
+def _scene_mesh_bounds(meshes: list[bpy.types.Object]) -> tuple[Vector, Vector] | None:
     if not meshes:
         return None
     min_v = Vector((1e9, 1e9, 1e9))
@@ -383,6 +405,7 @@ def _scene_mesh_bounds() -> tuple[Vector, Vector] | None:
 def _ensure_subject_proxy() -> bpy.types.Object:
     bpy.ops.mesh.primitive_uv_sphere_add(radius=1.2, location=(0.0, 0.0, 1.2))
     proxy = bpy.context.active_object
+    proxy["mo_role"] = "subject"
     material = bpy.data.materials.new(name="ProxyMaterial")
     material.use_nodes = True
     nodes = material.node_tree.nodes
@@ -398,13 +421,14 @@ def _ensure_subject_proxy() -> bpy.types.Object:
     return proxy
 
 
-def _frame_camera(camera: bpy.types.Object) -> None:
-    bounds = _scene_mesh_bounds()
-    if bounds is None:
+def _frame_camera(camera: bpy.types.Object) -> dict[str, object] | None:
+    meshes = _subject_meshes()
+    if not meshes:
         _ensure_subject_proxy()
-        bounds = _scene_mesh_bounds()
+        meshes = _subject_meshes()
+    bounds = _scene_mesh_bounds(meshes)
     if bounds is None or camera.data is None:
-        return
+        return None
     min_v, max_v = bounds
     center = (min_v + max_v) * 0.5
     height = max(max_v.z - min_v.z, 0.1)
@@ -416,14 +440,130 @@ def _frame_camera(camera: bpy.types.Object) -> None:
     camera.location = center + Vector((0.0, -distance * 1.2, height * 0.35))
     direction = center - camera.location
     camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+    subject_bbox = {
+        "min": [min_v.x, min_v.y, min_v.z],
+        "max": [max_v.x, max_v.y, max_v.z],
+        "height": height,
+    }
+    camera_params = {
+        "lens": camera.data.lens,
+        "location": [camera.location.x, camera.location.y, camera.location.z],
+        "rotation": [camera.rotation_euler.x, camera.rotation_euler.y, camera.rotation_euler.z],
+        "distance": distance,
+    }
+    print(f"[PHASE2] subject_bbox={subject_bbox} camera={camera_params}")
+    return {"subject_bbox": subject_bbox, "camera_params": camera_params}
 
 
-def _setup_fast_proof_scene(scene: bpy.types.Scene, camera: bpy.types.Object | None) -> None:
-    _setup_fast_proof_world(scene)
+def _setup_visibility_scene(scene: bpy.types.Scene, camera: bpy.types.Object | None) -> dict[str, object]:
+    world_strength = _ensure_world_light(scene)
     _ensure_ground_plane()
-    _add_fast_proof_lights()
-    if camera:
-        _frame_camera(camera)
+    _ensure_light_rig()
+    _safe_set(scene.view_settings, "exposure", 0.8)
+    framing = _frame_camera(camera) if camera else None
+    return {
+        "world_strength": world_strength,
+        "subject_bbox": framing["subject_bbox"] if framing else None,
+        "camera_params": framing["camera_params"] if framing else None,
+    }
+
+
+def _normalize_character(objects: list[bpy.types.Object]) -> list[bpy.types.Object]:
+    meshes = [obj for obj in objects if obj.type == "MESH"]
+    if not meshes:
+        return []
+    bounds = _scene_mesh_bounds(meshes)
+    if bounds is None:
+        return []
+    min_v, max_v = bounds
+    height = max(max_v.z - min_v.z, 0.1)
+    target_height = 1.7
+    scale_factor = target_height / height
+    for obj in objects:
+        obj.scale = (obj.scale.x * scale_factor, obj.scale.y * scale_factor, obj.scale.z * scale_factor)
+    bpy.context.view_layer.update()
+    bounds = _scene_mesh_bounds(meshes)
+    if bounds is None:
+        return []
+    min_v, _ = bounds
+    z_offset = -min_v.z
+    for obj in objects:
+        obj.location.z += z_offset
+    for obj in meshes:
+        obj["mo_role"] = "subject"
+    return meshes
+
+
+def _load_character_asset(assets_dir: Path, character_asset: str, warnings: list[str]) -> list[bpy.types.Object]:
+    if not character_asset:
+        return []
+    asset_path = Path(character_asset)
+    if not asset_path.is_file():
+        asset_path = assets_dir / "characters" / character_asset
+    if asset_path.is_dir():
+        blend_files = sorted(asset_path.glob("*.blend"))
+        if blend_files:
+            asset_path = blend_files[0]
+    if not asset_path.exists():
+        warnings.append("character_asset_missing")
+        print(f"[PHASE2] character asset missing: {asset_path}")
+        return []
+    if asset_path.suffix.lower() == ".blend":
+        collections = _append_collections(asset_path)
+        objects: list[bpy.types.Object] = []
+        for collection in collections:
+            objects.extend(list(collection.all_objects))
+        return _normalize_character(objects)
+    if asset_path.suffix.lower() == ".vrm":
+        raise RuntimeError("VRM import not installed; use .blend character assets instead.")
+    warnings.append("character_asset_unsupported")
+    print(f"[PHASE2] unsupported character asset: {asset_path}")
+    return []
+
+
+def _build_environment_template(template: str) -> None:
+    def apply_env_material(obj: bpy.types.Object) -> None:
+        material = bpy.data.materials.new(name="EnvMaterial")
+        material.use_nodes = True
+        nodes = material.node_tree.nodes
+        nodes.clear()
+        output = nodes.new(type="ShaderNodeOutputMaterial")
+        diffuse = nodes.new(type="ShaderNodeBsdfDiffuse")
+        diffuse.inputs["Color"].default_value = (0.4, 0.4, 0.42, 1.0)
+        material.node_tree.links.new(diffuse.outputs["BSDF"], output.inputs["Surface"])
+        if obj.data.materials:
+            obj.data.materials[0] = material
+        else:
+            obj.data.materials.append(material)
+
+    if template == "street":
+        bpy.ops.mesh.primitive_plane_add(size=30.0, location=(0.0, 0.0, 0.0))
+        ground = bpy.context.active_object
+        ground["mo_role"] = "ground"
+        apply_env_material(ground)
+        for offset in (-6.0, 6.0):
+            bpy.ops.mesh.primitive_plane_add(size=12.0, location=(offset, 6.0, 4.0))
+            wall = bpy.context.active_object
+            wall.rotation_euler.x = math.radians(90)
+            apply_env_material(wall)
+    elif template == "studio":
+        bpy.ops.mesh.primitive_plane_add(size=20.0, location=(0.0, -4.0, 0.0))
+        floor = bpy.context.active_object
+        floor["mo_role"] = "ground"
+        apply_env_material(floor)
+        bpy.ops.mesh.primitive_plane_add(size=20.0, location=(0.0, 6.0, 6.0))
+        backdrop = bpy.context.active_object
+        backdrop.rotation_euler.x = math.radians(90)
+        apply_env_material(backdrop)
+    else:
+        bpy.ops.mesh.primitive_plane_add(size=14.0, location=(0.0, 0.0, 0.0))
+        floor = bpy.context.active_object
+        floor["mo_role"] = "ground"
+        apply_env_material(floor)
+        bpy.ops.mesh.primitive_plane_add(size=14.0, location=(0.0, 7.0, 4.0))
+        wall = bpy.context.active_object
+        wall.rotation_euler.x = math.radians(90)
+        apply_env_material(wall)
 
 
 def _animate(
@@ -433,6 +573,7 @@ def _animate(
     assets_dir: Path,
     asset_mode: str,
     fast_proof: bool,
+    mode: str,
 ) -> int:
     hero_armature = objects["hero_armature"]
     camera = objects["camera"]
@@ -455,19 +596,19 @@ def _animate(
                 jaw_bone = hero_armature.pose.bones[name]
                 break
 
-    if camera and not fast_proof:
+    if camera and not fast_proof and mode != "static_pose":
         camera.data.lens = 18
     for frame in range(frame_count):
         bpy.context.scene.frame_set(frame + 1)
         t = frame / fps
-        if hero_armature:
+        if hero_armature and mode != "static_pose":
             hero_armature.location.x = t * 0.03
             hero_armature.keyframe_insert(data_path="location", index=0)
-        elif objects.get("hero_body"):
+        elif objects.get("hero_body") and mode != "static_pose":
             hero_body = objects["hero_body"]
             hero_body.rotation_euler.z = math.sin(t * 2.0) * 0.2
             hero_body.keyframe_insert(data_path="rotation_euler", index=2)
-        if camera and not fast_proof:
+        if camera and not fast_proof and mode != "static_pose":
             camera.location.x = 4 + math.sin(t * 0.8) * 0.4
             camera.location.y = -6 + math.cos(t * 0.7) * 0.4
             camera.location.z = 2.5 + math.sin(t * 1.2) * 0.2
@@ -784,9 +925,10 @@ def main() -> None:
             scene.render.resolution_x = 1280
             scene.render.resolution_y = 720
         scene.render.image_settings.file_format = "PNG"
+        scene.render.use_file_extension = True
         frames_dir = output_path.parent / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
-        scene.render.filepath = str(frames_dir / "frame_")
+        scene.render.filepath = str(frames_dir / "frame_####")
     else:
         scene.render.image_settings.file_format = "PNG"
         scene.render.use_file_extension = True
@@ -809,9 +951,14 @@ def main() -> None:
     elif hasattr(scene, "eevee"):
         _configure_eevee(scene, args.quality)
 
+    print(f"[PHASE2] env={args.environment} character={args.character_asset or 'none'} preset={preset}")
+    _build_environment_template(args.environment)
     objects = _create_scene(assets_dir, args.asset_mode)
-    if args.fast_proof or phase15:
-        _setup_fast_proof_scene(scene, objects.get("camera"))
+    character_meshes = _load_character_asset(assets_dir, args.character_asset, warnings)
+    if character_meshes:
+        for obj in character_meshes:
+            obj["mo_role"] = "subject"
+    visibility_info = _setup_visibility_scene(scene, objects.get("camera"))
     _add_vfx(
         assets_dir,
         scene,
@@ -827,7 +974,15 @@ def main() -> None:
         _setup_compositor(scene, warnings)
     envelope = _load_rms_envelope(Path(args.audio) if args.audio else Path(), args.fps, scene.frame_end)
     fast_proof_like = args.fast_proof or phase15
-    mouth_keyframes = _animate(objects, envelope, args.fps, assets_dir, args.asset_mode, fast_proof_like)
+    mouth_keyframes = _animate(
+        objects,
+        envelope,
+        args.fps,
+        assets_dir,
+        args.asset_mode,
+        fast_proof_like,
+        args.mode,
+    )
 
     bpy.ops.render.render(animation=True, write_still=False)
 
@@ -848,6 +1003,11 @@ def main() -> None:
         "denoise": phase15_info["denoise"] if phase15_info else None,
         "res": f"{scene.render.resolution_x}x{scene.render.resolution_y}",
         "duration": args.duration,
+        "environment": args.environment,
+        "character_asset": args.character_asset or None,
+        "subject_bbox": visibility_info.get("subject_bbox"),
+        "camera_params": visibility_info.get("camera_params"),
+        "world_strength": visibility_info.get("world_strength"),
     }
     report_path.write_text(json.dumps(render_report, indent=2), encoding="utf-8")
 

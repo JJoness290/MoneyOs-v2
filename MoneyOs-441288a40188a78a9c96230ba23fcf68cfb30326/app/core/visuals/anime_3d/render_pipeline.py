@@ -270,6 +270,7 @@ def render_anime_3d_60s(
     render_preset = os.getenv("MONEYOS_RENDER_PRESET", "fast_proof").strip().lower()
     if render_preset not in {"fast_proof", "phase15_quality"}:
         render_preset = "fast_proof"
+    env_template = os.getenv("MONEYOS_ENV_TEMPLATE", "room").strip().lower()
     fast_proof = render_preset == "fast_proof"
     phase15 = render_preset == "phase15_quality"
     try:
@@ -299,7 +300,25 @@ def render_anime_3d_60s(
     vfx_emission_strength = VFX_EMISSION_STRENGTH
     vfx_scale = VFX_SCALE
     vfx_screen_coverage = VFX_SCREEN_COVERAGE
+    environment = env_template
+    character_asset = None
+    mode = "default"
+    disable_overlays = True
     overrides = overrides or {}
+    if overrides.get("render_preset"):
+        render_preset = str(overrides["render_preset"]).strip().lower()
+        if render_preset not in {"fast_proof", "phase15_quality"}:
+            render_preset = "fast_proof"
+        fast_proof = render_preset == "fast_proof"
+        phase15 = render_preset == "phase15_quality"
+    if overrides.get("environment"):
+        environment = str(overrides["environment"]).strip().lower()
+    if overrides.get("character_asset"):
+        character_asset = str(overrides["character_asset"])
+    if overrides.get("mode"):
+        mode = str(overrides["mode"]).strip().lower()
+    if overrides.get("disable_overlays") is not None:
+        disable_overlays = bool(overrides["disable_overlays"])
     if overrides.get("duration_seconds") is not None:
         duration_s = float(overrides["duration_seconds"])
     if overrides.get("fps") is not None:
@@ -314,6 +333,8 @@ def render_anime_3d_60s(
         outline_mode = str(overrides["outline_mode"])
     if overrides.get("postfx") is not None:
         postfx = "on" if bool(overrides["postfx"]) else "off"
+    if disable_overlays:
+        postfx = "off"
     if overrides.get("vfx_emission_strength") is not None:
         vfx_emission_strength = float(overrides["vfx_emission_strength"])
     if overrides.get("vfx_scale") is not None:
@@ -360,6 +381,12 @@ def render_anime_3d_60s(
         "cycles" if phase15 else "",
         "--render-preset",
         render_preset,
+        "--environment",
+        environment,
+        "--character-asset",
+        character_asset or "",
+        "--mode",
+        mode,
         "--style-preset",
         style_preset,
         "--outline-mode",

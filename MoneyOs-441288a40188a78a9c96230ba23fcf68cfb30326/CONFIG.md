@@ -119,12 +119,22 @@ GET /debug/status
 | `MONEYOS_ANIMATIONS_DIR` | `assets/animations/` | Animation clips output. |
 | `MONEYOS_VFX_DIR` | `assets/vfx/` | VFX assets directory. |
 | `MONEYOS_VFX_ENABLE` | `1` | Disable VFX when set to `0`. |
+| `MONEYOS_ENV_TEMPLATE` | `room` | Environment template (`room`, `street`, `studio`). |
+| `MONEYOS_RENDER_PRESET` | `fast_proof` | Render preset (`fast_proof`, `phase15_quality`). |
+| `MONEYOS_PHASE15_SAMPLES` | `128` | Phase 1.5 Cycles samples. |
+| `MONEYOS_PHASE15_RES` | `1920x1080` | Phase 1.5 resolution. |
+| `MONEYOS_PHASE15_BOUNCES` | `6` | Phase 1.5 max bounces. |
+| `MONEYOS_PHASE15_TILE` | `256` | Phase 1.5 tile size (if supported). |
 
 ### 60s 3D smoke test
 
 ```
 run_3d_test_60s.bat
 ```
+
+### Character assets (Phase 2)
+
+Place character assets in `assets/characters/` as `.blend` files. Each character `.blend` should contain a collection with your rigged mesh(es). The loader appends collections, normalizes scale to ~1.7m height, centers the character at the origin, and tags meshes with `mo_role="subject"` for camera framing. VRM import is not bundled; use `.blend` assets for now.
 
 ## Prompt compiler (77-token fix)
 
