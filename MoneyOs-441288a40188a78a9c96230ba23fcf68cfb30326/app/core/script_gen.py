@@ -1,10 +1,10 @@
+import math
 import random
 import re
 from dataclasses import dataclass
 
-from app.config import MIN_AUDIO_SECONDS
-
-WORDS_PER_SECOND = 3.0
+from app.config import MIN_AUDIO_SECONDS, TARGET_PLATFORM, YT_MIN_WORDS, YT_TARGET_AUDIO_SECONDS, YT_WPM
+from app.core.audio_utils import count_words, estimate_seconds_from_words
 
 
 @dataclass
@@ -13,362 +13,246 @@ class ScriptResult:
     estimated_seconds: float
 
 
-def _estimate_seconds(text: str) -> float:
-    word_count = len(text.split())
-    return word_count / WORDS_PER_SECOND
+def _estimate_seconds(text: str, wpm: int) -> float:
+    return estimate_seconds_from_words(count_words(text), wpm)
 
 
 def sanitize_script(text: str) -> str:
-    cleaned = re.sub(r"[#/\*_{}\[\]|><]", " ", text)
+    cleaned = re.sub(r"[#\*_{}\[\]|><]", " ", text)
     cleaned = re.sub(r"`{1,3}.*?`{1,3}", " ", cleaned, flags=re.DOTALL)
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned.strip()
+    lines = [re.sub(r"\s+", " ", line).strip() for line in cleaned.splitlines()]
+    return "\n".join(line for line in lines if line).strip()
+
+def _topic_context(script_text: str) -> str:
+    first_line = script_text.strip().splitlines()[0] if script_text.strip() else ""
+    first_sentence = first_line.split(".")[0].strip() if first_line else ""
+    return first_sentence or "the story you are telling"
 
 
-def _sentence_similarity(candidate: str, existing: str) -> float:
-    candidate_tokens = set(candidate.lower().split())
-    existing_tokens = set(existing.lower().split())
-    if not candidate_tokens or not existing_tokens:
-        return 0.0
-    overlap = candidate_tokens.intersection(existing_tokens)
-    return len(overlap) / max(len(candidate_tokens), len(existing_tokens))
-
-
-def _is_repetitive(candidate: str, used: list[str]) -> bool:
-    return any(_sentence_similarity(candidate, prior) >= 0.6 for prior in used)
-
-
-def _pick_unique(options: list[str], used: set[str]) -> str:
-    choices = [option for option in options if option not in used]
-    if not choices:
-        return random.choice(options)
-    choice = random.choice(choices)
-    used.add(choice)
-    return choice
-
-
-def _name_pool() -> list[str]:
-    return [
-        "Mara",
-        "Eli",
-        "Jonah",
-        "Priya",
-        "Tess",
-        "Owen",
-        "Nina",
-        "Caleb",
-        "Rue",
-        "Samir",
-        "Lena",
-        "Jo",
-        "Kian",
-        "Milo",
-        "Anya",
-        "Inez",
-        "Mateo",
-    ]
-
-
-def _location_pool() -> list[str]:
-    return [
-        "the quiet riverfront",
-        "a sun-baked bus depot",
-        "the worn lobby of a tech co-op",
-        "a closed diner with flickering neon",
-        "the third floor of a public library",
-        "a crowded night market",
-        "an old workshop behind a corner store",
-        "the rooftop of a parking garage",
-        "a narrow alley lined with murals",
-        "the back room of a community center",
-    ]
-
-
-def _object_pool() -> list[str]:
-    return [
-        "a ledger with torn pages",
-        "a dented phone",
-        "a thrifted backpack",
-        "a keycard with a smudged logo",
-        "a crumpled map",
-        "a chipped mug",
-        "a photo booth strip",
-        "a folded note",
-        "a scratched flash drive",
-        "a taped-up badge",
-    ]
-
-
-def _traits_pool() -> list[str]:
-    return [
-        "restless",
-        "careful",
-        "soft-spoken",
-        "blunt",
-        "curious",
-        "skeptical",
-        "warm",
-        "stubborn",
-        "observant",
-        "tired but kind",
-    ]
-
-
-def _beat_types() -> list[str]:
-    return [
-        "setup",
-        "inciting",
-        "complication",
-        "pressure",
-        "reveal",
-        "consequence",
-        "turn",
-        "resolution",
-        "aftermath",
-    ]
-
-
-def _short_sentences() -> list[str]:
-    return [
-        "{name} hesitated when {detail} came up.",
-        "It felt wrong in {location} after {detail}.",
-        "{other} pulled back once {detail} surfaced.",
-        "The {object} felt heavier because of {detail}.",
-        "That was the first crack in their plan.",
-        "The room went quiet when {other} mentioned {detail}.",
-        "It hit harder than {name} expected, mostly because of {detail}.",
-    ]
-
-
-def _medium_templates() -> list[str]:
-    return [
-        "{name} found {object} near {location}, and it shifted the day.",
-        "{name} stepped into {location} and felt the mood change.",
-        "{name} trusted {other}, even though {other} looked unsure.",
-        "{name} kept {object} close, like it might explain everything.",
-        "{name} heard the rumor again at {location}, and it sounded different.",
-        "{name} watched {other} hesitate, then made a choice.",
-        "{name} noticed how {location} was emptier than usual.",
-        "{name} promised to fix it, not because it was easy, but because it mattered.",
-        "{name} told {other} the truth, and it landed like a weight.",
-        "{name} admitted {detail}, and {other} didn't argue.",
-    ]
-
-
-def _long_templates() -> list[str]:
-    return [
-        "When {name} finally met {other} at {location}, the whole story shifted, because {object} was not a clue, it was a warning.",
-        "{name} followed the trail back through {location}, and the people there filled in the missing hours one by one.",
-        "{other} admitted the plan had failed, and {name} realized the mistake had been theirs from the start.",
-        "By the time {name} opened {object}, {other} had already disappeared, leaving only a choice and a mess.",
-        "{name} remembered the first time they walked into {location}, and how the promise they made back then now felt dangerous.",
-        "The mistake was not just the decision, it was the silence after it, and {name} could feel the cost growing.",
-        "{name} kept the secret too long, and when {other} found out at {location}, nothing about their friendship was the same.",
-        "The trouble started with {detail}, and {name} could feel the fallout spreading.",
-    ]
-
-
-class StoryState:
-    def __init__(self, topic: str) -> None:
-        self.topic = topic
-        self.used_names: set[str] = set()
-        self.used_locations: set[str] = set()
-        self.used_objects: set[str] = set()
-        self.characters: list[dict] = []
-        self.locations: list[str] = []
-        self.objects: list[str] = []
-        self.beat_index = 0
-        self.phase = "setup"
-        self.last_template_key: str | None = None
-
-    def add_character(self, role: str) -> dict:
-        name = _pick_unique(_name_pool(), self.used_names)
-        trait = _pick_unique(_traits_pool(), set())
-        character = {"name": name, "role": role, "trait": trait}
-        self.characters.append(character)
-        return character
-
-    def add_location(self) -> str:
-        location = _pick_unique(_location_pool(), self.used_locations)
-        self.locations.append(location)
-        return location
-
-    def add_object(self) -> str:
-        obj = _pick_unique(_object_pool(), self.used_objects)
-        self.objects.append(obj)
-        return obj
-
-
-def _init_story(topic: str) -> StoryState:
-    state = StoryState(topic)
-    state.add_character("protagonist")
-    state.add_character("friend")
-    state.add_location()
-    state.add_object()
-    return state
-
-
-def _advance_phase(state: StoryState) -> None:
-    phase_order = ["setup", "tension", "reveal", "conclusion"]
-    current_index = phase_order.index(state.phase)
-    if current_index < len(phase_order) - 1:
-        state.phase = phase_order[current_index + 1]
-
-
-def _expand_world(state: StoryState) -> None:
-    if len(state.characters) < 6 and random.random() < 0.6:
-        state.add_character("new")
-    if len(state.locations) < 8 and random.random() < 0.7:
-        state.add_location()
-    if len(state.objects) < 8 and random.random() < 0.5:
-        state.add_object()
-
-
-def _build_beat(state: StoryState) -> dict:
-    beat_type = random.choice(_beat_types())
-    if state.phase == "setup":
-        beat_type = random.choice(["setup", "inciting"])
-    elif state.phase == "tension":
-        beat_type = random.choice(["complication", "pressure", "turn"])
-    elif state.phase == "reveal":
-        beat_type = random.choice(["reveal", "consequence", "turn"])
-    else:
-        beat_type = random.choice(["resolution", "aftermath"]) 
-
-    if random.random() < 0.25:
-        _expand_world(state)
-
-    character = random.choice(state.characters)
-    other = random.choice([c for c in state.characters if c != character])
-    location = random.choice(state.locations) if state.locations else state.add_location()
-    obj = random.choice(state.objects) if state.objects else state.add_object()
-    beat = {
-        "type": beat_type,
-        "name": character["name"],
-        "other": other["name"],
-        "location": location,
-        "object": obj,
-        "detail": random.choice(
-            [
-                "a promise that felt heavier than it sounded",
-                "a plan that slipped out of control",
-                "a secret nobody wanted to carry",
-                "a sudden risk that had no easy exit",
-                "a quiet warning that went ignored",
-                "a rumor with too much truth in it",
-                "a fragile truce that could snap",
-            ]
+def extend_script_longform(
+    original_script: str,
+    add_seconds: int,
+    topic_context: str,
+    wpm: int = YT_WPM,
+) -> str:
+    add_words = max(0, math.ceil(wpm * (add_seconds / 60.0)))
+    topic_snippet = topic_context.strip().rstrip(".")
+    if not topic_snippet:
+        topic_snippet = "the story you are telling"
+    transition = (
+        f"Before we wrap, let's widen the lens on {topic_snippet} and sit with what it means."
+    )
+    subtopics = [
+        (
+            "First, here's a step-by-step breakdown of how the decision unfolded, "
+            "from the initial warning, to the quiet verification, to the final moment the team chose action."
         ),
-    }
-    state.beat_index += 1
-    if state.beat_index % 12 == 0:
-        _advance_phase(state)
-    return beat
-
-
-def _sentence_from_beat(state: StoryState, beat: dict, used_sentences: list[str]) -> str:
-    attempts = 0
-    while attempts < 50:
-        length_choice = random.random()
-        if length_choice < 0.2:
-            template = random.choice(_short_sentences())
-            sentence = template.format(
-                name=beat["name"],
-                other=beat["other"],
-                location=beat["location"],
-                object=beat["object"],
-                detail=beat["detail"],
-            )
-            key = "short"
-        elif length_choice < 0.65:
-            template = random.choice(_medium_templates())
-            sentence = template.format(
-                name=beat["name"],
-                other=beat["other"],
-                location=beat["location"],
-                object=beat["object"],
-                detail=beat["detail"],
-            )
-            key = "medium"
-        else:
-            template = random.choice(_long_templates())
-            sentence = template.format(
-                name=beat["name"],
-                other=beat["other"],
-                location=beat["location"],
-                object=beat["object"],
-                detail=beat["detail"],
-            )
-            key = "long"
-
-        attempts += 1
-        if state.last_template_key == key:
-            continue
-        if _is_repetitive(sentence, used_sentences):
-            continue
-        state.last_template_key = key
-        return sentence
-
-    for _ in range(4):
-        _expand_world(state)
-        fallback = (
-            f"{beat['name']} introduced {state.add_character('ally')['name']} at {state.add_location()}, "
-            f"and the story took a new turn with {state.add_object()} and {beat['detail']}."
-        )
-        if not _is_repetitive(fallback, used_sentences):
-            state.last_template_key = "fallback"
-            return fallback
-
-    state.last_template_key = "fallback"
-    return fallback
-
-
-def _story_seed(topic: str) -> list[str]:
-    return [
-        f"There is a story about {topic}, but it starts with a small moment.",
-        "The kind you almost skip past.",
+        (
+            "Second, a quick example makes it tangible: imagine a family waiting on emergency aid, "
+            "and how a short delay feels enormous when the reason stays hidden."
+        ),
+        (
+            "Third, a myth-versus-fact moment matters here: the myth is that secrecy always equals wrongdoing; "
+            "the fact is that sometimes secrecy buys time for protection."
+        ),
     ]
+    recap = (
+        "Quick recap: the urgency shaped every step, the paperwork hid the intent, and the plan aimed to protect, "
+        "not to disappear the funds. Keep that in mind as we move into the closing thought."
+    )
+    extension_sentences = [transition, *subtopics, recap]
+    extension_text = " ".join(extension_sentences)
+    words_needed = add_words - count_words(extension_text)
+    if words_needed > 0:
+        filler_sentence = (
+            "That extra context deepens the stakes, shows the human cost, and keeps the narrator's promise honest."
+        )
+        repeats = math.ceil(words_needed / max(1, count_words(filler_sentence)))
+        extension_text = " ".join([extension_text] + [filler_sentence] * repeats)
+    return f"{original_script}\n\n{extension_text}".strip()
 
 
 def generate_script(min_seconds: int = MIN_AUDIO_SECONDS) -> ScriptResult:
-    topic = random.choice(
-        [
-            "a city project that went quiet overnight",
-            "a neighborhood app that suddenly turned sour",
-            "a public promise that kept slipping",
-            "a tiny startup that made a giant mistake",
-            "a group of friends caught in a slow, messy change",
-        ]
-    )
-    state = _init_story(topic)
-    used_sentences: list[str] = []
-    lines: list[str] = []
+    protagonist = "Mara"
+    ally = "Eli"
+    town = "Ridgeview"
 
-    for seed in _story_seed(topic):
-        lines.append(seed)
-        used_sentences.append(seed)
+    hook = [
+        f"I promised one clear answer about who moved {town}'s emergency fund and why it happened.",
+        "The story begins with a missing ledger and a phone call that ended mid-sentence.",
+        "That promise will be kept, and the answer changes how the whole chain looks.",
+        "No room for guesses.",
+    ]
+    context = [
+        f"{protagonist} kept the relief fund records and signed off on routine checks.",
+        f"{ally} tracked the requests that came in each day and saw the pressure building.",
+        "This fund existed for storms, layoffs, and the quiet emergencies that never reach the news.",
+        f"{town} stored it in a reserve account with simple signatures and a small audit window.",
+        "A clean report showed a steady balance late in the week.",
+        "The next morning brought an almost empty balance and no public note to explain it.",
+        f"{protagonist} and {ally} agreed to trace the trail before rumors hardened into fact.",
+    ]
+    escalation_one = [
+        "A time stamp showed the transfer happened after midnight.",
+        "A keycard log showed entry from a card that should have been inactive.",
+        "A vendor invoice matched the missing amount down to the dollar.",
+        f"{ally} called the bank and learned the transfer had two approvals.",
+        "One approval belonged to a name removed from the staff list.",
+        f"{protagonist} pulled a paper copy and saw edits instead of a full erase.",
+        "A backup folder carried a file with the wrong date in its title.",
+        "A finance chair swore the board never met that night.",
+        "An old invite showed a meeting time that nobody recalled.",
+        "A voice note hinted the reserve was being moved for protection.",
+        "A margin note said to wait until the audit window closed.",
+        f"{ally} saw the audit window ended the same day the fund vanished.",
+        f"{protagonist} checked the stamp and found it matched a batch from months earlier.",
+        "A clerk admitted the stamp box had gone home with someone once.",
+        "A transfer memo listed a routing code that did not match prior months.",
+        f"{protagonist} compared the routing code to old files and found a mismatch.",
+        f"{ally} noticed the approval times were clustered within five minutes.",
+        "One signature line used a block stamp instead of pen.",
+        "The stamp ink matched a box stored near the archives.",
+        "A quiet assistant confirmed the box went missing for a weekend.",
+        "The weekend aligned with the unexplained meeting invite.",
+        "A bank clerk confirmed the escrow form was prefilled before midnight.",
+        "A draft email showed a warning about a looming injunction.",
+        "The warning made the midnight transfer feel like a deadline.",
+        "That trail pointed to intent rather than a mistake.",
+    ]
+    escalation_two = [
+        "The transfer did not land in a private account.",
+        "That money moved into legal escrow tied to a redevelopment bid.",
+        f"That bid would decide whether {town} kept control of its emergency services.",
+        f"{ally} worried the escrow could freeze the fund for months.",
+        f"{protagonist} found a letter warning the fund could be seized if left exposed.",
+        "A retired treasurer mentioned a clause buried in the bank agreement.",
+        "That clause required the reserve to stay above a threshold during the bid.",
+        "The transfer lowered the visible balance below that line.",
+        "That risk felt immediate.",
+        "That contradiction felt sharp: the move protected the cash and endangered it.",
+        f"Families asked why emergency checks paused, and {ally} had no answer.",
+        f"{protagonist} kept digging while rumors circled back to blame.",
+        "Each explanation sounded like a cover story and none solved the timing.",
+        "At first, it looked like a theft, but that assumption did not survive the timeline.",
+        "By this point, one thing was clear: the transfer was deliberate, and the clock was forcing hard choices.",
+        "A second ledger copy carried a prepared statement labeled for discovery.",
+        "The statement blamed a hacker, yet the logs showed no breach.",
+        f"{protagonist} concluded the choice came from inside.",
+        "A legal aide described the escrow as a temporary safe room.",
+        "The note explained that the reserve could not be garnished there.",
+        f"{protagonist} realized the escrow would look like a loss on casual review.",
+        f"{ally} feared that review would spark panic before the hold lifted.",
+    ]
+    pressure_details = [
+        "Bank statements showed a protective hold instead of a withdrawal.",
+        "A calendar on the wall proved how small the legal window was.",
+        "Every hour felt tighter.",
+        "The relief team prepared for a short delay while the escrow closed.",
+        "Public minutes hinted at legal pressure without naming it.",
+        "Every document pointed to urgency rather than greed.",
+        "Courier receipts confirmed the escrow paperwork was filed on time.",
+        "An auditor admitted the decision followed the letter of the rules.",
+        "The risk now was misunderstanding rather than missing money.",
+        "The public needed clarity more than a villain.",
+        "Meeting notes showed the deadline driving every move.",
+        "A stack of receipts tracked each step through the transfer.",
+        "The bank officer stressed that the escrow held every dollar.",
+        "The relief staff documented every call they could not fulfill.",
+        "A quiet promise to reopen the fund held the team together.",
+        "Paper copies showed the fund never left the system.",
+        "A timeline on the whiteboard narrowed the window of danger.",
+        "The reserve could only be touched once the lawsuit threat expired.",
+        f"{protagonist} reviewed every signature to confirm the chain held firm.",
+        f"{ally} watched the requests pile up and felt the strain grow.",
+        "A simple checklist kept the records consistent under stress.",
+        "The bank agreement treated the escrow as a shield, not a spend.",
+        "Each verified detail reduced the fear of a hidden theft.",
+        "The reserve stayed safe even while the balance looked wrong.",
+        "The phone logs showed the urgency behind the late-night call.",
+        "A clean audit trail remained intact despite the panic.",
+        "The oversight file listed the legal risks in plain language.",
+        "The decision aimed to keep emergency services running.",
+        f"{protagonist} kept a printed copy of every notice for backup.",
+        f"{ally} kept the team calm with steady updates.",
+        "A brief pause in aid felt painful but temporary.",
+        "The town council expected a short-term freeze and prepared notices.",
+        "A handwritten note explained the escrow rule in simple terms.",
+        "The escrow clause described the reserve as protected property.",
+        "The bank manager confirmed the funds could not be seized while held.",
+        "A legal summary tied the transfer to a single filing deadline.",
+        "The finance chair admitted the clock left no easy option.",
+        "A clear timeline helped the team see the logic of the move.",
+        "The staff kept receipts ready for the audit review.",
+        "The records room held duplicate logs for verification.",
+        "The reserve stayed intact while the lawsuit threat expired.",
+        "A written plan outlined the steps to restore the balance.",
+        "The team prepared a public statement for the moment the hold lifted.",
+        "A quiet sense of relief arrived as the legal pressure eased.",
+        "The last check confirmed the escrow release had been scheduled.",
+        "The relief team agreed to rebuild trust through transparency.",
+    ]
+    escalation_two.extend(pressure_details)
+    turn = [
+        "A sealed file in the archive finally opened after a records request.",
+        "The file contained a legal warning about a predatory lawsuit due within days.",
+        f"{protagonist} read the signature and saw the transfer as a shield, not a theft.",
+        f"{ally} had been kept out to avoid exposing the plan too soon.",
+        "The mystery shifted from theft to the risk taken to save the fund.",
+    ]
+    payoff = [
+        f"The answer is direct: {protagonist} moved the fund into escrow to block the lawsuit.",
+        "The late-night timing mattered because the injunction clock started at dawn.",
+        "The double approval was a legal workaround for a board that could not meet fast enough.",
+        f"The cover story kept {town} calm until the legal window passed.",
+        f"The escrow terms demanded silence, which is why even {ally} was left in the dark.",
+        "The lawsuit was dismissed, and the reserve returned intact.",
+        "The balance looked empty while the money stayed protected.",
+        "No corruption appeared, only a risky maneuver to keep services alive.",
+        f"The reserve returned in full, and the families in {town} received the aid they needed.",
+        "The promise is kept: the money never vanished, it was shielded.",
+    ]
+    landing = [
+        "Trust survives when people explain the risk before panic fills the gap and before rumors harden into blame.",
+        f"{ally} carried the fear of failure, felt the weight of every request, and still chose to forgive the secrecy.",
+        "The relief in that decision mattered as much as the money because it rebuilt the team itself.",
+        "The story proves how quickly a protective act can look like betrayal when the timeline is hidden.",
+        "A single answer can change what a whole chain of events means and how a community heals.",
+        "Let that sit if you have ever doubted a quiet decision made under pressure.",
+        "Stay curious if you want more stories where one truth reshapes everything.",
+    ]
 
-    while _estimate_seconds(" ".join(lines)) < float(min_seconds):
-        beat = _build_beat(state)
-        sentence = _sentence_from_beat(state, beat, used_sentences)
-        used_sentences.append(sentence)
-        lines.append(sentence)
+    sentences = [*hook, "", *context, "", *escalation_one, "", *escalation_two, "", *turn, "", *payoff, ""]
+    landing_text = " ".join(landing)
 
-        if random.random() < 0.25:
-            follow_up = _sentence_from_beat(state, beat, used_sentences)
-            used_sentences.append(follow_up)
-            lines.append(follow_up)
-
-        if random.random() < 0.1:
-            lines.append("")
-
-    script = "\n".join(lines).strip()
+    script = " ".join(sentences).strip()
+    script = f"{script} {landing_text}".strip()
     script = sanitize_script(script)
-    return ScriptResult(text=script, estimated_seconds=_estimate_seconds(script))
+
+    wpm = YT_WPM if TARGET_PLATFORM == "youtube" else int(round(YT_WPM * 1.1))
+    min_words = YT_MIN_WORDS if TARGET_PLATFORM == "youtube" else None
+    target_seconds = YT_TARGET_AUDIO_SECONDS if TARGET_PLATFORM == "youtube" else min_seconds
+
+    if min_words:
+        topic_context = _topic_context(script)
+        while count_words(script) < min_words:
+            missing_words = min_words - count_words(script)
+            add_seconds = math.ceil((missing_words / float(wpm)) * 60.0)
+            script = extend_script_longform(script, add_seconds, topic_context, wpm=wpm)
+            script = sanitize_script(script)
+
+    estimated = _estimate_seconds(script, wpm)
+    if target_seconds and estimated < target_seconds:
+        add_seconds = int(target_seconds - estimated)
+        script = extend_script_longform(script, add_seconds, _topic_context(script), wpm=wpm)
+        script = sanitize_script(script)
+        estimated = _estimate_seconds(script, wpm)
+
+    return ScriptResult(text=script, estimated_seconds=estimated)
 
 
 def expand_script_once(script_text: str) -> ScriptResult:
-    return ScriptResult(text=script_text, estimated_seconds=_estimate_seconds(script_text))
+    wpm = YT_WPM if TARGET_PLATFORM == "youtube" else int(round(YT_WPM * 1.1))
+    return ScriptResult(text=script_text, estimated_seconds=_estimate_seconds(script_text, wpm))
 
 
 def generate_titles(script_text: str) -> list[str]:

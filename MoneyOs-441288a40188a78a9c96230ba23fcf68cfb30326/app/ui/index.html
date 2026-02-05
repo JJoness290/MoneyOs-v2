@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MoneyOS – TikTok Generator</title>
+  <title>MoneyOS – Video Generator</title>
   <style>
     body {
       font-family: "Segoe UI", sans-serif;
@@ -19,7 +19,7 @@
       background: #1a1d24;
       padding: 32px;
       border-radius: 16px;
-      width: 420px;
+      width: 460px;
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
     }
     h1 {
@@ -56,27 +56,147 @@
       margin-top: 12px;
       word-break: break-all;
     }
+    .progress-bar {
+      margin-top: 8px;
+      height: 8px;
+      background: #2a2f3a;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .progress-bar span {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, #4d7cff, #77a1ff);
+      width: 0%;
+      transition: width 0.3s ease;
+    }
+    .logs {
+      margin-top: 12px;
+      max-height: 140px;
+      overflow-y: auto;
+      background: #0f1115;
+      padding: 8px;
+      border-radius: 8px;
+      font-size: 12px;
+    }
+    .logs div {
+      padding: 2px 0;
+    }
+    a {
+      color: #9bb2ff;
+    }
   </style>
 </head>
 <body>
   <div class="panel">
-    <h1>MoneyOS – TikTok Generator</h1>
+    <h1>MoneyOS – Video Generator</h1>
     <button id="generateButton">Generate Video</button>
     <div class="status">
+      <div><span class="label">Stage:</span> <span id="stageText">Idle</span></div>
       <div><span class="label">Status:</span> <span id="statusText">Idle</span></div>
+      <div><span class="label">Progress:</span> <span id="progressText">0%</span></div>
+      <div><span class="label">ETA:</span> <span id="etaText">--:--</span></div>
+      <div class="progress-bar"><span id="progressBar"></span></div>
       <div class="output"><span class="label">Output:</span> <span id="outputPath">-</span></div>
       <div><span class="label">Duration:</span> <span id="outputDuration">-</span></div>
+      <div><span class="label">Download:</span> <span id="downloadLink">-</span></div>
       <div><span class="label">STATUS:</span> <span id="finalStatus">Idle</span></div>
+      <div class="logs" id="logTail"></div>
+    </div>
+    <div class="status">
+      <div><span class="label">CPU:</span> <span id="cpuSpec">-</span></div>
+      <div><span class="label">RAM:</span> <span id="ramSpec">-</span></div>
+      <div><span class="label">GPU:</span> <span id="gpuSpec">-</span></div>
+      <div><span class="label">Caps:</span> <span id="capSpec">-</span></div>
     </div>
   </div>
 
   <script>
     const generateButton = document.getElementById('generateButton');
     const statusText = document.getElementById('statusText');
+    const stageText = document.getElementById('stageText');
+    const progressText = document.getElementById('progressText');
+    const etaText = document.getElementById('etaText');
+    const progressBar = document.getElementById('progressBar');
     const outputPath = document.getElementById('outputPath');
     const outputDuration = document.getElementById('outputDuration');
+    const downloadLink = document.getElementById('downloadLink');
     const finalStatus = document.getElementById('finalStatus');
+    const logTail = document.getElementById('logTail');
+    const cpuSpec = document.getElementById('cpuSpec');
+    const ramSpec = document.getElementById('ramSpec');
+    const gpuSpec = document.getElementById('gpuSpec');
+    const capSpec = document.getElementById('capSpec');
     let polling = null;
+    let eventSource = null;
+
+    function appendLog(message) {
+      const line = document.createElement('div');
+      line.textContent = message;
+      logTail.appendChild(line);
+      logTail.scrollTop = logTail.scrollHeight;
+    }
+
+    function updateStatus(data) {
+      statusText.textContent = data.status || 'Idle';
+      stageText.textContent = data.stage || data.status || 'Idle';
+      progressText.textContent = data.progress_pct ? `${data.progress_pct}%` : '0%';
+      etaText.textContent = data.eta_mmss || '--:--';
+      progressBar.style.width = data.progress_pct ? `${data.progress_pct}%` : '0%';
+      appendLog(data.status || 'Status update');
+
+      if (data.success) {
+        outputPath.textContent = data.video_path || '-';
+        outputDuration.textContent = data.duration ? `${data.duration.toFixed(2)}s` : '-';
+        finalStatus.textContent = 'SUCCESS';
+        if (data.video_path) {
+          const filename = data.video_path.split('\\').pop().split('/').pop();
+          downloadLink.innerHTML = `<a href="/videos/${filename}" target="_blank">Download</a>`;
+        }
+        generateButton.disabled = false;
+        if (eventSource) {
+          eventSource.close();
+        }
+        if (polling) {
+          clearInterval(polling);
+        }
+      } else if (data.status && data.status.startsWith('Error')) {
+        finalStatus.textContent = 'FAILED';
+        generateButton.disabled = false;
+        if (eventSource) {
+          eventSource.close();
+        }
+        if (polling) {
+          clearInterval(polling);
+        }
+      }
+    }
+
+    async function loadSystemSpecs() {
+      try {
+        const response = await fetch('/api/system/specs');
+        if (!response.ok) {
+          throw new Error('Specs unavailable');
+        }
+        const data = await response.json();
+        const cpu = data.cpu_model ? `${data.cpu_model} (${data.physical_cores}C/${data.logical_threads}T)` : '-';
+        const ram = data.total_ram_gb ? `${data.total_ram_gb} GB` : '-';
+        const gpus = Array.isArray(data.gpus) && data.gpus.length ? data.gpus.join(', ') : 'Unavailable';
+        const caps = data.caps
+          ? `CPU ${data.caps.cpu_percent}% / RAM ${data.caps.ram_percent}% / GPU ${data.caps.gpu_percent}%`
+          : '-';
+        cpuSpec.textContent = cpu;
+        ramSpec.textContent = ram;
+        gpuSpec.textContent = gpus;
+        capSpec.textContent = caps;
+      } catch (error) {
+        console.error(error);
+        cpuSpec.textContent = 'Unavailable';
+        ramSpec.textContent = 'Unavailable';
+        gpuSpec.textContent = 'Unavailable';
+        capSpec.textContent = '-';
+      }
+    }
 
     async function pollStatus(jobId) {
       try {
@@ -85,38 +205,54 @@
           throw new Error('Status unavailable');
         }
         const data = await response.json();
-        statusText.textContent = data.status || 'Idle';
-        if (data.success) {
-          outputPath.textContent = data.video_path || '-';
-          outputDuration.textContent = data.duration ? `${data.duration.toFixed(2)}s` : '-';
-          finalStatus.textContent = 'SUCCESS';
-          generateButton.disabled = false;
-          clearInterval(polling);
-        } else if (data.status && data.status.startsWith('Error')) {
-          finalStatus.textContent = 'FAILED';
-          generateButton.disabled = false;
-          clearInterval(polling);
-        }
+        updateStatus(data);
       } catch (error) {
         console.error(error);
         generateButton.disabled = false;
-        clearInterval(polling);
+        if (polling) {
+          clearInterval(polling);
+        }
       }
+    }
+
+    function subscribeEvents(jobId) {
+      if (eventSource) {
+        eventSource.close();
+      }
+      eventSource = new EventSource(`/events/${jobId}`);
+      eventSource.addEventListener('status', (event) => {
+        const data = JSON.parse(event.data);
+        updateStatus(data);
+      });
+      eventSource.addEventListener('error', () => {
+        if (!polling) {
+          polling = setInterval(() => pollStatus(jobId), 1000);
+        }
+      });
     }
 
     generateButton.addEventListener('click', async () => {
       generateButton.disabled = true;
       statusText.textContent = 'Generating script...';
+      stageText.textContent = 'Starting';
+      progressText.textContent = '0%';
+      etaText.textContent = '--:--';
+      progressBar.style.width = '0%';
       outputPath.textContent = '-';
       outputDuration.textContent = '-';
+      downloadLink.textContent = '-';
       finalStatus.textContent = 'In Progress';
+      logTail.innerHTML = '';
 
       const response = await fetch('/generate', { method: 'POST' });
       const data = await response.json();
       const jobId = data.job_id;
 
-      polling = setInterval(() => pollStatus(jobId), 1000);
+      subscribeEvents(jobId);
+      polling = setInterval(() => pollStatus(jobId), 2000);
     });
+
+    loadSystemSpecs();
   </script>
 </body>
 </html>

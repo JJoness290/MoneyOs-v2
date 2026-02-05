@@ -1,14 +1,28 @@
 from dataclasses import dataclass
-import json
+import os
 import random
+import re
+import tempfile
 from pathlib import Path
 from typing import Tuple
 
 import numpy as np
-from moviepy.editor import AudioFileClip, CompositeVideoClip, ImageClip, VideoFileClip, concatenate_videoclips
 from PIL import Image, ImageDraw, ImageFont
 
-from app.config import MINECRAFT_BG_DIR, TARGET_FPS, TARGET_RESOLUTION
+if not hasattr(Image, "ANTIALIAS"):
+    setattr(Image, "ANTIALIAS", Image.Resampling.LANCZOS)
+
+from moviepy.editor import AudioFileClip, ImageClip
+
+from app.config import OUTPUT_DIR, TARGET_FPS, TARGET_PLATFORM, TARGET_RESOLUTION, VISUAL_MODE, performance
+from app.core.broll.resolver import ensure_broll_pool, select_broll_clip
+from app.core.resource_guard import monitored_threads
+from app.core.visual_validator import generate_fallback_visuals, validate_visuals
+from app.core.visuals.base_bg import build_base_bg
+from app.core.visuals.documentary.compositor import build_documentary_visuals
+from app.core.visuals.ffmpeg_utils import StatusCallback, encoder_uses_threads, run_ffmpeg, select_video_encoder
+from app.core.visuals.normalize import normalize_clip
+from app.core.visuals.overlay_text import add_text_overlay
 
 
 @dataclass
@@ -17,106 +31,361 @@ class VideoBuildResult:
     duration_seconds: float
 
 
-def _fit_background(clip: VideoFileClip) -> VideoFileClip:
-    target_w, target_h = TARGET_RESOLUTION
-    clip = clip.resize(height=target_h) if clip.h < target_h else clip.resize(height=target_h)
-    if clip.w < target_w:
-        clip = clip.resize(width=target_w)
-    x_center = clip.w / 2
-    y_center = clip.h / 2
-    return clip.crop(
-        x_center=x_center,
-        y_center=y_center,
-        width=target_w,
-        height=target_h,
+MIDPOINT_CLARITY_LINE = "By this point, one thing was clear"
+MIDPOINT_OVERLAY_TEXT = "One thing was clear by then"
+MIDPOINT_OVERLAY_DURATION = 3.5
+
+
+
+def _log_status(status_callback: StatusCallback, message: str) -> None:
+    if status_callback:
+        status_callback(message)
+
+
+
+
+def _split_sentences(text: str) -> list[str]:
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    return sentences
+
+
+def _sentence_timings(text: str, audio_duration: float) -> list[tuple[str, float, float]]:
+    sentences = _split_sentences(text)
+    word_counts = [len(sentence.split()) for sentence in sentences]
+    total_words = sum(word_counts)
+    if total_words <= 0:
+        return []
+    timings = []
+    start = 0.0
+    for sentence, count in zip(sentences, word_counts):
+        duration = audio_duration * (count / total_words)
+        end = start + duration
+        timings.append((sentence, start, end))
+        start = end
+    return timings
+
+
+def _find_sentence_time(timings: list[tuple[str, float, float]], predicate) -> float | None:
+    for sentence, start, _ in timings:
+        if predicate(sentence):
+            return start
+    return None
+
+
+def _resolve_phase_times(timings: list[tuple[str, float, float]], audio_duration: float) -> dict[str, float]:
+    landing_start = timings[-7][1] if len(timings) >= 7 else audio_duration * 0.85
+    payoff_start = _find_sentence_time(timings, lambda s: s.startswith("The answer is direct"))
+    if payoff_start is None:
+        payoff_start = audio_duration * 0.75
+    turn_start = _find_sentence_time(timings, lambda s: s.startswith("The mystery shifted"))
+    if turn_start is None:
+        turn_start = audio_duration * 0.65
+    midpoint_time = _find_sentence_time(timings, lambda s: s.startswith(MIDPOINT_CLARITY_LINE))
+    discovery_end = audio_duration * 0.15
+    return {
+        "landing_start": landing_start,
+        "payoff_start": payoff_start,
+        "turn_start": turn_start,
+        "midpoint_time": midpoint_time if midpoint_time is not None else audio_duration * 0.5,
+        "discovery_end": discovery_end,
+    }
+
+
+def _intent_blocks(phase_times: dict[str, float], audio_duration: float) -> list[tuple[str, float, float]]:
+    return [
+        ("discovery", 0.0, phase_times["discovery_end"]),
+        ("escalation", phase_times["discovery_end"], phase_times["turn_start"]),
+        ("turn", phase_times["turn_start"], phase_times["payoff_start"]),
+        ("payoff", phase_times["payoff_start"], phase_times["landing_start"]),
+        ("landing", phase_times["landing_start"], audio_duration),
+    ]
+
+
+def _allow_testsrc2() -> bool:
+    return os.getenv("MONEYOS_ALLOW_TESTSRC2") == "1"
+
+
+def _segment_text_for_block(
+    timings: list[tuple[str, float, float]],
+    start: float,
+    end: float,
+    fallback_text: str,
+) -> str:
+    segments = []
+    for sentence, s_start, s_end in timings:
+        if s_end >= start and s_start <= end:
+            segments.append(sentence)
+    return " ".join(segments).strip() or fallback_text
+
+
+
+def _build_visual_track(
+    script_text: str,
+    audio_duration: float,
+    audio_path: Path,
+    output_path: Path,
+    status_callback: StatusCallback = None,
+) -> None:
+    broll_orientation = os.getenv("MONEYOS_BROLL_ORIENTATION") or (
+        "landscape" if TARGET_PLATFORM == "youtube" else "portrait"
     )
+    fit_mode = "fill" if TARGET_PLATFORM == "youtube" else "contain"
+    _log_status(
+        status_callback,
+        "Platform="
+        f"{TARGET_PLATFORM} target={TARGET_RESOLUTION[0]}x{TARGET_RESOLUTION[1]} "
+        f"broll_orientation={broll_orientation} fit={fit_mode}",
+    )
+    timings = _sentence_timings(script_text, audio_duration)
+    phase_times = _resolve_phase_times(timings, audio_duration)
+    log_path = OUTPUT_DIR / "debug" / "validation.txt"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n=== validation run for {output_path.name} ===\n")
 
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        intent_blocks = _intent_blocks(phase_times, audio_duration)
+        clip_entries: list[tuple[Path, float]] = []
+        normalized_dir = temp_path / "norm"
+        normalized_dir.mkdir(parents=True, exist_ok=True)
+        for index, (_, start, end) in enumerate(intent_blocks, start=1):
+            duration = max(0.0, end - start)
+            if duration <= 0:
+                continue
+            segment_id = f"seg_{index:03d}"
+            segment_text = _segment_text_for_block(timings, start, end, script_text)
+            pool_dir = ensure_broll_pool(
+                segment_id=segment_id,
+                segment_text=segment_text,
+                target_duration=duration,
+                script_text=script_text,
+                status_callback=status_callback,
+            )
+            clip_path = select_broll_clip(pool_dir, status_callback=status_callback)
+            if clip_path is None:
+                if _allow_testsrc2():
+                    _log_status(status_callback, "B-roll fetch failed; using fallback testsrc2")
+                    build_base_bg(audio_duration, temp_path / "base_visuals.mp4", status_callback, log_path)
+                    clip_entries = []
+                    break
+                raise RuntimeError("B-roll fetch failed and no fallback clips are available.")
+            normalized_path = normalized_dir / f"clip_{index:03d}.mp4"
+            normalize_clip(
+                clip_path,
+                normalized_path,
+                duration=duration,
+                debug_label=segment_id,
+                status_callback=status_callback,
+                log_path=log_path,
+            )
+            clip_entries.append((normalized_path, duration))
 
-def _usage_path() -> Path:
-    return MINECRAFT_BG_DIR / ".usage.json"
+        base_video = temp_path / "base_visuals.mp4"
+        if clip_entries:
+            _log_status(status_callback, "Concatenating b-roll clips")
+            inputs = []
+            for path, _ in clip_entries:
+                inputs += ["-i", str(path)]
+            filter_parts = [f"[{idx}:v]" for idx in range(len(clip_entries))]
+            filter_complex = "".join(filter_parts) + f"concat=n={len(clip_entries)}:v=1:a=0[v]"
+            encode_args, encoder_name = select_video_encoder()
+            concat_args = [
+                "ffmpeg",
+                "-y",
+                *inputs,
+                "-filter_complex",
+                filter_complex,
+                "-map",
+                "[v]",
+                "-r",
+                str(TARGET_FPS),
+                *encode_args,
+                "-an",
+                str(base_video),
+            ]
+            if encoder_uses_threads(encoder_name):
+                concat_args += ["-threads", str(monitored_threads())]
+            run_ffmpeg(
+                concat_args,
+                status_callback=status_callback,
+                log_path=log_path,
+            )
+        elif not base_video.exists():
+            raise RuntimeError("B-roll generation failed and produced no visuals.")
 
+        base_validation = validate_visuals(base_video)
+        if not base_validation.ok:
+            if not _allow_testsrc2():
+                raise RuntimeError(f"Base visuals failed validation: {base_validation.reason}")
+            _log_status(status_callback, f"Base visuals failed validation ({base_validation.reason}); using fallback")
+            generate_fallback_visuals(audio_duration, base_video)
+            base_validation = validate_visuals(base_video)
+            if not base_validation.ok:
+                raise RuntimeError(f"Fallback base visuals failed validation: {base_validation.reason}")
 
-def _load_usage_history() -> list[str]:
-    path = _usage_path()
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
-    if isinstance(data, list):
-        return [str(item) for item in data]
-    return []
-
-
-def _save_usage_history(history: list[str]) -> None:
-    _usage_path().write_text(json.dumps(history[-200:]), encoding="utf-8")
-
-
-def _ensure_background_clips() -> list[Path]:
-    if not MINECRAFT_BG_DIR.exists() or not MINECRAFT_BG_DIR.is_dir():
-        raise RuntimeError(
-            "NO MINECRAFT BACKGROUND FOUND.\n"
-            "Place at least one video in assets/minecraft/\n"
-            "Generation has been aborted."
+        overlay_video = temp_path / "base_with_overlay.mp4"
+        _log_status(
+            status_callback,
+            f"Final render overlay at t={phase_times['midpoint_time']:.2f}.."
+            f"{phase_times['midpoint_time'] + MIDPOINT_OVERLAY_DURATION:.2f}",
         )
-    backgrounds = sorted(MINECRAFT_BG_DIR.glob("*.mp4"))
-    if not backgrounds:
-        raise RuntimeError(
-            "NO MINECRAFT BACKGROUND FOUND.\n"
-            "Place at least one video in assets/minecraft/\n"
-            "Generation has been aborted."
+        add_text_overlay(
+            base_video,
+            overlay_video,
+            MIDPOINT_OVERLAY_TEXT,
+            phase_times["midpoint_time"],
+            phase_times["midpoint_time"] + MIDPOINT_OVERLAY_DURATION,
+            status_callback=status_callback,
+            log_path=log_path,
         )
-    return backgrounds
+
+        visuals_for_output = overlay_video
+        overlay_validation = validate_visuals(overlay_video)
+        if not overlay_validation.ok:
+            if not _allow_testsrc2():
+                raise RuntimeError(f"Overlay visuals failed validation: {overlay_validation.reason}")
+            _log_status(status_callback, f"Overlay visuals failed validation ({overlay_validation.reason}); using fallback")
+            generate_fallback_visuals(audio_duration, overlay_video)
+            overlay_validation = validate_visuals(overlay_video)
+            if not overlay_validation.ok:
+                raise RuntimeError(f"Overlay fallback failed validation: {overlay_validation.reason}")
+
+        encode_args, encoder_name = select_video_encoder()
+        mux_args = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(visuals_for_output),
+            "-i",
+            str(audio_path),
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-r",
+            str(TARGET_FPS),
+            *encode_args,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            "-t",
+            f"{audio_duration:.3f}",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        if encoder_uses_threads(encoder_name):
+            mux_args += ["-threads", str(monitored_threads())]
+        run_ffmpeg(
+            mux_args,
+            status_callback=status_callback,
+            log_path=log_path,
+        )
+
+        final_validation = validate_visuals(output_path)
+        if not final_validation.ok:
+            if not _allow_testsrc2():
+                raise RuntimeError(f"Final video failed validation: {final_validation.reason}")
+            _log_status(status_callback, f"Final video failed validation ({final_validation.reason}); using fallback")
+            fallback_visuals = temp_path / "final_fallback.mp4"
+            generate_fallback_visuals(audio_duration, fallback_visuals)
+            encode_args, encoder_name = select_video_encoder()
+            mux_args = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(fallback_visuals),
+                "-i",
+                str(audio_path),
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-r",
+                str(TARGET_FPS),
+                *encode_args,
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-t",
+                f"{audio_duration:.3f}",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
+            if encoder_uses_threads(encoder_name):
+                mux_args += ["-threads", str(monitored_threads())]
+            run_ffmpeg(
+                mux_args,
+                status_callback=status_callback,
+                log_path=log_path,
+            )
+            final_validation = validate_visuals(output_path)
+            if not final_validation.ok:
+                raise RuntimeError(f"Final fallback failed validation: {final_validation.reason}")
 
 
-def _select_background(backgrounds: list[Path]) -> list[Path]:
-    if len(backgrounds) < 2:
-        raise RuntimeError("At least two background clips are required to prevent reuse.")
-    history = _load_usage_history()
-    last_used = history[-1] if history else None
-    candidates = [path for path in backgrounds if str(path) != last_used]
-    if not candidates:
-        raise RuntimeError("Unable to select a non-repeating background clip.")
+def _build_documentary_track(
+    script_text: str,
+    audio_duration: float,
+    audio_path: Path,
+    output_path: Path,
+    status_callback: StatusCallback = None,
+) -> None:
+    log_path = OUTPUT_DIR / "debug" / "validation.txt"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n=== documentary validation run for {output_path.name} ===\n")
 
-    def usage_index(path: Path) -> int:
-        try:
-            return history.index(str(path))
-        except ValueError:
-            return -1
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        base_video = temp_path / "documentary_visuals.mp4"
+        build_documentary_visuals(script_text, audio_duration, base_video, status_callback=status_callback)
 
-    ordered = sorted(candidates, key=usage_index)
-    return ordered
+        base_validation = validate_visuals(base_video)
+        if not base_validation.ok:
+            raise RuntimeError(f"Documentary visuals failed validation: {base_validation.reason}")
 
+        encode_args, encoder_name = select_video_encoder()
+        mux_args = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(base_video),
+            "-i",
+            str(audio_path),
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-r",
+            str(TARGET_FPS),
+            *encode_args,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            "-t",
+            f"{audio_duration:.3f}",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        if encoder_uses_threads(encoder_name):
+            mux_args += ["-threads", str(monitored_threads())]
+        run_ffmpeg(
+            mux_args,
+            status_callback=status_callback,
+            log_path=log_path,
+        )
 
-def _load_background(audio_duration: float) -> VideoFileClip:
-    backgrounds = _ensure_background_clips()
-    ordered = _select_background(backgrounds)
-    remaining = audio_duration
-    clips: list[VideoFileClip] = []
-    history = _load_usage_history()
+        final_validation = validate_visuals(output_path)
+        if not final_validation.ok:
+            raise RuntimeError(f"Documentary video failed validation: {final_validation.reason}")
 
-    for path in ordered:
-        if remaining <= 0:
-            break
-        clip = VideoFileClip(str(path)).without_audio()
-        clip = _fit_background(clip)
-        if clip.duration <= 0:
-            clip.close()
-            continue
-        duration = min(clip.duration, remaining)
-        clips.append(clip.subclip(0, duration))
-        remaining -= duration
-        history = [item for item in history if item != str(path)]
-        history.append(str(path))
-
-    if remaining > 0:
-        for clip in clips:
-            clip.close()
-        raise RuntimeError("Available background footage is shorter than audio.")
-
-    _save_usage_history(history)
-    return concatenate_videoclips(clips, method="compose")
 
 
 def _chunk_subtitles(text: str, min_words: int = 2, max_words: int = 6) -> list[str]:
@@ -198,32 +467,21 @@ def build_video(
     script_text: str,
     audio_path: Path,
     output_path: Path,
+    status_callback: StatusCallback = None,
 ) -> VideoBuildResult:
     audio_clip = AudioFileClip(str(audio_path))
     audio_duration = float(audio_clip.duration)
     if audio_duration <= 0:
         audio_clip.close()
         raise RuntimeError("Audio duration is zero.")
-    background = _load_background(audio_duration)
-    subtitle_clips = _build_subtitles(script_text, audio_duration)
-    layers = [background] + subtitle_clips
-
-    final_video = CompositeVideoClip(layers, size=TARGET_RESOLUTION)
-    final_video = final_video.set_duration(audio_duration)
-    final_video = final_video.set_audio(audio_clip)
-
-    final_video.write_videofile(
-        str(output_path),
-        codec="libx264",
-        audio_codec="aac",
-        fps=TARGET_FPS,
-        threads=4,
-        preset="medium",
-        temp_audiofile=str(output_path.with_suffix(".temp-audio.m4a")),
-        remove_temp=True,
+    _log_status(
+        status_callback,
+        f"[VIDEO] ram_mode={performance.ram_mode()} ffmpeg_threads={performance.ffmpeg_threads()}",
     )
-
-    background.close()
+    if VISUAL_MODE == "broll":
+        _build_visual_track(script_text, audio_duration, audio_path, output_path, status_callback=status_callback)
+    else:
+        _build_documentary_track(script_text, audio_duration, audio_path, output_path, status_callback=status_callback)
     audio_clip.close()
 
     return VideoBuildResult(output_path=output_path, duration_seconds=audio_duration)
