@@ -34,7 +34,6 @@ from app.core.visuals.documentary.overlays import (
     build_evidence_overlay,
     build_lower_third,
     build_scene_card,
-    build_subtitle,
     build_timeline,
 )
 from app.core.visuals.documentary.storyboard import extract_storyboard
@@ -257,36 +256,73 @@ def _compose_overlay_filters(overlays: Iterable[OverlaySpec]) -> tuple[str, str]
     return ";".join(filters), last_label
 
 
-def _build_subtitle_overlays(
-    segment: DocSegment,
-    subtitle_dir: Path,
-    start_index: int,
-) -> tuple[list[Path], list[OverlaySpec]]:
+def _ass_timestamp(seconds: float) -> str:
+    centiseconds = max(0, int(round(seconds * 100)))
+    hours = centiseconds // 360000
+    minutes = (centiseconds // 6000) % 60
+    secs = (centiseconds // 100) % 60
+    cs = centiseconds % 100
+    return f"{hours:d}:{minutes:02d}:{secs:02d}.{cs:02d}"
+
+
+def _escape_ass_text(text: str) -> str:
+    return text.replace("{", "\\{").replace("}", "\\}").replace("\n", "\\N")
+
+
+def _escape_ffmpeg_filter_path(path: Path) -> str:
+    value = path.as_posix()
+    return value.replace(":", "\\:").replace("'", "\\'")
+
+
+def _build_subtitle_track(segment: DocSegment, subtitle_dir: Path) -> Path | None:
     if SUBTITLE_STYLE != "documentary":
-        return [], []
+        return None
     chunks = _chunk_subtitles(segment.text, seed=segment.index)
-    if not chunks:
-        return [], []
-    overlays: list[OverlaySpec] = []
-    inputs: list[Path] = []
+    if not chunks or segment.duration <= 0:
+        return None
+    subtitle_dir.mkdir(parents=True, exist_ok=True)
+    subtitle_path = subtitle_dir / "subtitles.ass"
+    width, height = TARGET_RESOLUTION
+    font_size = max(36, round(height * 0.05))
+    margin_v = max(40, round(height * 0.08))
+    header_lines = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        f"PlayResX: {width}",
+        f"PlayResY: {height}",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        (
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+            "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+            "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+            "Alignment, MarginL, MarginR, MarginV, Encoding"
+        ),
+        (
+            "Style: Default,Arial,"
+            f"{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H64000000,"
+            "0,0,0,0,100,100,0,0,1,3,0,2,80,80,"
+            f"{margin_v},1"
+        ),
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
     per_chunk = segment.duration / len(chunks)
+    events = []
     start_time = 0.0
-    for offset, chunk in enumerate(chunks):
-        subtitle_path = subtitle_dir / f"subtitle_{offset:02d}.png"
-        build_subtitle(chunk, subtitle_path)
-        inputs.append(subtitle_path)
-        overlays.append(
-            OverlaySpec(
-                input_index=start_index + offset,
-                x=0,
-                y=0,
-                start=start_time,
-                end=start_time + per_chunk,
-                label=f"[v_sub_{offset}]",
-            )
-        )
-        start_time += per_chunk
-    return inputs, overlays
+    for chunk in chunks:
+        end_time = min(segment.duration, start_time + per_chunk)
+        if end_time <= start_time:
+            continue
+        start_stamp = _ass_timestamp(start_time)
+        end_stamp = _ass_timestamp(end_time)
+        text = _escape_ass_text(chunk)
+        events.append(f"Dialogue: 0,{start_stamp},{end_stamp},Default,,0,0,0,,{text}")
+        start_time = end_time
+    subtitle_path.write_text("\n".join(header_lines + events), encoding="utf-8")
+    return subtitle_path
 
 
 def render_documentary_segment(
@@ -334,12 +370,7 @@ def render_documentary_segment(
 
     overlay_inputs = [scene_card, lower_third, evidence, timeline]
     subtitle_dir = seg_dir / "subtitles"
-    subtitle_inputs, subtitle_overlays = _build_subtitle_overlays(
-        segment,
-        subtitle_dir,
-        start_index=1 + len(overlay_inputs),
-    )
-    overlay_inputs.extend(subtitle_inputs)
+    subtitle_track = _build_subtitle_track(segment, subtitle_dir)
 
     width, height = TARGET_RESOLUTION
     scene_end = min(3.5, segment.duration)
@@ -383,10 +414,16 @@ def render_documentary_segment(
             label="[v_timeline]",
         ),
     ]
-    overlays.extend(subtitle_overlays)
-
     filter_complex, last_label = _compose_overlay_filters(overlays)
-    filter_complex = f"{filter_complex};{last_label}scale={width}:{height},format=yuv420p[v]"
+    filter_complex = f"{filter_complex};{last_label}scale={width}:{height}[v_base]"
+    if subtitle_track:
+        subtitle_path = _escape_ffmpeg_filter_path(subtitle_track)
+        filter_complex = (
+            f"{filter_complex};[v_base]subtitles='{subtitle_path}'[v_sub];"
+            "[v_sub]format=yuv420p[v]"
+        )
+    else:
+        filter_complex = f"{filter_complex};[v_base]format=yuv420p[v]"
 
     encode_args, encoder_name = select_video_encoder()
     args = [
@@ -414,7 +451,7 @@ def render_documentary_segment(
         args += ["-threads", str(monitored_threads())]
     if status_callback:
         status_callback(f"[DOC] compositing segment {segment.index}")
-    run_ffmpeg(args, status_callback=status_callback)
+    run_ffmpeg(args, status_callback=status_callback, subtitle_mode="ass" if subtitle_track else "none")
 
     _write_json(
         meta_path,

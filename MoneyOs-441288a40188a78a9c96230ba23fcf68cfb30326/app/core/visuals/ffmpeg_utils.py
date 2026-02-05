@@ -146,13 +146,36 @@ def _ensure_faststart(args: list[str]) -> list[str]:
     return args
 
 
-def run_ffmpeg(args: list[str], status_callback: StatusCallback = None, log_path: Path | None = None) -> None:
+def run_ffmpeg(
+    args: list[str],
+    status_callback: StatusCallback = None,
+    log_path: Path | None = None,
+    subtitle_mode: str | None = None,
+) -> None:
     guard = ResourceGuard("ffmpeg")
     guard.start()
     try:
         args = _ensure_faststart(args)
         args = maybe_externalize_filter_graph(args)
         cmd_len = estimate_windows_cmd_length(args)
+        num_inputs = args.count("-i")
+        subtitle_label = subtitle_mode or "none"
+        input_log = (
+            "[ResourceGuard] FFmpeg input stats: "
+            f"subtitle_mode={subtitle_label} num_ffmpeg_inputs={num_inputs} "
+            f"estimated_cmd_length={cmd_len}"
+        )
+        print(input_log)
+        _append_log(log_path, input_log)
+        if num_inputs > 30:
+            error_message = (
+                "[FFmpeg] Too many input files for a single command "
+                f"(num_ffmpeg_inputs={num_inputs}, estimated_cmd_length={cmd_len})"
+            )
+            if status_callback:
+                status_callback(error_message)
+            _append_log(log_path, error_message)
+            raise RuntimeError(error_message)
         print(f"[ResourceGuard] FFmpeg command length: {cmd_len}")
         command = " ".join(args)
         print("[ResourceGuard] FFmpeg command:", command)
