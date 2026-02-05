@@ -157,18 +157,18 @@ def run_ffmpeg(args: list[str], status_callback: StatusCallback = None, log_path
             _append_log(log_path, f"FFmpeg -vf filter: {filter_value}")
         result = subprocess.run(args, capture_output=True, text=True, check=False)
         if result.returncode != 0 and _uses_nvenc(args):
-            for fallback_args in _nvenc_max_fallbacks(args):
-                command = " ".join(fallback_args)
-                print("[ResourceGuard] FFmpeg retry (nvenc fallback):", command)
-                _append_log(log_path, f"FFmpeg retry (nvenc fallback): {command}")
-                result = subprocess.run(fallback_args, capture_output=True, text=True, check=False)
-                if result.returncode == 0:
-                    return
+            stderr_tail = (result.stderr or "")[-2000:]
+            warning = "[FFmpeg] NVENC failed; falling back to libx264 (nvenc_failed=true)"
+            print(warning)
+            if stderr_tail:
+                print(f"[FFmpeg] NVENC stderr (tail): {stderr_tail}")
+            _append_log(log_path, warning)
+            if stderr_tail:
+                _append_log(log_path, f"NVENC stderr (tail): {stderr_tail}")
             fallback_args = _fallback_to_x264(args)
             command = " ".join(fallback_args)
-            warning = "[FFmpeg] NVENC failed; falling back to libx264"
-            print(warning)
-            _append_log(log_path, warning)
+            print("[ResourceGuard] FFmpeg retry (libx264):", command)
+            _append_log(log_path, f"FFmpeg retry (libx264): {command}")
             result = subprocess.run(fallback_args, capture_output=True, text=True, check=False)
             if result.returncode == 0:
                 return

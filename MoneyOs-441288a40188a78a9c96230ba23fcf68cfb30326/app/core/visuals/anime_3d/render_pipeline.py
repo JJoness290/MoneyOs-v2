@@ -111,11 +111,9 @@ def _emit_status(
 
 def _finalize_mux(video_path: Path, audio_path: Path, output_path: Path) -> None:
     args = ["ffmpeg", "-y", "-i", str(video_path)]
-    if audio_path.exists() and audio_path.stat().st_size > 0:
-        args += ["-i", str(audio_path), "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest"]
-    else:
-        print(f"[WARN] audio missing or empty during mux: {audio_path}")
-        args += ["-c", "copy"]
+    if not audio_path.exists() or audio_path.stat().st_size == 0:
+        raise RuntimeError(f"audio missing or empty during mux: {audio_path}")
+    args += ["-i", str(audio_path), "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest"]
     args.append(str(output_path))
     print("[ENC] ffmpeg mux:", " ".join(args))
     run_ffmpeg(args)
@@ -147,6 +145,7 @@ def _assemble_frames_video(
     output_path: Path,
     warnings: list[str],
 ) -> None:
+    _ = audio_path
     encode_report_path = output_path.with_name("encode_report.json")
     frame_files = sorted(frames_dir.glob("frame_*.png"))
     if not frame_files:
@@ -192,11 +191,6 @@ def _assemble_frames_video(
         "-i",
         str(frames_dir / pattern),
     ]
-    audio_ok = audio_path.exists() and audio_path.stat().st_size > 0
-    if audio_ok:
-        args += ["-i", str(audio_path)]
-    else:
-        print(f"[WARN] audio missing or empty: {audio_path}")
     if use_nvenc:
         args += [
             "-c:v",
@@ -215,16 +209,16 @@ def _assemble_frames_video(
         args += [
             "-c:v",
             "libx264",
+            "-preset",
+            "veryfast",
             "-crf",
-            "20",
+            "23",
             "-pix_fmt",
             "yuv420p",
             "-movflags",
             "+faststart",
         ]
         encoder_name = "libx264"
-    if audio_ok:
-        args += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
     args.append(str(output_path))
     print("[ENC] ffmpeg:", " ".join(args))
     encode_report = {
@@ -424,11 +418,10 @@ def render_anime_3d_60s(
             f"Stderr (tail):\n{tail_stderr}"
         )
     _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
-    encode_audio = audio_path if not fast_proof else Path()
     _assemble_frames_video(
         frames_dir,
         fps,
-        encode_audio,
+        audio_path,
         video_path,
         warnings,
     )
