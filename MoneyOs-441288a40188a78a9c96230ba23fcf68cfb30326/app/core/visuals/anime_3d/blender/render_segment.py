@@ -292,12 +292,142 @@ def _create_scene(assets_dir: Path, asset_mode: str) -> dict[str, bpy.types.Obje
     }
 
 
+def _setup_fast_proof_world(scene: bpy.types.Scene) -> None:
+    if scene.world is None:
+        scene.world = bpy.data.worlds.new("World")
+    world = scene.world
+    world.use_nodes = True
+    nodes = world.node_tree.nodes
+    links = world.node_tree.links
+    nodes.clear()
+    output = nodes.new(type="ShaderNodeOutputWorld")
+    background = nodes.new(type="ShaderNodeBackground")
+    background.inputs["Strength"].default_value = 1.6
+    gradient = nodes.new(type="ShaderNodeTexGradient")
+    ramp = nodes.new(type="ShaderNodeValToRGB")
+    ramp.color_ramp.elements[0].color = (0.55, 0.62, 0.7, 1.0)
+    ramp.color_ramp.elements[1].color = (0.15, 0.18, 0.22, 1.0)
+    mapping = nodes.new(type="ShaderNodeMapping")
+    tex_coord = nodes.new(type="ShaderNodeTexCoord")
+    links.new(tex_coord.outputs.get("Generated"), mapping.inputs.get("Vector"))
+    links.new(mapping.outputs.get("Vector"), gradient.inputs.get("Vector"))
+    links.new(gradient.outputs.get("Fac"), ramp.inputs.get("Fac"))
+    links.new(ramp.outputs.get("Color"), background.inputs.get("Color"))
+    links.new(background.outputs.get("Background"), output.inputs.get("Surface"))
+
+
+def _ensure_ground_plane() -> bpy.types.Object:
+    bpy.ops.mesh.primitive_plane_add(size=20.0, location=(0.0, 0.0, 0.0))
+    plane = bpy.context.active_object
+    material = bpy.data.materials.new(name="GroundPlaneMaterial")
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    nodes.clear()
+    output = nodes.new(type="ShaderNodeOutputMaterial")
+    diffuse = nodes.new(type="ShaderNodeBsdfDiffuse")
+    diffuse.inputs["Color"].default_value = (0.35, 0.36, 0.38, 1.0)
+    material.node_tree.links.new(diffuse.outputs["BSDF"], output.inputs["Surface"])
+    if plane.data.materials:
+        plane.data.materials[0] = material
+    else:
+        plane.data.materials.append(material)
+    return plane
+
+
+def _add_fast_proof_lights() -> list[bpy.types.Object]:
+    lights: list[bpy.types.Object] = []
+    bpy.ops.object.light_add(type="AREA", location=(4.0, -3.5, 4.5))
+    key = bpy.context.active_object
+    key.data.energy = 3500
+    key.data.size = 4.5
+    _safe_set(key.data, "use_shadow", False)
+    lights.append(key)
+    bpy.ops.object.light_add(type="AREA", location=(-4.0, -1.5, 3.0))
+    fill = bpy.context.active_object
+    fill.data.energy = 900
+    fill.data.size = 5.0
+    _safe_set(fill.data, "use_shadow", False)
+    lights.append(fill)
+    bpy.ops.object.light_add(type="SPOT", location=(0.0, 4.0, 4.0))
+    rim = bpy.context.active_object
+    rim.data.energy = 1400
+    rim.data.spot_size = math.radians(55)
+    _safe_set(rim.data, "use_shadow", False)
+    lights.append(rim)
+    return lights
+
+
+def _scene_mesh_bounds() -> tuple[Vector, Vector] | None:
+    meshes = [obj for obj in bpy.data.objects if obj.type == "MESH"]
+    if not meshes:
+        return None
+    min_v = Vector((1e9, 1e9, 1e9))
+    max_v = Vector((-1e9, -1e9, -1e9))
+    for obj in meshes:
+        for corner in obj.bound_box:
+            world_corner = obj.matrix_world @ Vector(corner)
+            min_v.x = min(min_v.x, world_corner.x)
+            min_v.y = min(min_v.y, world_corner.y)
+            min_v.z = min(min_v.z, world_corner.z)
+            max_v.x = max(max_v.x, world_corner.x)
+            max_v.y = max(max_v.y, world_corner.y)
+            max_v.z = max(max_v.z, world_corner.z)
+    return min_v, max_v
+
+
+def _ensure_subject_proxy() -> bpy.types.Object:
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=1.2, location=(0.0, 0.0, 1.2))
+    proxy = bpy.context.active_object
+    material = bpy.data.materials.new(name="ProxyMaterial")
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    nodes.clear()
+    output = nodes.new(type="ShaderNodeOutputMaterial")
+    diffuse = nodes.new(type="ShaderNodeBsdfDiffuse")
+    diffuse.inputs["Color"].default_value = (0.7, 0.65, 0.6, 1.0)
+    material.node_tree.links.new(diffuse.outputs["BSDF"], output.inputs["Surface"])
+    if proxy.data.materials:
+        proxy.data.materials[0] = material
+    else:
+        proxy.data.materials.append(material)
+    return proxy
+
+
+def _frame_camera(camera: bpy.types.Object) -> None:
+    bounds = _scene_mesh_bounds()
+    if bounds is None:
+        _ensure_subject_proxy()
+        bounds = _scene_mesh_bounds()
+    if bounds is None or camera.data is None:
+        return
+    min_v, max_v = bounds
+    center = (min_v + max_v) * 0.5
+    height = max(max_v.z - min_v.z, 0.1)
+    camera.data.lens = 40
+    fov = camera.data.angle
+    target_fill = 0.7
+    distance = (height * 0.5) / max(math.tan(fov * 0.5), 0.1)
+    distance /= target_fill
+    camera.location = center + Vector((0.0, -distance * 1.2, height * 0.35))
+    direction = center - camera.location
+    camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+
+
+def _setup_fast_proof_scene(scene: bpy.types.Scene, camera: bpy.types.Object | None) -> None:
+    _setup_fast_proof_world(scene)
+    _ensure_ground_plane()
+    _add_fast_proof_lights()
+    if camera:
+        _frame_camera(camera)
+
+
 def _animate(
     objects: dict[str, bpy.types.Object | None],
     envelope: list[float],
     fps: int,
     assets_dir: Path,
     asset_mode: str,
+    fast_proof: bool,
 ) -> int:
     hero_armature = objects["hero_armature"]
     camera = objects["camera"]
@@ -320,7 +450,7 @@ def _animate(
                 jaw_bone = hero_armature.pose.bones[name]
                 break
 
-    if camera:
+    if camera and not fast_proof:
         camera.data.lens = 18
     for frame in range(frame_count):
         bpy.context.scene.frame_set(frame + 1)
@@ -332,7 +462,7 @@ def _animate(
             hero_body = objects["hero_body"]
             hero_body.rotation_euler.z = math.sin(t * 2.0) * 0.2
             hero_body.keyframe_insert(data_path="rotation_euler", index=2)
-        if camera:
+        if camera and not fast_proof:
             camera.location.x = 4 + math.sin(t * 0.8) * 0.4
             camera.location.y = -6 + math.cos(t * 0.7) * 0.4
             camera.location.z = 2.5 + math.sin(t * 1.2) * 0.2
@@ -618,6 +748,8 @@ def main() -> None:
         _configure_eevee(scene, args.quality)
 
     objects = _create_scene(assets_dir, args.asset_mode)
+    if args.fast_proof:
+        _setup_fast_proof_scene(scene, objects.get("camera"))
     _add_vfx(
         assets_dir,
         scene,
@@ -632,7 +764,7 @@ def main() -> None:
     if args.postfx == "on" and not args.fast_proof:
         _setup_compositor(scene, warnings)
     envelope = _load_rms_envelope(Path(args.audio) if args.audio else Path(), args.fps, scene.frame_end)
-    mouth_keyframes = _animate(objects, envelope, args.fps, assets_dir, args.asset_mode)
+    mouth_keyframes = _animate(objects, envelope, args.fps, assets_dir, args.asset_mode, args.fast_proof)
 
     bpy.ops.render.render(animation=True, write_still=False)
 
