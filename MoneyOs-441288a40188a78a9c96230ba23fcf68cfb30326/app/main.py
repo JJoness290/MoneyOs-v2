@@ -451,7 +451,42 @@ async def debug_status() -> JSONResponse:
     return JSONResponse(payload)
 
 
-def _run_hybrid_episode(job_id: str, target_seconds: float = 600.0) -> None:
+def _resolve_phase_target_seconds() -> tuple[str, float]:
+    phase_env = os.getenv("MONEYOS_PHASE", "phase2").strip().lower()
+    target_env = os.getenv("MONEYOS_TARGET_SECONDS")
+    if target_env:
+        try:
+            target_value = float(target_env)
+        except ValueError:
+            target_value = 30.0 if phase_env in {"25", "phase25"} else 600.0
+    else:
+        target_value = 30.0 if phase_env in {"25", "phase25"} else 600.0
+    return phase_env, target_value
+
+
+def _build_phase25_shot_plan(target_seconds: float) -> list[dict]:
+    shot_count = max(6, int(round(target_seconds / 5.0)))
+    base = target_seconds / shot_count
+    durations = [base for _ in range(shot_count)]
+    total = sum(durations)
+    if durations:
+        durations[-1] += target_seconds - total
+    environments = ["room", "street", "studio", "room", "street", "studio"]
+    modes = ["wide", "medium", "close", "wide", "medium", "close"]
+    plan = []
+    for idx, duration in enumerate(durations, start=1):
+        plan.append(
+            {
+                "duration": duration,
+                "environment": environments[idx % len(environments)],
+                "shot": modes[idx % len(modes)],
+                "seed_tag": f"shot-{idx}",
+            }
+        )
+    return plan
+
+
+def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> None:
     from src.phase2.clips.clip_generator import generate_clip_with_telemetry  # noqa: WPS433
     from src.phase2.episodes.episode_assembler import (
         assemble_episode,
@@ -463,9 +498,21 @@ def _run_hybrid_episode(job_id: str, target_seconds: float = 600.0) -> None:
     from src.utils.win_paths import safe_join  # noqa: WPS433
 
     try:
+        phase_env, resolved_target = _resolve_phase_target_seconds()
+        target_seconds = target_seconds or resolved_target
         clips = []
-        plan = plan_episode(target_seconds)
+        if phase_env in {"25", "phase25"}:
+            plan = _build_phase25_shot_plan(target_seconds)
+        else:
+            plan = plan_episode(target_seconds)
         clips_expected = len(plan)
+        print(f"[PHASE] phase={phase_env} target_seconds={target_seconds:.2f}")
+        print(
+            "[SHOT_PLAN] "
+            f"shots={clips_expected} "
+            f"shot_seconds={[round(shot['duration'], 2) for shot in plan]} "
+            f"total={sum(shot['duration'] for shot in plan):.2f}"
+        )
         _set_status(
             job_id,
             "Generating hybrid episode clips...",
@@ -485,7 +532,7 @@ def _run_hybrid_episode(job_id: str, target_seconds: float = 600.0) -> None:
                 backend=os.getenv("MONEYOS_VISUAL_BACKEND", "hybrid"),
                 environment=beat["environment"],
                 mode=beat["shot"],
-                seed=f"{job_id}-{index}",
+                seed=f"{job_id}-{beat.get('seed_tag', index)}",
             )
             clips.append(clip_path)
             with _jobs_lock:
@@ -508,12 +555,19 @@ def _run_hybrid_episode(job_id: str, target_seconds: float = 600.0) -> None:
         audio_path = safe_join("p2", "tmp", "episode_silence.wav")
         create_silent_audio(target_seconds, audio_path)
         assemble_episode(clips, audio_path, output_path)
+        print(f"[CONCAT] segments={len(clips)} output={output_path}")
         produced_seconds = get_video_duration_seconds(output_path)
+        if phase_env in {"25", "phase25"} and abs(produced_seconds - target_seconds) > 0.2:
+            raise RuntimeError(
+                f"Episode duration mismatch: produced {produced_seconds:.2f}s, "
+                f"expected {target_seconds:.2f}s."
+            )
         enforce_duration_contract(produced_seconds, target_seconds)
         with _jobs_lock:
             _last_job_snapshot.update(
                 {
                     "job_type": "anime-episode-10m-hybrid",
+                    "phase": phase_env,
                     "target_seconds": target_seconds,
                     "produced_seconds": produced_seconds,
                     "clips_expected": clips_expected,
@@ -533,6 +587,7 @@ def _run_hybrid_episode(job_id: str, target_seconds: float = 600.0) -> None:
                 "clips_expected": clips_expected,
                 "clips_done": clips_expected,
                 "job_type": "anime-episode-10m-hybrid",
+                "phase": phase_env,
             },
         )
     except Exception as exc:  # noqa: BLE001
@@ -572,14 +627,19 @@ async def generate_anime_episode(
 @app.post("/jobs/anime-episode-10m-hybrid")
 async def generate_anime_episode_hybrid() -> JSONResponse:
     job_id = uuid.uuid4().hex
+    phase_env, resolved_target = _resolve_phase_target_seconds()
     _set_status(
         job_id,
         "Queued hybrid episode",
         stage_key="script",
         progress_pct=1,
-        extra={"job_type": "anime-episode-10m-hybrid", "target_seconds": 600},
+        extra={
+            "job_type": "anime-episode-10m-hybrid",
+            "target_seconds": resolved_target,
+            "phase": phase_env,
+        },
     )
-    thread = threading.Thread(target=_run_hybrid_episode, args=(job_id, 600.0), daemon=True)
+    thread = threading.Thread(target=_run_hybrid_episode, args=(job_id, resolved_target), daemon=True)
     thread.start()
     return JSONResponse({"job_id": job_id, "queued": False, "endpoint": "anime-episode-10m-hybrid"})
 
