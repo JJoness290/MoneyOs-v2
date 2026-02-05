@@ -55,6 +55,8 @@ STATUS_DONE = "Done"
 
 _jobs_lock = threading.Lock()
 _jobs: Dict[str, dict] = {}
+_last_clip_telemetry: dict[str, object] = {}
+_last_job_snapshot: dict[str, object] = {}
 _perf_lock = threading.Lock()
 _perf_history_path = OUTPUT_DIR / "perf_history.json"
 
@@ -310,10 +312,10 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
 
 
 def _run_anime_3d_clip(job_id: str, req: Anime3DRequest) -> None:
-    from src.phase2.clips.clip_generator import generate_clip  # noqa: WPS433
+    from src.phase2.clips.clip_generator import generate_clip_with_telemetry  # noqa: WPS433
 
     try:
-        clip_path = generate_clip(
+        clip_path, telemetry = generate_clip_with_telemetry(
             seconds=req.duration_seconds or 3.0,
             environment=req.environment or "room",
             character_asset=req.character_asset,
@@ -321,12 +323,21 @@ def _run_anime_3d_clip(job_id: str, req: Anime3DRequest) -> None:
             mode=req.mode or "static_pose",
             seed=job_id,
         )
+        with _jobs_lock:
+            _last_clip_telemetry.update(telemetry)
         _set_status(
             job_id,
             "Complete",
             stage_key="done",
             progress_pct=100,
-            extra={"clip": str(clip_path)},
+            extra={
+                "clip": str(clip_path),
+                "backend_used_last_clip": telemetry.get("backend_used"),
+                "gpu_used_last_clip": telemetry.get("gpu_used"),
+                "peak_vram_mb_last_clip": telemetry.get("peak_vram_mb"),
+                "base_visual_path_last_clip": telemetry.get("base_visual_path"),
+                "base_visual_validator_result": telemetry.get("base_visual_validator_result"),
+            },
         )
     except Exception as exc:  # noqa: BLE001
         _set_error(job_id, f"Error: {exc}")
@@ -374,6 +385,7 @@ async def debug_status() -> JSONResponse:
     payload = {
         "autopilot": autopilot_status(),
         "visual_mode": VISUAL_MODE,
+        "visual_backend": os.getenv("MONEYOS_VISUAL_BACKEND", "hybrid"),
         "cwd": str(Path.cwd()),
         "repo_root": str(get_repo_root()),
         "assets_root": str(assets_root),
@@ -397,6 +409,8 @@ async def debug_status() -> JSONResponse:
         "capabilities": caps,
         "anime_3d_ready": blender.found and VISUAL_MODE == "anime_3d",
         "last_error": blender.error,
+        "last_clip_telemetry": _last_clip_telemetry,
+        "last_job_snapshot": _last_job_snapshot,
     }
     try:
         import torch  # noqa: WPS433
@@ -412,6 +426,94 @@ async def debug_status() -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         payload["torch"] = {"error": str(exc)}
     return JSONResponse(payload)
+
+
+def _run_hybrid_episode(job_id: str, target_seconds: float = 600.0) -> None:
+    from src.phase2.clips.clip_generator import generate_clip_with_telemetry  # noqa: WPS433
+    from src.phase2.episodes.episode_assembler import (
+        assemble_episode,
+        create_silent_audio,
+        enforce_duration_contract,
+        get_video_duration_seconds,
+    )
+    from src.phase2.episodes.episode_planner import plan_episode  # noqa: WPS433
+    from src.utils.win_paths import safe_join  # noqa: WPS433
+
+    try:
+        clips = []
+        plan = plan_episode(target_seconds)
+        clips_expected = len(plan)
+        _set_status(
+            job_id,
+            "Generating hybrid episode clips...",
+            stage_key="visuals",
+            progress_pct=5,
+            extra={
+                "job_type": "anime-episode-10m-hybrid",
+                "target_seconds": target_seconds,
+                "clips_expected": clips_expected,
+                "clips_done": 0,
+                "visual_backend": os.getenv("MONEYOS_VISUAL_BACKEND", "hybrid"),
+            },
+        )
+        for index, beat in enumerate(plan, start=1):
+            clip_path, telemetry = generate_clip_with_telemetry(
+                seconds=float(beat["duration"]),
+                backend=os.getenv("MONEYOS_VISUAL_BACKEND", "hybrid"),
+                environment=beat["environment"],
+                mode=beat["shot"],
+                seed=f"{job_id}-{index}",
+            )
+            clips.append(clip_path)
+            with _jobs_lock:
+                _last_clip_telemetry.update(telemetry)
+            _set_status(
+                job_id,
+                f"Rendered clip {index}/{clips_expected}",
+                stage_key="visuals",
+                progress_pct=min(95, int((index / max(1, clips_expected)) * 90)),
+                extra={
+                    "clips_done": index,
+                    "backend_used_last_clip": telemetry.get("backend_used"),
+                    "gpu_used_last_clip": telemetry.get("gpu_used"),
+                    "peak_vram_mb_last_clip": telemetry.get("peak_vram_mb"),
+                    "base_visual_path_last_clip": telemetry.get("base_visual_path"),
+                    "base_visual_validator_result": telemetry.get("base_visual_validator_result"),
+                },
+            )
+        output_path = safe_join("p2", "episodes", "episode_001.mp4")
+        audio_path = safe_join("p2", "tmp", "episode_silence.wav")
+        create_silent_audio(target_seconds, audio_path)
+        assemble_episode(clips, audio_path, output_path)
+        produced_seconds = get_video_duration_seconds(output_path)
+        enforce_duration_contract(produced_seconds, target_seconds)
+        with _jobs_lock:
+            _last_job_snapshot.update(
+                {
+                    "job_type": "anime-episode-10m-hybrid",
+                    "target_seconds": target_seconds,
+                    "produced_seconds": produced_seconds,
+                    "clips_expected": clips_expected,
+                    "clips_done": clips_expected,
+                    "last_output_path": str(output_path),
+                }
+            )
+        _set_status(
+            job_id,
+            "Complete",
+            stage_key="done",
+            progress_pct=100,
+            extra={
+                "video_path": str(output_path),
+                "duration": produced_seconds,
+                "target_seconds": target_seconds,
+                "clips_expected": clips_expected,
+                "clips_done": clips_expected,
+                "job_type": "anime-episode-10m-hybrid",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        _set_error(job_id, f"Error: {exc}")
 
 
 @app.post("/generate")
@@ -442,6 +544,21 @@ async def generate_anime_episode(
             "endpoint": "anime-episode-10m",
         }
     )
+
+
+@app.post("/jobs/anime-episode-10m-hybrid")
+async def generate_anime_episode_hybrid() -> JSONResponse:
+    job_id = uuid.uuid4().hex
+    _set_status(
+        job_id,
+        "Queued hybrid episode",
+        stage_key="script",
+        progress_pct=1,
+        extra={"job_type": "anime-episode-10m-hybrid", "target_seconds": 600},
+    )
+    thread = threading.Thread(target=_run_hybrid_episode, args=(job_id, 600.0), daemon=True)
+    thread.start()
+    return JSONResponse({"job_id": job_id, "queued": False, "endpoint": "anime-episode-10m-hybrid"})
 
 
 @app.post("/jobs/anime-episode-10m-autopilot")

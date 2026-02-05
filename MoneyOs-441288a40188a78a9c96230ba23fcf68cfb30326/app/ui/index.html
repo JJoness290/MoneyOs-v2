@@ -244,7 +244,7 @@
       finalStatus.textContent = 'In Progress';
       logTail.innerHTML = '';
 
-      const response = await fetch('/generate', { method: 'POST' });
+      const response = await fetch('/jobs/anime-episode-10m-hybrid', { method: 'POST' });
       const data = await response.json();
       const jobId = data.job_id;
 
