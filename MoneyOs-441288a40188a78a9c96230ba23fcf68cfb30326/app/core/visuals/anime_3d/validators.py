@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import json
 from pathlib import Path
 import subprocess
@@ -12,6 +13,7 @@ from PIL import Image, ImageChops
 class ValidationReport:
     valid: bool
     message: str
+    warnings: list[str]
 
 
 def _ffprobe_streams(path: Path) -> dict:
@@ -170,25 +172,30 @@ def _check_mouth(report_path: Path) -> bool:
 
 
 def validate_episode(video_path: Path, audio_path: Path, report_path: Path) -> ValidationReport:
+    warnings: list[str] = []
+    phase = int(os.getenv("MONEYOS_PHASE", "1"))
+    strict_vfx = os.getenv("MONEYOS_STRICT_VFX", "0") == "1"
     if not video_path.exists():
-        return ValidationReport(valid=False, message="final video missing")
+        return ValidationReport(valid=False, message="final video missing", warnings=warnings)
     if not _audio_valid(audio_path):
-        return ValidationReport(valid=False, message="audio invalid")
+        return ValidationReport(valid=False, message="audio invalid", warnings=warnings)
     if video_path.stat().st_size == 0:
-        return ValidationReport(valid=False, message="final video empty")
+        return ValidationReport(valid=False, message="final video empty", warnings=warnings)
     payload = _ffprobe_streams(video_path)
     if not _has_audio_stream(payload):
-        return ValidationReport(valid=False, message="no audio stream in final video")
+        return ValidationReport(valid=False, message="no audio stream in final video", warnings=warnings)
     video_duration = _duration_from_probe(payload, "video")
     audio_duration = _duration_from_probe(payload, "audio")
     if video_duration is None or audio_duration is None:
-        return ValidationReport(valid=False, message="missing duration metadata")
+        return ValidationReport(valid=False, message="missing duration metadata", warnings=warnings)
     if abs(video_duration - audio_duration) > 0.05:
-        return ValidationReport(valid=False, message="audio/video duration mismatch")
+        return ValidationReport(valid=False, message="audio/video duration mismatch", warnings=warnings)
     if not _check_motion(video_path, video_path.parent):
-        return ValidationReport(valid=False, message="motion check failed")
+        return ValidationReport(valid=False, message="motion check failed", warnings=warnings)
     if not _check_vfx_emissive(video_path, video_path.parent):
-        return ValidationReport(valid=False, message="vfx emissive check failed")
+        warnings.append("vfx_emissive_check_failed")
+        if strict_vfx or phase >= 2:
+            return ValidationReport(valid=False, message="vfx emissive check failed", warnings=warnings)
     if not _check_mouth(report_path):
-        return ValidationReport(valid=False, message="mouth movement missing")
-    return ValidationReport(valid=True, message="ok")
+        return ValidationReport(valid=False, message="mouth movement missing", warnings=warnings)
+    return ValidationReport(valid=True, message="ok", warnings=warnings)

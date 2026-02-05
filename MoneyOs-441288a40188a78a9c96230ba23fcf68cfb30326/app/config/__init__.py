@@ -153,6 +153,16 @@ except ValueError:
     RENDER_FPS = 30
 TOON_SHADER = os.getenv("MONEYOS_TOON_SHADER", "1") != "0"
 VFX_ENABLE = os.getenv("MONEYOS_VFX_ENABLE", "1") != "0"
+FAST_PROOF = os.getenv("MONEYOS_FAST_PROOF", "0") == "1"
+try:
+    PROOF_SECONDS = float(os.getenv("MONEYOS_PROOF_SECONDS", "15"))
+except ValueError:
+    PROOF_SECONDS = 15.0
+try:
+    MONEYOS_PHASE = int(os.getenv("MONEYOS_PHASE", "1"))
+except ValueError:
+    MONEYOS_PHASE = 1
+STRICT_VFX = os.getenv("MONEYOS_STRICT_VFX", "0") == "1"
 try:
     VFX_EMISSION_STRENGTH = float(os.getenv("MONEYOS_VFX_EMISSION_STRENGTH", "50"))
 except ValueError:

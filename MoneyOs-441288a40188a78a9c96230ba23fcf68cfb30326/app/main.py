@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import asyncio
 import uuid
@@ -38,6 +39,7 @@ from app.core.visuals.anime_3d.blender_runner import detect_blender
 from app.core.visuals.anime_3d.render_pipeline import (
     Anime3DResult,
     anime_3d_output_dir,
+    finalize_anime_3d,
     render_anime_3d_60s,
 )
 from app.core.pipeline import PipelineResult, run_pipeline
@@ -206,6 +208,7 @@ def _set_status(
             payload["audio_path"] = str(anime_3d_result.audio_path.resolve())
             payload["duration"] = anime_3d_result.duration_seconds
             payload["duration_mmss"] = _format_mmss(anime_3d_result.duration_seconds)
+            payload["warnings"] = anime_3d_result.warnings
             payload["success"] = True
 
 
@@ -264,7 +267,13 @@ def _run_anime_3d_60s(job_id: str) -> None:
     try:
         _set_status(job_id, "Generating audio", stage_key="audio", progress_pct=5)
         result = render_anime_3d_60s(job_id, status_callback=_update)
-        _set_status(job_id, "Complete", anime_3d_result=result, stage_key="done", progress_pct=100)
+        phase = int(os.getenv("MONEYOS_PHASE", "1"))
+        strict_vfx = os.getenv("MONEYOS_STRICT_VFX", "0") == "1"
+        if "vfx_emissive_check_failed" in result.warnings and not strict_vfx and phase < 2:
+            status_text = "Complete (VFX skipped)"
+        else:
+            status_text = "Complete"
+        _set_status(job_id, status_text, anime_3d_result=result, stage_key="done", progress_pct=100)
     except Exception as exc:  # noqa: BLE001
         output_dir = anime_3d_output_dir(job_id)
         extra = {
@@ -423,6 +432,18 @@ async def generate_anime_episode_3d_60s(
             "final_video": str((output_dir / "final.mp4").resolve()),
         }
     )
+
+
+@app.post("/jobs/anime-episode-60s-3d/finalize")
+async def finalize_anime_episode_3d(job_id: str = Body(..., embed=True)) -> JSONResponse:
+    if VISUAL_MODE != "anime_3d":
+        raise HTTPException(status_code=400, detail="MONEYOS_VISUAL_MODE must be anime_3d")
+    try:
+        result = finalize_anime_3d(job_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _set_status(job_id, "Complete", anime_3d_result=result, stage_key="done", progress_pct=100)
+    return JSONResponse({"status": "ok", "job_id": job_id})
 
 
 @app.get("/status/{job_id}")

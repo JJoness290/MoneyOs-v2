@@ -35,6 +35,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vfx-emission-strength", type=float, default=50.0)
     parser.add_argument("--vfx-scale", type=float, default=1.0)
     parser.add_argument("--vfx-screen-coverage", type=float, default=0.35)
+    parser.add_argument("--fast-proof", action="store_true")
+    parser.add_argument("--proof-seconds", type=float, default=15.0)
     return parser.parse_args(argv)
 
 
@@ -373,6 +375,7 @@ def _apply_vfx_material(
     plane: bpy.types.Object,
     image_path: Path,
     emission_strength: float,
+    warnings: list[str],
 ) -> None:
     material = bpy.data.materials.new(name="VFX_MAT")
     material.use_nodes = True
@@ -401,7 +404,11 @@ def _apply_vfx_material(
     links.new(mix.outputs["Shader"], output.inputs["Surface"])
 
     material.blend_method = "BLEND"
-    material.shadow_method = "NONE"
+    if hasattr(material, "shadow_method"):
+        material.shadow_method = "NONE"
+    else:
+        print("[VFX] shadow_method missing; skipping")
+        warnings.append("vfx_shadow_method_missing")
     material.use_backface_culling = False
     if hasattr(material, "alpha_threshold"):
         material.alpha_threshold = 0.0
@@ -420,6 +427,7 @@ def _add_vfx(
     emission_strength: float,
     vfx_scale: float,
     screen_coverage: float,
+    warnings: list[str],
 ) -> None:
     if camera is None or camera.data is None:
         return
@@ -449,9 +457,10 @@ def _add_vfx(
         bpy.ops.mesh.primitive_plane_add(size=1.0, location=vfx_center + vfx_offset + item_offset)
         plane = bpy.context.active_object
         try:
-            _apply_vfx_material(plane, image_path, emission_strength)
+            _apply_vfx_material(plane, image_path, emission_strength, warnings)
         except Exception as exc:  # noqa: BLE001
             print(f"[VFX] Skipped due to error: {exc}")
+            warnings.append("vfx_apply_failed")
             continue
         plane.rotation_euler = camera.rotation_euler
         plane.scale = (scale_x, scale_y, 1.0)
@@ -478,11 +487,12 @@ def _add_vfx(
             pass
 
 
-def _setup_compositor(scene: bpy.types.Scene) -> None:
+def _setup_compositor(scene: bpy.types.Scene, warnings: list[str]) -> None:
     tree = _get_scene_node_tree(scene)
     print("[POSTFX] tree=", tree)
     if tree is None:
         print("[WARN] Compositor node_tree not available; skipping postfx.")
+        warnings.append("postfx_node_tree_missing")
         return
     tree.nodes.clear()
     render_layers = tree.nodes.new(type="CompositorNodeRLayers")
@@ -563,22 +573,43 @@ def main() -> None:
 
     _clear_scene()
     scene = bpy.context.scene
-    scene.render.engine = "BLENDER_EEVEE" if args.engine == "eevee" else "CYCLES"
-    scene.render.fps = args.fps
-    total_frames = int(round(args.duration * args.fps))
-    scene.frame_start = 1
-    scene.frame_end = total_frames
-    try:
-        width_str, height_str = args.res.lower().split("x", 1)
-        scene.render.resolution_x = int(width_str)
-        scene.render.resolution_y = int(height_str)
-    except ValueError:
+    warnings: list[str] = []
+    if args.fast_proof:
+        engine = "BLENDER_EEVEE_NEXT"
+        try:
+            scene.render.engine = engine
+        except Exception:  # noqa: BLE001
+            scene.render.engine = "BLENDER_EEVEE"
         scene.render.resolution_x = 1280
         scene.render.resolution_y = 720
-    scene.render.image_settings.file_format = "PNG"
-    frames_dir = output_path.parent / "frames"
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    scene.render.filepath = str(frames_dir / "frame_")
+        scene.render.resolution_percentage = 100
+        scene.render.fps = 30
+        proof_seconds = max(5.0, args.proof_seconds)
+        total_frames = int(round(proof_seconds * scene.render.fps))
+    else:
+        scene.render.engine = "BLENDER_EEVEE" if args.engine == "eevee" else "CYCLES"
+        scene.render.fps = args.fps
+        total_frames = int(round(args.duration * args.fps))
+    scene.frame_start = 1
+    scene.frame_end = total_frames
+    if not args.fast_proof:
+        try:
+            width_str, height_str = args.res.lower().split("x", 1)
+            scene.render.resolution_x = int(width_str)
+            scene.render.resolution_y = int(height_str)
+        except ValueError:
+            scene.render.resolution_x = 1280
+            scene.render.resolution_y = 720
+        scene.render.image_settings.file_format = "PNG"
+        frames_dir = output_path.parent / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        scene.render.filepath = str(frames_dir / "frame_")
+    else:
+        scene.render.image_settings.file_format = "FFMPEG"
+        scene.render.ffmpeg.format = "MPEG4"
+        scene.render.ffmpeg.codec = "H264"
+        scene.render.ffmpeg.audio_codec = "NONE"
+        scene.render.filepath = str(output_path.parent / "video_raw.mp4")
 
     scene.render.use_freestyle = args.outline_mode == "freestyle"
     if hasattr(scene.render, "line_thickness"):
@@ -595,10 +626,11 @@ def main() -> None:
         args.vfx_emission_strength,
         args.vfx_scale,
         args.vfx_screen_coverage,
+        warnings,
     )
     print("[POSTFX] enabled=", args.postfx)
-    if args.postfx == "on":
-        _setup_compositor(scene)
+    if args.postfx == "on" and not args.fast_proof:
+        _setup_compositor(scene, warnings)
     envelope = _load_rms_envelope(Path(args.audio) if args.audio else Path(), args.fps, scene.frame_end)
     mouth_keyframes = _animate(objects, envelope, args.fps, assets_dir, args.asset_mode)
 
@@ -613,6 +645,7 @@ def main() -> None:
                 "vfx_emission_strength": args.vfx_emission_strength,
                 "vfx_scale": args.vfx_scale,
                 "vfx_screen_coverage": args.vfx_screen_coverage,
+                "warnings": warnings,
                 "parsed_args": vars(args),
             },
             indent=2,

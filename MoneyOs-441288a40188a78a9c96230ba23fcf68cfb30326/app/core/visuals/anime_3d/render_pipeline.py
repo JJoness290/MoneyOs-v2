@@ -40,6 +40,7 @@ class Anime3DResult:
     final_video: Path
     audio_path: Path
     duration_seconds: float
+    warnings: list[str]
 
 
 StatusCallback = Callable[[dict], None] | None
@@ -108,11 +109,43 @@ def _emit_status(
     status_callback(payload)
 
 
+def _finalize_mux(video_path: Path, audio_path: Path, output_path: Path) -> None:
+    args = ["ffmpeg", "-y", "-i", str(video_path)]
+    if audio_path.exists() and audio_path.stat().st_size > 0:
+        args += ["-i", str(audio_path), "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest"]
+    else:
+        print(f"[WARN] audio missing or empty during mux: {audio_path}")
+        args += ["-c", "copy"]
+    args.append(str(output_path))
+    print("[ENC] ffmpeg mux:", " ".join(args))
+    run_ffmpeg(args)
+
+
+def _update_report_warnings(report_path: Path, warnings: list[str]) -> None:
+    if not warnings or not report_path.exists():
+        return
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        payload = {}
+    payload["warnings"] = sorted(set(payload.get("warnings", []) + warnings))
+    report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    encode_report_path = report_path.with_name("encode_report.json")
+    if encode_report_path.exists():
+        try:
+            encode_payload = json.loads(encode_report_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            encode_payload = {}
+        encode_payload["warnings"] = sorted(set(encode_payload.get("warnings", []) + warnings))
+        encode_report_path.write_text(json.dumps(encode_payload, indent=2), encoding="utf-8")
+
+
 def _assemble_frames_video(
     frames_dir: Path,
     fps: int,
     audio_path: Path,
     output_path: Path,
+    warnings: list[str],
 ) -> None:
     encode_report_path = output_path.with_name("encode_report.json")
     frame_files = sorted(frames_dir.glob("frame_*.png"))
@@ -200,6 +233,7 @@ def _assemble_frames_video(
         "pad_width": pad_width,
         "encoder": encoder_name,
         "ffmpeg_args": args,
+        "warnings": warnings,
     }
     try:
         run_ffmpeg(args)
@@ -234,12 +268,21 @@ def _generate_audio(output_dir: Path, duration_s: float, status_callback: Status
 
 
 def render_anime_3d_60s(job_id: str, status_callback: StatusCallback = None) -> Anime3DResult:
+    warnings: list[str] = []
+    fast_proof = os.getenv("MONEYOS_FAST_PROOF", "0") == "1"
+    try:
+        proof_seconds = float(os.getenv("MONEYOS_PROOF_SECONDS", "15"))
+    except ValueError:
+        proof_seconds = 15.0
     duration_s = float(ANIME3D_SECONDS)
+    if fast_proof:
+        duration_s = max(5.0, proof_seconds)
     _ensure_assets()
     output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     audio_path = _generate_audio(output_dir, duration_s, status_callback)
     video_path = output_dir / "segment.mp4"
+    video_raw_path = output_dir / "video_raw.mp4"
     report_path = output_dir / "render_report.json"
     frames_dir = output_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
@@ -277,7 +320,11 @@ def render_anime_3d_60s(job_id: str, status_callback: StatusCallback = None) -> 
         str(VFX_SCALE),
         "--vfx-screen-coverage",
         str(VFX_SCREEN_COVERAGE),
+        "--fast-proof" if fast_proof else "",
+        "--proof-seconds",
+        f"{duration_s:.2f}",
     ]
+    blender_args = [arg for arg in blender_args if arg]
     cmd = build_blender_command(script_copy_path, blender_args)
     blender_cmd_path = output_dir / "blender_cmd.txt"
     blender_stdout_path = output_dir / "blender_stdout.txt"
@@ -322,37 +369,84 @@ def render_anime_3d_60s(job_id: str, status_callback: StatusCallback = None) -> 
             f"Stdout (tail):\n{tail_stdout}\n"
             f"Stderr (tail):\n{tail_stderr}"
         )
-    frame_list = sorted(frames_dir.glob("frame_*.png"))
-    if not frame_list:
-        frame_list = sorted(frames_dir.glob("*.png"))
-    if len(frame_list) < 2:
-        contents = "\n".join(path.name for path in list(frames_dir.glob("*"))[:200])
-        tail_stdout = stdout_text[-2000:]
-        tail_stderr = stderr_text[-2000:]
-        raise RuntimeError(
-            "No frames rendered.\n"
-            f"Command: {' '.join(cmd)}\n"
-            f"Frames dir: {frames_dir}\n"
-            f"Contents:\n{contents}\n"
-            f"Stdout (tail):\n{tail_stdout}\n"
-            f"Stderr (tail):\n{tail_stderr}"
-        )
+    if fast_proof:
+        if not video_raw_path.exists():
+            raise RuntimeError("video_raw.mp4 missing after fast proof render")
+    else:
+        frame_list = sorted(frames_dir.glob("frame_*.png"))
+        if not frame_list:
+            frame_list = sorted(frames_dir.glob("*.png"))
+        if len(frame_list) < 2:
+            contents = "\n".join(path.name for path in list(frames_dir.glob("*"))[:200])
+            tail_stdout = stdout_text[-2000:]
+            tail_stderr = stderr_text[-2000:]
+            raise RuntimeError(
+                "No frames rendered.\n"
+                f"Command: {' '.join(cmd)}\n"
+                f"Frames dir: {frames_dir}\n"
+                f"Contents:\n{contents}\n"
+                f"Stdout (tail):\n{tail_stdout}\n"
+                f"Stderr (tail):\n{tail_stderr}"
+            )
     _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
-    _assemble_frames_video(
-        frames_dir,
-        ANIME3D_FPS,
-        audio_path,
-        video_path,
-    )
+    if not fast_proof:
+        _assemble_frames_video(
+            frames_dir,
+            ANIME3D_FPS,
+            audio_path,
+            video_path,
+            warnings,
+        )
+    if not video_path.exists() and video_raw_path.exists():
+        video_path = video_raw_path
     if not video_path.exists():
         raise RuntimeError("segment.mp4 missing after frame encode")
-    final_path = video_path
+    final_path = output_dir / "final.mp4"
+    _finalize_mux(video_path, audio_path, final_path)
     validation = validate_episode(final_path, audio_path, report_path)
+    warnings.extend(validation.warnings)
     if not validation.valid:
+        warnings.append(validation.message)
+        _update_report_warnings(report_path, warnings)
         raise RuntimeError(validation.message)
+    _update_report_warnings(report_path, warnings)
     return Anime3DResult(
         output_dir=output_dir,
         final_video=final_path,
         audio_path=audio_path,
         duration_seconds=duration_s,
+        warnings=warnings,
+    )
+
+
+def finalize_anime_3d(job_id: str, status_callback: StatusCallback = None) -> Anime3DResult:
+    warnings: list[str] = []
+    output_dir = anime_3d_output_dir(job_id)
+    audio_path = output_dir / "audio.wav"
+    frames_dir = output_dir / "frames"
+    video_path = output_dir / "segment.mp4"
+    video_raw_path = output_dir / "video_raw.mp4"
+    final_path = output_dir / "final.mp4"
+    report_path = output_dir / "render_report.json"
+    if not video_path.exists() and frames_dir.exists():
+        _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
+        _assemble_frames_video(frames_dir, ANIME3D_FPS, audio_path, video_path, warnings)
+    if not video_path.exists() and video_raw_path.exists():
+        video_path = video_raw_path
+    if not video_path.exists():
+        raise RuntimeError("No video_raw.mp4 or segment.mp4 found to finalize")
+    _finalize_mux(video_path, audio_path, final_path)
+    validation = validate_episode(final_path, audio_path, report_path)
+    warnings.extend(validation.warnings)
+    if not validation.valid:
+        warnings.append(validation.message)
+        _update_report_warnings(report_path, warnings)
+        raise RuntimeError(validation.message)
+    _update_report_warnings(report_path, warnings)
+    return Anime3DResult(
+        output_dir=output_dir,
+        final_video=final_path,
+        audio_path=audio_path,
+        duration_seconds=float(ANIME3D_SECONDS),
+        warnings=warnings,
     )
