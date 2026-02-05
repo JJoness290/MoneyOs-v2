@@ -32,6 +32,7 @@ from app.core.tts import generate_tts
 from app.core.visuals.anime_3d.blender_runner import build_blender_command
 from app.core.visuals.anime_3d.validators import validate_episode
 from app.core.visuals.ffmpeg_utils import has_nvenc, run_ffmpeg
+from src.utils.win_paths import planned_paths_preflight
 
 
 @dataclass(frozen=True)
@@ -357,6 +358,21 @@ def render_anime_3d_60s(
     _ensure_assets()
     output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
+    planned_paths = [
+        output_dir / "render_report.json",
+        output_dir / "segment.mp4",
+        output_dir / "final.mp4",
+        output_dir / "frames" / "frame_0001.png",
+        output_dir / "blender_cmd.txt",
+    ]
+    ok, longest_path, longest_len = planned_paths_preflight(planned_paths)
+    if not ok:
+        short_root = os.getenv("MONEYOS_SHORT_WORKDIR", "C:\\MoneyOS\\work")
+        raise RuntimeError(
+            "Path too long (WinError 206). "
+            f"Using short workdir: {short_root}. "
+            f"Longest path: {longest_path} ({longest_len})."
+        )
     audio_path = _generate_audio(output_dir, duration_s, status_callback)
     video_path = output_dir / "segment.mp4"
     video_raw_path = output_dir / "video_raw.mp4"

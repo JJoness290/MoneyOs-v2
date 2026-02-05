@@ -12,6 +12,11 @@ def get_output_root() -> Path:
     env_root = os.getenv("MONEYOS_OUTPUT_ROOT")
     if env_root:
         return Path(env_root).expanduser().resolve()
+    env_short = os.getenv("MONEYOS_SHORT_WORKDIR")
+    if env_short:
+        return Path(env_short).expanduser().resolve()
+    if os.name == "nt":
+        return Path(r"C:\MoneyOS\work").resolve()
     return get_repo_root() / "output"
 
 

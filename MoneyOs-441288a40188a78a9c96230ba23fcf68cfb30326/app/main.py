@@ -309,6 +309,29 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
         _set_error(job_id, f"Error: {exc}", extra=extra)
 
 
+def _run_anime_3d_clip(job_id: str, req: Anime3DRequest) -> None:
+    from src.phase2.clips.clip_generator import generate_clip  # noqa: WPS433
+
+    try:
+        clip_path = generate_clip(
+            seconds=req.duration_seconds or 3.0,
+            environment=req.environment or "room",
+            character_asset=req.character_asset,
+            render_preset=req.render_preset or "fast_proof",
+            mode=req.mode or "static_pose",
+            seed=job_id,
+        )
+        _set_status(
+            job_id,
+            "Complete",
+            stage_key="done",
+            progress_pct=100,
+            extra={"clip": str(clip_path)},
+        )
+    except Exception as exc:  # noqa: BLE001
+        _set_error(job_id, f"Error: {exc}")
+
+
 @app.get("/")
 async def ui() -> HTMLResponse:
     index_path = Path(__file__).parent / "ui" / "index.html"
@@ -328,6 +351,13 @@ async def health() -> JSONResponse:
 @app.get("/debug/status")
 async def debug_status() -> JSONResponse:
     blender = detect_blender()
+    try:
+        from src.utils.capabilities import capabilities_snapshot  # noqa: WPS433
+        from src.utils.win_paths import get_short_workdir  # noqa: WPS433
+
+        caps = capabilities_snapshot(get_short_workdir() / "p2" / "cache" / "capabilities.json")
+    except Exception as exc:  # noqa: BLE001
+        caps = {"error": str(exc)}
     assets_root = get_assets_root()
     required_assets = {
         "characters/hero.blend": (assets_root / "characters" / "hero.blend"),
@@ -364,6 +394,7 @@ async def debug_status() -> JSONResponse:
             "version": blender.version,
             "error": blender.error,
         },
+        "capabilities": caps,
         "anime_3d_ready": blender.found and VISUAL_MODE == "anime_3d",
         "last_error": blender.error,
     }
@@ -453,6 +484,17 @@ async def generate_anime_episode_3d_60s(
             "final_video": str((output_dir / "final.mp4").resolve()),
         }
     )
+
+
+@app.post("/jobs/anime-clip-3d")
+async def generate_anime_clip_3d(
+    req: Anime3DRequest = Body(default=Anime3DRequest()),
+) -> JSONResponse:
+    job_id = uuid.uuid4().hex
+    _set_status(job_id, "Queued 3D clip")
+    thread = threading.Thread(target=_run_anime_3d_clip, args=(job_id, req), daemon=True)
+    thread.start()
+    return JSONResponse({"job_id": job_id})
 
 
 @app.post("/jobs/anime-episode-60s-3d/finalize")
