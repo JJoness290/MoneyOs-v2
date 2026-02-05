@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 from app.config import BLENDER_ENGINE, BLENDER_GPU, BLENDER_PATH
+from src.utils.cli_args import validate_no_empty_value_flags
 
 
 @dataclass(frozen=True)
@@ -50,10 +51,17 @@ def _resolve_blender_path() -> Path:
     )
 
 
-def build_blender_command(script_path: Path, args: Iterable[str]) -> list[str]:
+def build_blender_command(
+    script_path: Path,
+    args: Iterable[str],
+    flags_requiring_value: Iterable[str] | None = None,
+) -> list[str]:
     blender_path = _resolve_blender_path()
     engine = BLENDER_ENGINE
     gpu_flag = "1" if BLENDER_GPU else "0"
+    if flags_requiring_value is None:
+        flags_requiring_value = {"--character-asset"}
+    validate_no_empty_value_flags(args, flags_requiring_value)
     return [
         str(blender_path),
         "--background",

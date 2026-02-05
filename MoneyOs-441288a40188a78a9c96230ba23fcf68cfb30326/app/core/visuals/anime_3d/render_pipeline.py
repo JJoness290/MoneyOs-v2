@@ -30,6 +30,7 @@ from app.config import (
 from app.core.paths import get_assets_root
 from app.core.tts import generate_tts
 from app.core.visuals.anime_3d.blender_runner import build_blender_command
+from src.utils.cli_args import add_flag, add_opt, validate_no_empty_value_flags
 from app.core.visuals.anime_3d.validators import validate_episode
 from app.core.visuals.ffmpeg_utils import has_nvenc, run_ffmpeg
 from src.utils.win_paths import planned_paths_preflight
@@ -382,65 +383,76 @@ def render_anime_3d_60s(
     script_path = Path(__file__).parent / "blender" / "render_segment.py"
     script_copy_path = output_dir / "blender_script.py"
     script_copy_path.write_text(script_path.read_text(encoding="utf-8"), encoding="utf-8")
-    blender_args = [
-        "--output",
-        str(video_path),
-        "--audio",
-        str(audio_path),
-        "--report",
-        str(report_path),
-        "--assets-dir",
-        str(get_assets_root()),
-        "--asset-mode",
-        ANIME3D_ASSET_MODE,
-        "--engine" if phase15 else "",
-        "cycles" if phase15 else "",
-        "--render-preset",
-        render_preset,
-        "--environment",
-        environment,
-        "--character-asset",
-        character_asset or "",
-        "--mode",
-        mode,
-        "--style-preset",
-        style_preset,
-        "--outline-mode",
-        outline_mode,
-        "--postfx",
-        postfx,
-        "--quality",
-        quality,
-        "--phase15-samples",
-        str(phase15_samples),
-        "--phase15-bounces",
-        str(phase15_bounces),
-        "--phase15-res",
-        res,
-        "--phase15-tile",
-        str(phase15_tile),
-        "--res",
-        res,
-        "--duration",
-        f"{duration_s:.2f}",
-        "--fps",
-        str(fps),
-        "--vfx-emission-strength",
-        str(vfx_emission_strength),
-        "--vfx-scale",
-        str(vfx_scale),
-        "--vfx-screen-coverage",
-        str(vfx_screen_coverage),
-        "--fast-proof" if fast_proof else "",
-        "--proof-seconds",
-        f"{duration_s:.2f}",
-    ]
-    blender_args = [arg for arg in blender_args if arg]
+    blender_args: list[str] = []
+    add_opt(blender_args, "--output", video_path)
+    add_opt(blender_args, "--audio", audio_path)
+    add_opt(blender_args, "--report", report_path)
+    add_opt(blender_args, "--assets-dir", get_assets_root())
+    add_opt(blender_args, "--asset-mode", ANIME3D_ASSET_MODE)
+    if phase15:
+        add_opt(blender_args, "--engine", "cycles")
+    add_opt(blender_args, "--render-preset", render_preset)
+    add_opt(blender_args, "--environment", environment)
+    add_opt(blender_args, "--character-asset", character_asset)
+    add_opt(blender_args, "--mode", mode)
+    add_opt(blender_args, "--style-preset", style_preset)
+    add_opt(blender_args, "--outline-mode", outline_mode)
+    add_opt(blender_args, "--postfx", postfx)
+    add_opt(blender_args, "--quality", quality)
+    add_opt(blender_args, "--phase15-samples", phase15_samples)
+    add_opt(blender_args, "--phase15-bounces", phase15_bounces)
+    add_opt(blender_args, "--phase15-res", res)
+    add_opt(blender_args, "--phase15-tile", phase15_tile)
+    add_opt(blender_args, "--res", res)
+    add_opt(blender_args, "--duration", f"{duration_s:.2f}")
+    add_opt(blender_args, "--fps", fps)
+    add_opt(blender_args, "--vfx-emission-strength", vfx_emission_strength)
+    add_opt(blender_args, "--vfx-scale", vfx_scale)
+    add_opt(blender_args, "--vfx-screen-coverage", vfx_screen_coverage)
+    add_flag(blender_args, "--fast-proof", fast_proof)
+    add_opt(blender_args, "--proof-seconds", f"{duration_s:.2f}")
+    validate_no_empty_value_flags(
+        blender_args,
+        {
+            "--output",
+            "--audio",
+            "--report",
+            "--assets-dir",
+            "--asset-mode",
+            "--engine",
+            "--render-preset",
+            "--environment",
+            "--character-asset",
+            "--mode",
+            "--style-preset",
+            "--outline-mode",
+            "--postfx",
+            "--quality",
+            "--phase15-samples",
+            "--phase15-bounces",
+            "--phase15-res",
+            "--phase15-tile",
+            "--res",
+            "--duration",
+            "--fps",
+            "--vfx-emission-strength",
+            "--vfx-scale",
+            "--vfx-screen-coverage",
+            "--proof-seconds",
+        },
+    )
     cmd = build_blender_command(script_copy_path, blender_args)
     blender_cmd_path = output_dir / "blender_cmd.txt"
     blender_stdout_path = output_dir / "blender_stdout.txt"
     blender_stderr_path = output_dir / "blender_stderr.txt"
     blender_cmd_path.write_text(" ".join(cmd), encoding="utf-8")
+    character_asset_label = character_asset if character_asset else "<omitted>"
+    _emit_status(
+        status_callback,
+        stage_key="blender",
+        status=f"[BLENDER] character_asset: {character_asset_label}",
+        progress_pct=15,
+    )
 
     _emit_status(status_callback, stage_key="blender", status="Launching Blender", progress_pct=15)
     with blender_stdout_path.open("w", encoding="utf-8") as stdout_handle, blender_stderr_path.open(
