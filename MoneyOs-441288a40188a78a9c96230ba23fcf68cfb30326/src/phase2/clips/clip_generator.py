@@ -39,7 +39,7 @@ def _gpu_telemetry() -> dict[str, float | bool | str | None]:
 def _validate_base_visual(path: Path, duration: float) -> None:
     ensure_exists_and_nonzero(path)
     ensure_has_video_stream(path)
-    ensure_mp4_duration_close(path, duration, tolerance=0.15)
+    ensure_mp4_duration_close(path, duration, tolerance=0.05)
     ensure_non_black_frames(path)
     ensure_motion_present(path)
 
@@ -129,7 +129,7 @@ def generate_clip(
         seed=seed,
     )
     ensure_min_filesize(clip_path)
-    ensure_mp4_duration_close(clip_path, seconds, tolerance=0.25)
+    ensure_mp4_duration_close(clip_path, seconds, tolerance=0.05)
     manifest = clip_dir / "clip_manifest.json"
     manifest.write_text(json.dumps({"clip_id": clip_hash, "path": str(clip_path)}, indent=2), encoding="utf-8")
     return clip_path
@@ -155,6 +155,6 @@ def generate_clip_with_telemetry(
         seed=seed,
     )
     ensure_min_filesize(clip_path)
-    ensure_mp4_duration_close(clip_path, seconds, tolerance=0.25)
+    ensure_mp4_duration_close(clip_path, seconds, tolerance=0.05)
     telemetry["render_seconds"] = round(time.time() - start, 2)
     return clip_path, telemetry

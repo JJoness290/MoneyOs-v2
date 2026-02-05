@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import json
 import math
 import sys
@@ -34,7 +35,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--postfx", default="on")
     parser.add_argument("--quality", default="balanced")
     parser.add_argument("--res", default="1920x1080")
-    parser.add_argument("--duration", type=float, default=60.0)
+    parser.add_argument("--duration", type=float, default=None)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--vfx-emission-strength", type=float, default=50.0)
     parser.add_argument("--vfx-scale", type=float, default=1.0)
@@ -913,7 +914,9 @@ def main() -> None:
     else:
         scene.render.engine = "BLENDER_EEVEE" if args.engine == "eevee" else "CYCLES"
         scene.render.fps = args.fps
-        total_frames = int(round(args.duration * args.fps))
+    if args.duration is None or args.duration <= 0:
+        raise RuntimeError("Duration must be provided and > 0.")
+    total_frames = int(math.ceil(args.duration * args.fps))
     scene.frame_start = 1
     scene.frame_end = total_frames
     if not args.fast_proof:

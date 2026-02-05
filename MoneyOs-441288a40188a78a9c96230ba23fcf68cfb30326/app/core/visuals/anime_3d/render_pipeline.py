@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+import math
 import os
 from pathlib import Path
 import re
@@ -30,7 +31,7 @@ from app.config import (
 from app.core.paths import get_assets_root
 from app.core.tts import generate_tts
 from app.core.visuals.anime_3d.blender_runner import build_blender_command
-from src.utils.cli_args import add_flag, add_opt, validate_no_empty_value_flags
+from src.utils.cli_args import add_opt, validate_no_empty_value_flags
 from app.core.visuals.anime_3d.validators import validate_episode
 from app.core.visuals.ffmpeg_utils import has_nvenc, run_ffmpeg
 from src.utils.win_paths import planned_paths_preflight
@@ -276,10 +277,6 @@ def render_anime_3d_60s(
     fast_proof = render_preset == "fast_proof"
     phase15 = render_preset == "phase15_quality"
     try:
-        proof_seconds = float(os.getenv("MONEYOS_PROOF_SECONDS", "15"))
-    except ValueError:
-        proof_seconds = 15.0
-    try:
         phase15_samples = int(os.getenv("MONEYOS_PHASE15_SAMPLES", "128"))
     except ValueError:
         phase15_samples = 128
@@ -347,15 +344,14 @@ def render_anime_3d_60s(
         res = phase15_res
     if phase15 and "fps" not in overrides:
         fps = 30
-    if phase15 and "duration_seconds" not in overrides:
-        duration_s = 15.0
     if fast_proof:
-        duration_s = max(5.0, proof_seconds)
         res = "1280x720"
         postfx = "off"
         outline_mode = "off"
         vfx_emission_strength = 0.0
         quality = "fast"
+    if duration_s <= 0:
+        raise RuntimeError("Duration must be provided from audio beats and be > 0 seconds.")
     _ensure_assets()
     output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -404,13 +400,19 @@ def render_anime_3d_60s(
     add_opt(blender_args, "--phase15-res", res)
     add_opt(blender_args, "--phase15-tile", phase15_tile)
     add_opt(blender_args, "--res", res)
-    add_opt(blender_args, "--duration", f"{duration_s:.2f}")
+    add_opt(blender_args, "--duration", f"{duration_s:.6f}")
     add_opt(blender_args, "--fps", fps)
     add_opt(blender_args, "--vfx-emission-strength", vfx_emission_strength)
     add_opt(blender_args, "--vfx-scale", vfx_scale)
     add_opt(blender_args, "--vfx-screen-coverage", vfx_screen_coverage)
-    add_flag(blender_args, "--fast-proof", fast_proof)
-    add_opt(blender_args, "--proof-seconds", f"{duration_s:.2f}")
+    duration_label = f"{duration_s:.6f}s"
+    frame_count = math.ceil(duration_s * fps)
+    _emit_status(
+        status_callback,
+        stage_key="blender",
+        status=f"[DURATION] source=audio beat={duration_label} fps={fps} frames={frame_count}",
+        progress_pct=14,
+    )
     validate_no_empty_value_flags(
         blender_args,
         {
@@ -438,7 +440,6 @@ def render_anime_3d_60s(
             "--vfx-emission-strength",
             "--vfx-scale",
             "--vfx-screen-coverage",
-            "--proof-seconds",
         },
     )
     cmd = build_blender_command(script_copy_path, blender_args)
@@ -464,7 +465,7 @@ def render_anime_3d_60s(
             stderr=stderr_handle,
             text=True,
         )
-        total_frames = max(1, int(round(duration_s * fps)))
+        total_frames = max(1, int(math.ceil(duration_s * fps)))
         last_update = 0.0
         while process.poll() is None:
             now = time.time()
