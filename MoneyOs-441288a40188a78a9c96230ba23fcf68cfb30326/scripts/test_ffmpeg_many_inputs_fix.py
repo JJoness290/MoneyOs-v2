@@ -5,7 +5,7 @@ from app.core.visuals.ffmpeg_utils import run_ffmpeg
 
 def main() -> int:
     args = ["ffmpeg", "-y"]
-    for idx in range(31):
+    for idx in range(500):
         args += ["-i", f"input_{idx}.mp4"]
     args += ["-c:v", "libx264", "output.mp4"]
     try:

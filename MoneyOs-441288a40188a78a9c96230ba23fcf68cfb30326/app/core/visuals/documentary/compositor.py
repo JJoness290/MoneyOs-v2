@@ -38,6 +38,7 @@ from app.core.visuals.documentary.overlays import (
 )
 from app.core.visuals.documentary.storyboard import extract_storyboard
 from app.core.visuals.ffmpeg_utils import StatusCallback, encoder_uses_threads, run_ffmpeg, select_video_encoder
+from src.utils.win_paths import safe_join
 
 
 @dataclass(frozen=True)
@@ -274,14 +275,14 @@ def _escape_ffmpeg_filter_path(path: Path) -> str:
     return value.replace(":", "\\:").replace("'", "\\'")
 
 
-def _build_subtitle_track(segment: DocSegment, subtitle_dir: Path) -> Path | None:
+def _build_subtitle_track(segment: DocSegment) -> Path | None:
     if SUBTITLE_STYLE != "documentary":
         return None
     chunks = _chunk_subtitles(segment.text, seed=segment.index)
     if not chunks or segment.duration <= 0:
         return None
-    subtitle_dir.mkdir(parents=True, exist_ok=True)
-    subtitle_path = subtitle_dir / "subtitles.ass"
+    subtitle_path = safe_join("p2", "tmp", f"subs_{segment.index:03d}.ass")
+    subtitle_path.parent.mkdir(parents=True, exist_ok=True)
     width, height = TARGET_RESOLUTION
     font_size = max(36, round(height * 0.05))
     margin_v = max(40, round(height * 0.08))
@@ -369,8 +370,7 @@ def render_documentary_segment(
             _build_procedural_background(segment.duration, background_path, status_callback)
 
     overlay_inputs = [scene_card, lower_third, evidence, timeline]
-    subtitle_dir = seg_dir / "subtitles"
-    subtitle_track = _build_subtitle_track(segment, subtitle_dir)
+    subtitle_track = _build_subtitle_track(segment)
 
     width, height = TARGET_RESOLUTION
     scene_end = min(3.5, segment.duration)
