@@ -409,8 +409,8 @@ def render_anime_3d_60s(
             f"Stderr (tail):\n{tail_stderr}"
         )
     if fast_proof:
-        if not video_raw_path.exists():
-            raise RuntimeError("video_raw.mp4 missing after fast proof render")
+        if not video_path.exists() and not video_raw_path.exists():
+            raise RuntimeError("segment.mp4 missing after fast proof render")
     else:
         frame_list = sorted(frames_dir.glob("frame_*.png"))
         if not frame_list:

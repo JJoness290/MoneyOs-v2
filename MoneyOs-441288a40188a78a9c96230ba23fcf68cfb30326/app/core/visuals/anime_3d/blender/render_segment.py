@@ -605,11 +605,15 @@ def main() -> None:
         frames_dir.mkdir(parents=True, exist_ok=True)
         scene.render.filepath = str(frames_dir / "frame_")
     else:
-        scene.render.image_settings.file_format = "FFMPEG"
+        scene.render.use_file_extension = True
+        scene.render.image_settings.file_format = "FFMPEG_VIDEO"
         scene.render.ffmpeg.format = "MPEG4"
         scene.render.ffmpeg.codec = "H264"
         scene.render.ffmpeg.audio_codec = "NONE"
-        scene.render.filepath = str(output_path.parent / "video_raw.mp4")
+        _safe_set(scene.render.ffmpeg, "ffmpeg_preset", "GOOD")
+        _safe_set(scene.render.ffmpeg, "preset", "GOOD")
+        _safe_set(scene.render.ffmpeg, "constant_rate_factor", "MEDIUM")
+        scene.render.filepath = str(output_path)
 
     scene.render.use_freestyle = args.outline_mode == "freestyle"
     if hasattr(scene.render, "line_thickness"):
