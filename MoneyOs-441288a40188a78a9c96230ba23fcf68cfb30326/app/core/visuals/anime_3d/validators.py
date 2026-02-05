@@ -8,6 +8,8 @@ import subprocess
 
 from PIL import Image, ImageChops
 
+from src.utils.phase import is_phase2_or_higher, normalize_phase
+
 
 @dataclass(frozen=True)
 class ValidationReport:
@@ -173,7 +175,7 @@ def _check_mouth(report_path: Path) -> bool:
 
 def validate_episode(video_path: Path, audio_path: Path, report_path: Path) -> ValidationReport:
     warnings: list[str] = []
-    phase = int(os.getenv("MONEYOS_PHASE", "1"))
+    phase = normalize_phase(os.getenv("MONEYOS_PHASE"))
     strict_vfx = os.getenv("MONEYOS_STRICT_VFX", "0") == "1"
     if not video_path.exists():
         return ValidationReport(valid=False, message="final video missing", warnings=warnings)
@@ -194,7 +196,7 @@ def validate_episode(video_path: Path, audio_path: Path, report_path: Path) -> V
         return ValidationReport(valid=False, message="motion check failed", warnings=warnings)
     if not _check_vfx_emissive(video_path, video_path.parent):
         warnings.append("vfx_emissive_check_failed")
-        if strict_vfx or phase >= 2:
+        if strict_vfx or is_phase2_or_higher(phase):
             return ValidationReport(valid=False, message="vfx emissive check failed", warnings=warnings)
     if not _check_mouth(report_path):
         return ValidationReport(valid=False, message="mouth movement missing", warnings=warnings)

@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 from app.core.paths import get_assets_root, get_output_root, get_repo_root
+from src.utils.phase import normalize_phase
 
 BASE_DIR = get_repo_root()
 OUTPUT_DIR = get_output_root()
@@ -158,10 +159,7 @@ try:
     PROOF_SECONDS = float(os.getenv("MONEYOS_PROOF_SECONDS", "15"))
 except ValueError:
     PROOF_SECONDS = 15.0
-try:
-    MONEYOS_PHASE = int(os.getenv("MONEYOS_PHASE", "1"))
-except ValueError:
-    MONEYOS_PHASE = 1
+MONEYOS_PHASE = normalize_phase(os.getenv("MONEYOS_PHASE"))
 STRICT_VFX = os.getenv("MONEYOS_STRICT_VFX", "0") == "1"
 try:
     VFX_EMISSION_STRENGTH = float(os.getenv("MONEYOS_VFX_EMISSION_STRENGTH", "50"))

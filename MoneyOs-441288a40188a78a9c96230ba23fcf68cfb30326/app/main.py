@@ -44,6 +44,7 @@ from app.core.visuals.anime_3d.render_pipeline import (
 )
 from app.core.pipeline import PipelineResult, run_pipeline
 from app.core.system_specs import get_system_specs
+from src.utils.phase import is_phase2_or_higher, normalize_phase
 
 app = FastAPI()
 
@@ -314,9 +315,9 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
             status_callback=_update,
             overrides=req.dict(exclude_none=True),
         )
-        phase = int(os.getenv("MONEYOS_PHASE", "1"))
+        phase = normalize_phase(os.getenv("MONEYOS_PHASE"))
         strict_vfx = os.getenv("MONEYOS_STRICT_VFX", "0") == "1"
-        if "vfx_emissive_check_failed" in result.warnings and not strict_vfx and phase < 2:
+        if "vfx_emissive_check_failed" in result.warnings and not strict_vfx and not is_phase2_or_higher(phase):
             status_text = "Complete (VFX skipped)"
         else:
             status_text = "Complete"
@@ -451,17 +452,19 @@ async def debug_status() -> JSONResponse:
     return JSONResponse(payload)
 
 
-def _resolve_phase_target_seconds() -> tuple[str, float]:
-    phase_env = os.getenv("MONEYOS_PHASE", "phase2").strip().lower()
+def _resolve_phase_target_seconds() -> tuple[str, float, str | None]:
+    raw_phase = os.getenv("MONEYOS_PHASE")
+    phase_env = normalize_phase(raw_phase)
     target_env = os.getenv("MONEYOS_TARGET_SECONDS")
+    default_seconds = 30.0 if phase_env in {"phase25", "production"} else 600.0
     if target_env:
         try:
             target_value = float(target_env)
         except ValueError:
-            target_value = 30.0 if phase_env in {"25", "phase25"} else 600.0
+            target_value = default_seconds
     else:
-        target_value = 30.0 if phase_env in {"25", "phase25"} else 600.0
-    return phase_env, target_value
+        target_value = default_seconds
+    return phase_env, target_value, raw_phase
 
 
 def _build_phase25_shot_plan(target_seconds: float) -> list[dict]:
@@ -498,15 +501,20 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
     from src.utils.win_paths import safe_join  # noqa: WPS433
 
     try:
-        phase_env, resolved_target = _resolve_phase_target_seconds()
+        phase_env, resolved_target, raw_phase = _resolve_phase_target_seconds()
         target_seconds = target_seconds or resolved_target
         clips = []
-        if phase_env in {"25", "phase25"}:
+        if phase_env in {"phase25", "production"}:
             plan = _build_phase25_shot_plan(target_seconds)
         else:
             plan = plan_episode(target_seconds)
         clips_expected = len(plan)
-        print(f"[PHASE] phase={phase_env} target_seconds={target_seconds:.2f}")
+        print(
+            "[PHASE] "
+            f"phase={phase_env} "
+            f"raw_phase={raw_phase or 'none'} "
+            f"target_seconds={target_seconds:.2f}"
+        )
         print(
             "[SHOT_PLAN] "
             f"shots={clips_expected} "
@@ -557,7 +565,7 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
         assemble_episode(clips, audio_path, output_path)
         print(f"[CONCAT] segments={len(clips)} output={output_path}")
         produced_seconds = get_video_duration_seconds(output_path)
-        if phase_env in {"25", "phase25"} and abs(produced_seconds - target_seconds) > 0.2:
+        if phase_env in {"phase25", "production"} and abs(produced_seconds - target_seconds) > 0.2:
             raise RuntimeError(
                 f"Episode duration mismatch: produced {produced_seconds:.2f}s, "
                 f"expected {target_seconds:.2f}s."
@@ -627,7 +635,7 @@ async def generate_anime_episode(
 @app.post("/jobs/anime-episode-10m-hybrid")
 async def generate_anime_episode_hybrid() -> JSONResponse:
     job_id = uuid.uuid4().hex
-    phase_env, resolved_target = _resolve_phase_target_seconds()
+    phase_env, resolved_target, _raw_phase = _resolve_phase_target_seconds()
     _set_status(
         job_id,
         "Queued hybrid episode",
@@ -639,6 +647,7 @@ async def generate_anime_episode_hybrid() -> JSONResponse:
             "phase": phase_env,
         },
     )
+    print(f"[STATUS] expected_seconds={resolved_target:.2f} phase={phase_env}")
     thread = threading.Thread(target=_run_hybrid_episode, args=(job_id, resolved_target), daemon=True)
     thread.start()
     return JSONResponse({"job_id": job_id, "queued": False, "endpoint": "anime-episode-10m-hybrid"})

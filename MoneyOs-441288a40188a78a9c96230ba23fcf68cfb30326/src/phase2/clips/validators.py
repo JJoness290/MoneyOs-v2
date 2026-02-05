@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageStat
 
+from src.utils.phase import normalize_phase
 from src.utils.win_paths import safe_join
 
 
@@ -145,11 +146,11 @@ def ensure_min_filesize(path: Path, min_bytes: int = 200_000) -> None:
     if duration <= 0:
         raise RuntimeError("MP4 too small")
     avg_kbps = (size_bytes * 8 / 1000 / duration) if duration > 0 else 0.0
-    phase_env = os.getenv("MONEYOS_PHASE", "phase2").strip().lower()
+    phase_env = normalize_phase(os.getenv("MONEYOS_PHASE"))
     render_preset = os.getenv("MONEYOS_RENDER_PRESET", "fast_proof").strip().lower()
     if render_preset == "fast_proof":
         phase_env = "phase2"
-    threshold_kbps = 600 if phase_env in {"phase2", "fast_proof"} else 2000
+    threshold_kbps = 2000 if phase_env in {"phase25", "production"} else 600
     encoder = "h264_nvenc" if os.getenv("MONEYOS_USE_GPU", "0") == "1" else "libx264"
     result_label = "PASS" if avg_kbps >= threshold_kbps else "FAIL"
     print(
