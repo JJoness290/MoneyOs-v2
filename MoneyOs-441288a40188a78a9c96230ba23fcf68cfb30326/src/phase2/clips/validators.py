@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -141,10 +142,23 @@ def ensure_min_filesize(path: Path, min_bytes: int = 200_000) -> None:
             duration = float(result.stdout.strip() or 0)
         except ValueError:
             duration = 0.0
+    if duration <= 0:
+        raise RuntimeError("MP4 too small")
     avg_kbps = (size_bytes * 8 / 1000 / duration) if duration > 0 else 0.0
+    phase_env = os.getenv("MONEYOS_PHASE", "phase2").strip().lower()
+    render_preset = os.getenv("MONEYOS_RENDER_PRESET", "fast_proof").strip().lower()
+    if render_preset == "fast_proof":
+        phase_env = "phase2"
+    threshold_kbps = 600 if phase_env in {"phase2", "fast_proof"} else 2000
+    encoder = "h264_nvenc" if os.getenv("MONEYOS_USE_GPU", "0") == "1" else "libx264"
+    result_label = "PASS" if avg_kbps >= threshold_kbps else "FAIL"
     print(
         "[MP4_VALIDATOR] "
-        f"size_bytes={size_bytes} duration={duration:.2f} avg_kbps={avg_kbps:.2f} encoder=libx264"
+        f"phase={phase_env} encoder={encoder} duration={duration:.2f} "
+        f"size_bytes={size_bytes} avg_kbps={avg_kbps:.2f} "
+        f"threshold_kbps={threshold_kbps} result={result_label}"
     )
-    if size_bytes < min_bytes:
+    if avg_kbps < 300:
+        raise RuntimeError("MP4 too small")
+    if avg_kbps < threshold_kbps:
         raise RuntimeError("MP4 too small")

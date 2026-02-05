@@ -118,6 +118,29 @@ class Anime3DRequest(BaseModel):
 def bootstrap_dependencies() -> None:
     ensure_dependencies()
     start_autopilot()
+    try:
+        from app.core.visuals.ffmpeg_utils import select_video_encoder  # noqa: WPS433
+        from app.config import performance  # noqa: WPS433
+
+        cuda_available = False
+        try:
+            import torch  # noqa: WPS433
+
+            cuda_available = torch.cuda.is_available()
+        except Exception:  # noqa: BLE001
+            cuda_available = False
+        encoder_args, encoder = select_video_encoder()
+        _ = encoder_args
+        print(
+            "[GPU] "
+            f"cuda_available={cuda_available} "
+            f"MONEYOS_USE_GPU={os.getenv('MONEYOS_USE_GPU', 'auto')} "
+            f"encoder_selected={encoder} "
+            f"ffmpeg_threads={performance.ffmpeg_threads()} "
+            f"ram_mode={performance.ram_mode()}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[GPU] status unavailable: {exc}")
 
 
 def _format_mmss(seconds: float) -> str:

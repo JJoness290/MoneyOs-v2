@@ -239,8 +239,19 @@ def encoder_self_check() -> dict[str, str]:
     return {"encoder": "libx264", "mode": "software", "fallback": "libx264"}
 
 
+def _cuda_available() -> bool:
+    try:
+        import torch  # noqa: WPS433
+
+        return torch.cuda.is_available()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def select_video_encoder() -> tuple[list[str], str]:
-    use_gpu = os.getenv("MONEYOS_USE_GPU", "0") == "1"
+    env_use_gpu = os.getenv("MONEYOS_USE_GPU")
+    use_gpu = env_use_gpu == "1" if env_use_gpu is not None else _cuda_available()
+    cuda_available = _cuda_available()
     if use_gpu and has_nvenc():
         mode = _nvenc_quality_mode()
         args = _nvenc_args_for_mode(mode)
@@ -257,7 +268,10 @@ def select_video_encoder() -> tuple[list[str], str]:
         print(f"[ResourceGuard] Encoder: {encoder} mode={mode} args:", " ".join(args))
         return (args, encoder)
     if use_gpu:
-        print("[FFmpeg] NVENC not available; falling back to libx264")
+        warning = "[FFmpeg] NVENC not available; falling back to libx264"
+        if cuda_available:
+            warning += " (cuda_available=true)"
+        print(warning)
     args = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "veryfast"]
     render_preset = os.getenv("MONEYOS_RENDER_PRESET", "fast_proof").strip().lower()
     if render_preset == "fast_proof":
