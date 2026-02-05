@@ -82,15 +82,26 @@ def ensure_motion_present(path: Path, min_diff: float = 5.0) -> None:
     if len(frames) < 2:
         raise RuntimeError("Insufficient frames for motion validation")
     previous = None
+    max_score = 0.0
     for frame in frames:
         with Image.open(frame) as image:
             current = image.convert("L")
             if previous is not None:
                 diff = ImageChops.difference(previous, current)
                 stats = ImageStat.Stat(diff)
-                if stats.mean[0] >= min_diff:
+                score = stats.mean[0]
+                max_score = max(max_score, score)
+                if score >= min_diff:
+                    print(
+                        "[MOTION_VALIDATOR] "
+                        f"score={score:.4f} threshold={min_diff:.4f} source=frame_diff"
+                    )
                     return
             previous = current
+    print(
+        "[MOTION_VALIDATOR] "
+        f"score={max_score:.4f} threshold={min_diff:.4f} source=frame_diff"
+    )
     raise RuntimeError("Motion not detected in sampled frames")
 
 

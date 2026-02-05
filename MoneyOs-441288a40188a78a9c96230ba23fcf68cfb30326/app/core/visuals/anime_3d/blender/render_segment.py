@@ -597,7 +597,7 @@ def _animate(
                 jaw_bone = hero_armature.pose.bones[name]
                 break
 
-    if camera and not fast_proof and mode != "static_pose":
+    if camera and camera.data:
         camera.data.lens = 18
     for frame in range(frame_count):
         bpy.context.scene.frame_set(frame + 1)
@@ -609,10 +609,10 @@ def _animate(
             hero_body = objects["hero_body"]
             hero_body.rotation_euler.z = math.sin(t * 2.0) * 0.2
             hero_body.keyframe_insert(data_path="rotation_euler", index=2)
-        if camera and not fast_proof and mode != "static_pose":
-            camera.location.x = 4 + math.sin(t * 0.8) * 0.4
-            camera.location.y = -6 + math.cos(t * 0.7) * 0.4
-            camera.location.z = 2.5 + math.sin(t * 1.2) * 0.2
+        if camera:
+            camera.location.x = camera.location.x + math.sin(t * 0.8) * 0.05
+            camera.location.y = camera.location.y + math.cos(t * 0.7) * 0.05
+            camera.location.z = camera.location.z + math.sin(t * 1.2) * 0.03
             camera.keyframe_insert(data_path="location", index=-1)
         if jaw_bone:
             jaw_bone.rotation_euler.x = -envelope[frame] * 0.6
@@ -694,6 +694,72 @@ def _apply_vfx_material(
     else:
         plane.data.materials.append(material)
     print("[VFX] emissive material applied:", image_path.name, "strength", emission_strength)
+
+
+def _ensure_minimum_motion(
+    objects: dict[str, bpy.types.Object | None],
+    scene: bpy.types.Scene,
+    duration_s: float,
+    fps: int,
+) -> dict[str, bool]:
+    frame_start = 1
+    frame_end = max(2, int(math.ceil(duration_s * fps)))
+    camera_motion = False
+    character_motion = False
+    object_motion = False
+    light_motion = False
+    camera = objects.get("camera")
+    if camera:
+        scene.frame_set(frame_start)
+        camera.location.x += 0.15
+        camera.location.y += 0.1
+        camera.keyframe_insert(data_path="location")
+        scene.frame_set(frame_end)
+        camera.location.x -= 0.3
+        camera.location.y -= 0.2
+        camera.keyframe_insert(data_path="location")
+        camera_motion = True
+    hero = objects.get("hero_armature") or objects.get("hero_body")
+    if hero:
+        scene.frame_set(frame_start)
+        hero.rotation_euler.z += 0.1
+        hero.keyframe_insert(data_path="rotation_euler", index=2)
+        scene.frame_set(frame_end)
+        hero.rotation_euler.z -= 0.2
+        hero.keyframe_insert(data_path="rotation_euler", index=2)
+        character_motion = True
+    if not character_motion:
+        ground = None
+        for obj in scene.objects:
+            if obj.get("mo_role") == "ground":
+                ground = obj
+                break
+        if ground:
+            scene.frame_set(frame_start)
+            ground.scale = ground.scale * 1.0
+            ground.keyframe_insert(data_path="scale")
+            scene.frame_set(frame_end)
+            ground.scale = ground.scale * 1.03
+            ground.keyframe_insert(data_path="scale")
+            object_motion = True
+    for light in [obj for obj in scene.objects if obj.type == "LIGHT"]:
+        scene.frame_set(frame_start)
+        light.data.energy = light.data.energy * 0.9
+        light.data.keyframe_insert(data_path="energy")
+        scene.frame_set(frame_end)
+        light.data.energy = light.data.energy * 1.1
+        light.data.keyframe_insert(data_path="energy")
+        light_motion = True
+        break
+    if not any([camera_motion, character_motion, object_motion, light_motion]):
+        raise RuntimeError("No motion sources available for render.")
+    scene.frame_set(frame_start)
+    return {
+        "camera": camera_motion,
+        "character": character_motion,
+        "object": object_motion,
+        "light": light_motion,
+    }
 
 
 def _add_vfx(
@@ -909,8 +975,6 @@ def main() -> None:
         scene.render.resolution_y = 720
         scene.render.resolution_percentage = 100
         scene.render.fps = 30
-        proof_seconds = max(5.0, args.proof_seconds)
-        total_frames = int(round(proof_seconds * scene.render.fps))
     else:
         scene.render.engine = "BLENDER_EEVEE" if args.engine == "eevee" else "CYCLES"
         scene.render.fps = args.fps
@@ -976,6 +1040,12 @@ def main() -> None:
     if args.postfx == "on" and not args.fast_proof:
         _setup_compositor(scene, warnings)
     envelope = _load_rms_envelope(Path(args.audio) if args.audio else Path(), args.fps, scene.frame_end)
+    motion_info = _ensure_minimum_motion(objects, scene, args.duration, args.fps)
+    print(
+        "[MOTION] camera_motion="
+        f"{motion_info['camera']} character_motion={motion_info['character']} "
+        f"object_motion={motion_info['object']} light_motion={motion_info['light']}"
+    )
     fast_proof_like = args.fast_proof or phase15
     mouth_keyframes = _animate(
         objects,
