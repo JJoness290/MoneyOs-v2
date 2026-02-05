@@ -126,5 +126,25 @@ def ensure_mp4_duration_close(path: Path, seconds: float, tolerance: float = 0.0
 
 
 def ensure_min_filesize(path: Path, min_bytes: int = 200_000) -> None:
-    if not path.exists() or path.stat().st_size < min_bytes:
+    if not path.exists():
+        raise RuntimeError("MP4 too small")
+    size_bytes = path.stat().st_size
+    duration = 0.0
+    if shutil.which("ffprobe"):
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        try:
+            duration = float(result.stdout.strip() or 0)
+        except ValueError:
+            duration = 0.0
+    avg_kbps = (size_bytes * 8 / 1000 / duration) if duration > 0 else 0.0
+    print(
+        "[MP4_VALIDATOR] "
+        f"size_bytes={size_bytes} duration={duration:.2f} avg_kbps={avg_kbps:.2f} encoder=libx264"
+    )
+    if size_bytes < min_bytes:
         raise RuntimeError("MP4 too small")

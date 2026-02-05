@@ -259,6 +259,10 @@ def select_video_encoder() -> tuple[list[str], str]:
     if use_gpu:
         print("[FFmpeg] NVENC not available; falling back to libx264")
     args = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "veryfast"]
+    render_preset = os.getenv("MONEYOS_RENDER_PRESET", "fast_proof").strip().lower()
+    if render_preset == "fast_proof":
+        args += ["-minrate", "2M", "-maxrate", "4M", "-bufsize", "4M"]
+        print("[ENC] libx264 entropy floor enabled (fast_proof)")
     print("[ResourceGuard] Encoder: libx264 args:", " ".join(args))
     return (args, "libx264")
 

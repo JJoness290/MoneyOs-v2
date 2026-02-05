@@ -336,11 +336,19 @@ def _ensure_ground_plane() -> bpy.types.Object:
     material = bpy.data.materials.new(name="GroundPlaneMaterial")
     material.use_nodes = True
     nodes = material.node_tree.nodes
+    links = material.node_tree.links
     nodes.clear()
     output = nodes.new(type="ShaderNodeOutputMaterial")
-    diffuse = nodes.new(type="ShaderNodeBsdfDiffuse")
-    diffuse.inputs["Color"].default_value = (0.35, 0.36, 0.38, 1.0)
-    material.node_tree.links.new(diffuse.outputs["BSDF"], output.inputs["Surface"])
+    bsdf = nodes.new(type="ShaderNodeBsdfPrincipled")
+    noise = nodes.new(type="ShaderNodeTexNoise")
+    ramp = nodes.new(type="ShaderNodeValToRGB")
+    noise.inputs["Scale"].default_value = 6.0
+    ramp.color_ramp.elements[0].color = (0.2, 0.22, 0.26, 1.0)
+    ramp.color_ramp.elements[1].color = (0.55, 0.58, 0.62, 1.0)
+    links.new(noise.outputs["Fac"], ramp.inputs["Fac"])
+    links.new(ramp.outputs["Color"], bsdf.inputs["Base Color"])
+    bsdf.inputs["Roughness"].default_value = 0.7
+    links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
     if plane.data.materials:
         plane.data.materials[0] = material
     else:
@@ -369,6 +377,59 @@ def _ensure_light_rig() -> list[bpy.types.Object]:
     _safe_set(rim.data, "use_shadow", False)
     lights.append(rim)
     return lights
+
+
+def _ensure_visual_density(scene: bpy.types.Scene, duration_s: float, fps: int) -> None:
+    frame_start = 1
+    frame_end = max(2, int(math.ceil(duration_s * fps)))
+    target = next(
+        (obj for obj in scene.objects if obj.type == "MESH" and obj.get("mo_role") == "ground"),
+        None,
+    )
+    if target is None:
+        target = next((obj for obj in scene.objects if obj.type == "MESH"), None)
+    if target:
+        material = bpy.data.materials.new(name="Mo_Density")
+        material.use_nodes = True
+        nodes = material.node_tree.nodes
+        links = material.node_tree.links
+        nodes.clear()
+        output = nodes.new(type="ShaderNodeOutputMaterial")
+        bsdf = nodes.new(type="ShaderNodeBsdfPrincipled")
+        noise = nodes.new(type="ShaderNodeTexNoise")
+        ramp = nodes.new(type="ShaderNodeValToRGB")
+        mapping = nodes.new(type="ShaderNodeMapping")
+        texcoord = nodes.new(type="ShaderNodeTexCoord")
+        noise.inputs["Scale"].default_value = 8.0
+        links.new(texcoord.outputs["Object"], mapping.inputs["Vector"])
+        links.new(mapping.outputs["Vector"], noise.inputs["Vector"])
+        links.new(noise.outputs["Fac"], ramp.inputs["Fac"])
+        ramp.color_ramp.elements[0].color = (0.1, 0.12, 0.18, 1.0)
+        ramp.color_ramp.elements[1].color = (0.55, 0.62, 0.7, 1.0)
+        links.new(ramp.outputs["Color"], bsdf.inputs["Base Color"])
+        bsdf.inputs["Roughness"].default_value = 0.6
+        links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
+        scene.frame_set(frame_start)
+        noise.inputs["Scale"].default_value = 8.0
+        noise.inputs["Scale"].keyframe_insert(data_path="default_value")
+        scene.frame_set(frame_end)
+        noise.inputs["Scale"].default_value = 12.0
+        noise.inputs["Scale"].keyframe_insert(data_path="default_value")
+        if target.data.materials:
+            target.data.materials[0] = material
+        else:
+            target.data.materials.append(material)
+    bpy.ops.object.light_add(type="AREA", location=(2.0, -3.0, 4.0))
+    extra_light = bpy.context.active_object
+    extra_light.data.energy = 350.0
+    scene.frame_set(frame_start)
+    extra_light.data.energy = 320.0
+    extra_light.data.keyframe_insert(data_path="energy")
+    scene.frame_set(frame_end)
+    extra_light.data.energy = 380.0
+    extra_light.data.keyframe_insert(data_path="energy")
+    scene.frame_set(frame_start)
+    print("[DENSITY] applied procedural noise material and animated light")
 
 
 def _subject_meshes() -> list[bpy.types.Object]:
@@ -1021,6 +1082,7 @@ def main() -> None:
     print(f"[PHASE2] env={args.environment} character={args.character_asset or 'none'} preset={preset}")
     _build_environment_template(args.environment)
     objects = _create_scene(assets_dir, args.asset_mode)
+    _ensure_visual_density(scene, args.duration, args.fps)
     character_meshes = _load_character_asset(assets_dir, args.character_asset, warnings)
     if character_meshes:
         for obj in character_meshes:
