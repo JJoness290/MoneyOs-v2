@@ -408,34 +408,30 @@ def render_anime_3d_60s(
             f"Stdout (tail):\n{tail_stdout}\n"
             f"Stderr (tail):\n{tail_stderr}"
         )
-    if fast_proof:
-        if not video_path.exists() and not video_raw_path.exists():
-            raise RuntimeError("segment.mp4 missing after fast proof render")
-    else:
-        frame_list = sorted(frames_dir.glob("frame_*.png"))
-        if not frame_list:
-            frame_list = sorted(frames_dir.glob("*.png"))
-        if len(frame_list) < 2:
-            contents = "\n".join(path.name for path in list(frames_dir.glob("*"))[:200])
-            tail_stdout = stdout_text[-2000:]
-            tail_stderr = stderr_text[-2000:]
-            raise RuntimeError(
-                "No frames rendered.\n"
-                f"Command: {' '.join(cmd)}\n"
-                f"Frames dir: {frames_dir}\n"
-                f"Contents:\n{contents}\n"
-                f"Stdout (tail):\n{tail_stdout}\n"
-                f"Stderr (tail):\n{tail_stderr}"
-            )
-    _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
-    if not fast_proof:
-        _assemble_frames_video(
-            frames_dir,
-            fps,
-            audio_path,
-            video_path,
-            warnings,
+    frame_list = sorted(frames_dir.glob("frame_*.png"))
+    if not frame_list:
+        frame_list = sorted(frames_dir.glob("*.png"))
+    if len(frame_list) < 2:
+        contents = "\n".join(path.name for path in list(frames_dir.glob("*"))[:200])
+        tail_stdout = stdout_text[-2000:]
+        tail_stderr = stderr_text[-2000:]
+        raise RuntimeError(
+            "No frames rendered.\n"
+            f"Command: {' '.join(cmd)}\n"
+            f"Frames dir: {frames_dir}\n"
+            f"Contents:\n{contents}\n"
+            f"Stdout (tail):\n{tail_stdout}\n"
+            f"Stderr (tail):\n{tail_stderr}"
         )
+    _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
+    encode_audio = audio_path if not fast_proof else Path()
+    _assemble_frames_video(
+        frames_dir,
+        fps,
+        encode_audio,
+        video_path,
+        warnings,
+    )
     if not video_path.exists() and video_raw_path.exists():
         video_path = video_raw_path
     if not video_path.exists():
@@ -447,7 +443,8 @@ def render_anime_3d_60s(
     if not validation.valid:
         warnings.append(validation.message)
         _update_report_warnings(report_path, warnings)
-        raise RuntimeError(validation.message)
+        if not fast_proof:
+            raise RuntimeError(validation.message)
     _update_report_warnings(report_path, warnings)
     return Anime3DResult(
         output_dir=output_dir,
