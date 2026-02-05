@@ -267,11 +267,28 @@ def render_anime_3d_60s(
     overrides: dict | None = None,
 ) -> Anime3DResult:
     warnings: list[str] = []
-    fast_proof = os.getenv("MONEYOS_FAST_PROOF", "0") == "1"
+    render_preset = os.getenv("MONEYOS_RENDER_PRESET", "fast_proof").strip().lower()
+    if render_preset not in {"fast_proof", "phase15_quality"}:
+        render_preset = "fast_proof"
+    fast_proof = render_preset == "fast_proof"
+    phase15 = render_preset == "phase15_quality"
     try:
         proof_seconds = float(os.getenv("MONEYOS_PROOF_SECONDS", "15"))
     except ValueError:
         proof_seconds = 15.0
+    try:
+        phase15_samples = int(os.getenv("MONEYOS_PHASE15_SAMPLES", "128"))
+    except ValueError:
+        phase15_samples = 128
+    try:
+        phase15_bounces = int(os.getenv("MONEYOS_PHASE15_BOUNCES", "6"))
+    except ValueError:
+        phase15_bounces = 6
+    try:
+        phase15_tile = int(os.getenv("MONEYOS_PHASE15_TILE", "256"))
+    except ValueError:
+        phase15_tile = 256
+    phase15_res = os.getenv("MONEYOS_PHASE15_RES", "1920x1080")
     duration_s = float(ANIME3D_SECONDS)
     fps = ANIME3D_FPS
     res = f"{ANIME3D_RESOLUTION[0]}x{ANIME3D_RESOLUTION[1]}"
@@ -303,6 +320,12 @@ def render_anime_3d_60s(
         vfx_scale = float(overrides["vfx_scale"])
     if overrides.get("vfx_screen_coverage") is not None:
         vfx_screen_coverage = float(overrides["vfx_screen_coverage"])
+    if phase15 and "res" not in overrides:
+        res = phase15_res
+    if phase15 and "fps" not in overrides:
+        fps = 30
+    if phase15 and "duration_seconds" not in overrides:
+        duration_s = 15.0
     if fast_proof:
         duration_s = max(5.0, proof_seconds)
         res = "1280x720"
@@ -333,6 +356,10 @@ def render_anime_3d_60s(
         str(get_assets_root()),
         "--asset-mode",
         ANIME3D_ASSET_MODE,
+        "--engine" if phase15 else "",
+        "cycles" if phase15 else "",
+        "--render-preset",
+        render_preset,
         "--style-preset",
         style_preset,
         "--outline-mode",
@@ -341,6 +368,14 @@ def render_anime_3d_60s(
         postfx,
         "--quality",
         quality,
+        "--phase15-samples",
+        str(phase15_samples),
+        "--phase15-bounces",
+        str(phase15_bounces),
+        "--phase15-res",
+        res,
+        "--phase15-tile",
+        str(phase15_tile),
         "--res",
         res,
         "--duration",

@@ -18,6 +18,7 @@ def _parse_args() -> argparse.Namespace:
     else:
         argv = []
     parser = argparse.ArgumentParser()
+    parser.add_argument("--render-preset", default="fast_proof")
     parser.add_argument("--engine", default="eevee")
     parser.add_argument("--gpu", default="1")
     parser.add_argument("--audio", default=None)
@@ -37,6 +38,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vfx-screen-coverage", type=float, default=0.35)
     parser.add_argument("--fast-proof", action="store_true")
     parser.add_argument("--proof-seconds", type=float, default=15.0)
+    parser.add_argument("--phase15-samples", type=int, default=128)
+    parser.add_argument("--phase15-bounces", type=int, default=6)
+    parser.add_argument("--phase15-res", default="1920x1080")
+    parser.add_argument("--phase15-tile", type=int, default=256)
     return parser.parse_args(argv)
 
 
@@ -678,6 +683,51 @@ def _configure_eevee(scene: bpy.types.Scene, quality: str) -> None:
         pass
 
 
+def _configure_phase15_cycles(scene: bpy.types.Scene, args: argparse.Namespace) -> dict[str, object]:
+    scene.render.engine = "CYCLES"
+    cycles_prefs = bpy.context.preferences.addons.get("cycles")
+    if cycles_prefs is None:
+        raise RuntimeError("Cycles addon not available; cannot configure GPU rendering")
+    prefs = cycles_prefs.preferences
+    try:
+        prefs.get_devices()
+    except Exception:  # noqa: BLE001
+        pass
+    device_type = None
+    for candidate in ("OPTIX", "CUDA"):
+        if any(device.type == candidate for device in prefs.devices):
+            device_type = candidate
+            break
+    if device_type is None:
+        raise RuntimeError("No GPU devices available")
+    prefs.compute_device_type = device_type
+    for device in prefs.devices:
+        device.use = device.type == device_type
+    if not any(device.use for device in prefs.devices):
+        raise RuntimeError("No GPU devices available")
+    scene.cycles.device = "GPU"
+    _safe_set(scene.cycles, "samples", args.phase15_samples)
+    _safe_set(scene.cycles, "use_adaptive_sampling", True)
+    _safe_set(scene.cycles, "adaptive_threshold", 0.01)
+    _safe_set(scene.cycles, "max_bounces", args.phase15_bounces)
+    _safe_set(scene.cycles, "caustics_reflective", False)
+    _safe_set(scene.cycles, "caustics_refractive", False)
+    _safe_set(scene.cycles, "use_denoising", True)
+    _safe_set(scene.cycles, "denoiser", "OPTIX")
+    _safe_set(scene.render, "use_persistent_data", True)
+    _safe_set(scene.render, "use_motion_blur", False)
+    _safe_set(scene.view_settings, "exposure", 0.9)
+    _safe_set(scene.view_settings, "gamma", 1.0)
+    if hasattr(scene.cycles, "tile_size"):
+        _safe_set(scene.cycles, "tile_size", args.phase15_tile)
+    return {
+        "device": device_type.lower(),
+        "samples": args.phase15_samples,
+        "bounces": args.phase15_bounces,
+        "denoise": True,
+    }
+
+
 def main() -> None:
     args = _parse_args()
     print(bpy.app.version_string)
@@ -704,6 +754,9 @@ def main() -> None:
     _clear_scene()
     scene = bpy.context.scene
     warnings: list[str] = []
+    preset = args.render_preset
+    phase15 = preset == "phase15_quality"
+    phase15_info: dict[str, object] | None = None
     if args.fast_proof:
         engine = "BLENDER_EEVEE_NEXT"
         try:
@@ -744,11 +797,20 @@ def main() -> None:
     scene.render.use_freestyle = args.outline_mode == "freestyle"
     if hasattr(scene.render, "line_thickness"):
         scene.render.line_thickness = 1.5
-    if hasattr(scene, "eevee"):
+    if phase15:
+        phase15_info = _configure_phase15_cycles(scene, args)
+        print(
+            "[PHASE15] engine=cycles "
+            f"device={phase15_info['device']} "
+            f"samples={phase15_info['samples']} "
+            f"res={scene.render.resolution_x}x{scene.render.resolution_y} "
+            f"fps={scene.render.fps} duration={args.duration:.2f}"
+        )
+    elif hasattr(scene, "eevee"):
         _configure_eevee(scene, args.quality)
 
     objects = _create_scene(assets_dir, args.asset_mode)
-    if args.fast_proof:
+    if args.fast_proof or phase15:
         _setup_fast_proof_scene(scene, objects.get("camera"))
     _add_vfx(
         assets_dir,
@@ -764,26 +826,30 @@ def main() -> None:
     if args.postfx == "on" and not args.fast_proof:
         _setup_compositor(scene, warnings)
     envelope = _load_rms_envelope(Path(args.audio) if args.audio else Path(), args.fps, scene.frame_end)
-    mouth_keyframes = _animate(objects, envelope, args.fps, assets_dir, args.asset_mode, args.fast_proof)
+    fast_proof_like = args.fast_proof or phase15
+    mouth_keyframes = _animate(objects, envelope, args.fps, assets_dir, args.asset_mode, fast_proof_like)
 
     bpy.ops.render.render(animation=True, write_still=False)
 
-    report_path.write_text(
-        json.dumps(
-            {
-                "mouth_keyframes": mouth_keyframes,
-                "frame_end": scene.frame_end,
-                "fps": scene.render.fps,
-                "vfx_emission_strength": args.vfx_emission_strength,
-                "vfx_scale": args.vfx_scale,
-                "vfx_screen_coverage": args.vfx_screen_coverage,
-                "warnings": warnings,
-                "parsed_args": vars(args),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    render_report = {
+        "mouth_keyframes": mouth_keyframes,
+        "frame_end": scene.frame_end,
+        "fps": scene.render.fps,
+        "vfx_emission_strength": args.vfx_emission_strength,
+        "vfx_scale": args.vfx_scale,
+        "vfx_screen_coverage": args.vfx_screen_coverage,
+        "warnings": warnings,
+        "parsed_args": vars(args),
+        "preset": preset,
+        "engine": scene.render.engine,
+        "device": phase15_info["device"] if phase15_info else None,
+        "samples": phase15_info["samples"] if phase15_info else None,
+        "bounces": phase15_info["bounces"] if phase15_info else None,
+        "denoise": phase15_info["denoise"] if phase15_info else None,
+        "res": f"{scene.render.resolution_x}x{scene.render.resolution_y}",
+        "duration": args.duration,
+    }
+    report_path.write_text(json.dumps(render_report, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":
