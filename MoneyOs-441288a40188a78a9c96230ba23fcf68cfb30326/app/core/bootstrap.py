@@ -63,7 +63,11 @@ def ensure_dependencies() -> None:
         _log("All required packages already installed.")
 
     if not _has_module("torch"):
-        _log(f"GPU check: cuda_available=False ffmpeg_nvenc={has_nvenc()}")
+        try:
+            nvenc = has_nvenc()
+        except Exception as exc:  # noqa: BLE001
+            nvenc = f"error={exc}"
+        _log(f"GPU check: cuda_available=False ffmpeg_nvenc={nvenc}")
         _log(
             "Torch is not installed. Install it manually from https://pytorch.org/get-started/locally/ "
             "to enable anime visuals."
@@ -76,7 +80,11 @@ def ensure_dependencies() -> None:
             f"MONEYOS_NVENC_MODE={os.getenv('MONEYOS_NVENC_MODE', 'cq')} "
             f"MONEYOS_RAM_MODE={performance.ram_mode()}"
         )
-        _log(f"Encoder check: {encoder_self_check()}")
+        try:
+            encoder_status = encoder_self_check()
+        except Exception as exc:  # noqa: BLE001
+            encoder_status = f"error={exc}"
+        _log(f"Encoder check: {encoder_status}")
         return
     _log("Torch already installed.")
     import torch  # noqa: WPS433
@@ -94,7 +102,11 @@ def ensure_dependencies() -> None:
         f"cuda_available={cuda_available} "
         f"gpu={gpu_name}"
     )
-    _log(f"GPU check: cuda_available={cuda_available} ffmpeg_nvenc={has_nvenc()}")
+    try:
+        nvenc = has_nvenc()
+    except Exception as exc:  # noqa: BLE001
+        nvenc = f"error={exc}"
+    _log(f"GPU check: cuda_available={cuda_available} ffmpeg_nvenc={nvenc}")
     if os.getenv("MONEYOS_USE_GPU", "0") == "1" and not cuda_available:
         _log(
             "MONEYOS_USE_GPU=1 but CUDA is unavailable. Install a CUDA-enabled torch build "
@@ -108,4 +120,8 @@ def ensure_dependencies() -> None:
         f"MONEYOS_NVENC_MODE={os.getenv('MONEYOS_NVENC_MODE', 'cq')} "
         f"MONEYOS_RAM_MODE={performance.ram_mode()}"
     )
-    _log(f"Encoder check: {encoder_self_check()}")
+    try:
+        encoder_status = encoder_self_check()
+    except Exception as exc:  # noqa: BLE001
+        encoder_status = f"error={exc}"
+    _log(f"Encoder check: {encoder_status}")

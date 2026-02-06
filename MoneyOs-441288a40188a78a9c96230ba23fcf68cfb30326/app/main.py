@@ -147,6 +147,8 @@ def bootstrap_dependencies() -> None:
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[GPU] status unavailable: {exc}")
+    web_url = os.getenv("MONEYOS_WEB_URL", "http://127.0.0.1:8000")
+    print(f"[WEB] MoneyOS web running on {web_url}")
 
 
 def _format_mmss(seconds: float) -> str:
@@ -413,7 +415,18 @@ async def system_specs() -> JSONResponse:
 
 @app.get("/health")
 async def health() -> JSONResponse:
-    return JSONResponse({"status": "ok"})
+    return JSONResponse(
+        {
+            "status": "ok",
+            "version": os.getenv("MONEYOS_VERSION", "dev"),
+            "visual_mode": VISUAL_MODE,
+            "env_flags": {
+                "MONEYOS_USE_GPU": os.getenv("MONEYOS_USE_GPU", "auto"),
+                "MONEYOS_ANIME3D_FORCE_GPU": os.getenv("MONEYOS_ANIME3D_FORCE_GPU", "1"),
+                "MONEYOS_ANIME3D_QUALITY": os.getenv("MONEYOS_ANIME3D_QUALITY", "1"),
+            },
+        }
+    )
 
 
 @app.get("/debug/status")
