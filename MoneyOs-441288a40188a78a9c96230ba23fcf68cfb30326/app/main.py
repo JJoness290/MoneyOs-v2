@@ -8,7 +8,7 @@ import uuid
 import hashlib
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
@@ -149,6 +149,13 @@ def _format_mmss(seconds: float) -> str:
     total_seconds = int(round(seconds))
     minutes, secs = divmod(total_seconds, 60)
     return f"{minutes:02d}:{secs:02d}"
+
+
+def compute_clip_id(cache_payload: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    canonical = json.dumps(cache_payload, sort_keys=True, separators=(",", ":"))
+    cache_hash = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
+    clip_id = f"c_{cache_hash}"
+    return clip_id, cache_payload
 
 
 def _load_perf_history() -> dict:
@@ -337,12 +344,7 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
 
 
 def _run_anime_3d_clip(job_id: str, req: Anime3DRequest) -> None:
-    from src.phase2.clips.clip_generator import (  # noqa: WPS433
-        compute_clip_id,
-        generate_clip_with_telemetry,
-        md5_file,
-        write_clip_meta,
-    )
+    from src.phase2.clips.clip_generator import generate_clip_with_telemetry  # noqa: WPS433
 
     try:
         clip_path, telemetry = generate_clip_with_telemetry(
