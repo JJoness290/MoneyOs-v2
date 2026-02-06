@@ -7,7 +7,10 @@ from pathlib import Path
 
 
 def _run(cmd: list[str]) -> tuple[int, str]:
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        return 127, f"FileNotFoundError: {exc}"
     return result.returncode, (result.stdout or "") + (result.stderr or "")
 
 
@@ -22,7 +25,18 @@ def detect_ffmpeg() -> dict[str, object]:
 
 
 def detect_blender() -> dict[str, object]:
-    code, output = _run(["blender", "--version"])
+    blender_path = None
+    for env_key in ("BLENDER_BINARY", "BLENDER_PATH"):
+        env_value = os.getenv(env_key)
+        if env_value and Path(env_value).exists():
+            blender_path = env_value
+            break
+    if blender_path is None:
+        default_path = Path(r"C:\Program Files\Blender Foundation\Blender 5.0\blender.exe")
+        if default_path.exists():
+            blender_path = str(default_path)
+    command = [blender_path, "--version"] if blender_path else ["blender", "--version"]
+    code, output = _run(command)
     if code != 0:
         return {"available": False, "error": output.strip()}
     version = output.splitlines()[0] if output else ""
