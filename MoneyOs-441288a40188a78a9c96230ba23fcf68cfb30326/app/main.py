@@ -640,7 +640,8 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                 final_mp4_path = Path(final_mp4_path)
                 if not final_mp4_path.exists():
                     raise RuntimeError(f"Missing rendered clip for shot_index={index}: {final_mp4_path}")
-                clip_md5 = md5_file(str(final_mp4_path))
+                shutil.copy2(str(final_mp4_path), str(clip_path))
+                clip_md5 = md5_file(str(clip_path))
                 assert isinstance(clip_md5, str) and clip_md5
                 if clip_md5 in seen_md5:
                     attempts += 1
@@ -651,19 +652,20 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                     )
                     continue
                 seen_md5.add(clip_md5)
-                if final_mp4_path.resolve() != clip_path.resolve():
-                    shutil.copy2(final_mp4_path, clip_path)
                 meta = {
+                    "phase": "p2.5",
                     "clip_id": clip_id,
                     "shot_index": index,
                     "seed": seed_value,
-                    "duration_s": duration_s,
-                    "prompt": beat.get("prompt") or beat.get("text") or f"{environment}:{mode}",
+                    "duration_s": float(beat.get("seconds", 0) or duration_s),
+                    "prompt": beat.get("prompt") or beat.get("text") or "",
                     "clip_md5": clip_md5,
                     "source_final_path": str(final_mp4_path),
                     "cache_payload": cache_payload,
                 }
-                (clip_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+                meta_path = clip_dir / "meta.json"
+                meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+                print(f"[PHASE25_CLIP] clip={clip_path} meta={meta_path} md5={clip_md5}")
                 accepted.append({"clip_id": clip_id, "clip_path": str(clip_path)})
                 clips.append(clip_path)
                 print(
