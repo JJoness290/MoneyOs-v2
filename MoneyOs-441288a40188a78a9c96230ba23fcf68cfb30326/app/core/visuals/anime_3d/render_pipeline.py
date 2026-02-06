@@ -302,6 +302,10 @@ def render_anime_3d_60s(
     environment = env_template
     character_asset = None
     mode = "default"
+    seed_value: int | None = None
+    action = None
+    camera_preset = None
+    start_frame = None
     disable_overlays = True
     overrides = overrides or {}
     if overrides.get("render_preset"):
@@ -316,6 +320,14 @@ def render_anime_3d_60s(
         character_asset = str(overrides["character_asset"])
     if overrides.get("mode"):
         mode = str(overrides["mode"]).strip().lower()
+    if overrides.get("seed") is not None:
+        seed_value = int(overrides["seed"])
+    if overrides.get("action"):
+        action = str(overrides["action"]).strip().lower()
+    if overrides.get("camera_preset"):
+        camera_preset = str(overrides["camera_preset"]).strip().lower()
+    if overrides.get("start_frame") is not None:
+        start_frame = int(overrides["start_frame"])
     if overrides.get("disable_overlays") is not None:
         disable_overlays = bool(overrides["disable_overlays"])
     if overrides.get("duration_seconds") is not None:
@@ -391,6 +403,10 @@ def render_anime_3d_60s(
     add_opt(blender_args, "--environment", environment)
     add_opt(blender_args, "--character-asset", character_asset)
     add_opt(blender_args, "--mode", mode)
+    add_opt(blender_args, "--seed", seed_value)
+    add_opt(blender_args, "--action", action)
+    add_opt(blender_args, "--camera-preset", camera_preset)
+    add_opt(blender_args, "--start-frame", start_frame)
     add_opt(blender_args, "--style-preset", style_preset)
     add_opt(blender_args, "--outline-mode", outline_mode)
     add_opt(blender_args, "--postfx", postfx)

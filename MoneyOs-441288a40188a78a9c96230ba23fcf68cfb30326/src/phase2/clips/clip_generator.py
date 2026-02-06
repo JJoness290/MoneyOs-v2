@@ -53,6 +53,7 @@ def ensure_base_visual_or_fallback(
     mode: str,
     seed: str,
     cache_payload: dict | None = None,
+    overrides: dict | None = None,
 ) -> tuple[Path, dict[str, str | float | bool | None]]:
     telemetry: dict[str, str | float | bool | None] = {
         "backend_used": None,
@@ -74,7 +75,7 @@ def ensure_base_visual_or_fallback(
     clip_dir.mkdir(parents=True, exist_ok=True)
     clip_path = clip_dir / "clip.mp4"
     if not clip_path.exists():
-        overrides = {
+        overrides_payload = {
             "duration_seconds": seconds,
             "render_preset": render_preset,
             "environment": environment,
@@ -84,6 +85,8 @@ def ensure_base_visual_or_fallback(
             "fps": 30,
             "res": "1280x720",
         }
+        if overrides:
+            overrides_payload.update(overrides)
         ok, longest_path, longest_len = planned_paths_preflight(
             [clip_path, clip_dir / "frames" / "frame_0001.png"]
         )
@@ -91,7 +94,7 @@ def ensure_base_visual_or_fallback(
             raise RuntimeError(f"Path too long: {longest_path} ({longest_len})")
         job_id = shorten_component(clip_id)
         os.environ["MONEYOS_OUTPUT_ROOT"] = str(clip_dir)
-        render_result = render_anime_3d_60s(job_id, overrides=overrides)
+        render_result = render_anime_3d_60s(job_id, overrides=overrides_payload)
         clip_path.parent.mkdir(parents=True, exist_ok=True)
         render_result.final_video.replace(clip_path)
     try:
@@ -157,6 +160,7 @@ def generate_clip(
     mode: str = "static_pose",
     seed: str = "seed",
     cache_payload: dict | None = None,
+    overrides: dict | None = None,
 ) -> Path:
     if cache_payload:
         clip_id, _ = compute_clip_id(cache_payload)
@@ -173,6 +177,7 @@ def generate_clip(
         mode=mode,
         seed=seed,
         cache_payload=cache_payload,
+        overrides=overrides,
     )
     ensure_min_filesize(clip_path)
     ensure_mp4_duration_close(clip_path, seconds, tolerance=0.05)
@@ -190,6 +195,7 @@ def generate_clip_with_telemetry(
     mode: str = "static_pose",
     seed: str = "seed",
     cache_payload: dict | None = None,
+    overrides: dict | None = None,
 ) -> tuple[Path, dict[str, str | float | bool | None]]:
     start = time.time()
     clip_path, telemetry = ensure_base_visual_or_fallback(
@@ -201,6 +207,7 @@ def generate_clip_with_telemetry(
         mode=mode,
         seed=seed,
         cache_payload=cache_payload,
+        overrides=overrides,
     )
     ensure_min_filesize(clip_path)
     ensure_mp4_duration_close(clip_path, seconds, tolerance=0.05)
