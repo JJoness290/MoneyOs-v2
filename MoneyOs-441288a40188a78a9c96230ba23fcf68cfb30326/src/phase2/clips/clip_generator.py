@@ -65,10 +65,11 @@ def ensure_base_visual_or_fallback(
         telemetry["backend_used"] = "ai_video"
         telemetry["base_visual_validator_result"] = "ai_video_unavailable"
         telemetry["backend_used"] = "blender"
-    clip_hash = _clip_id_for_payload(cache_payload) if cache_payload else _clip_id(
-        f"{backend}-{environment}-{character_asset}-{render_preset}-{seconds}-{seed}"
-    )
-    clip_dir = safe_join("p2", "clips", f"c_{clip_hash}")
+    if cache_payload:
+        clip_id, _ = compute_clip_id(cache_payload)
+    else:
+        clip_id = f"c_{_clip_id(f'{backend}-{environment}-{character_asset}-{render_preset}-{seconds}-{seed}')}"
+    clip_dir = safe_join("p2", "clips", clip_id)
     clip_dir.mkdir(parents=True, exist_ok=True)
     clip_path = clip_dir / "clip.mp4"
     if not clip_path.exists():
@@ -110,13 +111,15 @@ def _clip_id(seed: str) -> str:
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
 
 
-def _clip_id_for_payload(payload: dict) -> str:
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha1(encoded.encode("utf-8")).hexdigest()[:12]
+def _canonical_payload(payload: dict) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
-def clip_cache_id(cache_payload: dict) -> str:
-    return _clip_id_for_payload(cache_payload)
+def compute_clip_id(payload: dict) -> tuple[str, dict]:
+    canonical = _canonical_payload(payload)
+    cache_hash = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
+    clip_id = f"c_{cache_hash}"
+    return clip_id, payload
 
 
 def md5_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -133,9 +136,12 @@ def write_clip_meta(
     cache_payload: dict[str, object],
     file_hash: str,
 ) -> None:
+    cache_payload_canonical = _canonical_payload(cache_payload)
     payload = {
         **meta,
+        "clip_id": meta.get("clip_id"),
         "cache_payload": cache_payload,
+        "cache_payload_canonical": cache_payload_canonical,
         "file_hash_md5": file_hash,
     }
     (clip_dir / "meta.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -151,10 +157,11 @@ def generate_clip(
     seed: str = "seed",
     cache_payload: dict | None = None,
 ) -> Path:
-    clip_hash = _clip_id_for_payload(cache_payload) if cache_payload else _clip_id(
-        f"{backend}-{environment}-{character_asset}-{render_preset}-{seconds}-{seed}"
-    )
-    clip_dir = safe_join("p2", "clips", f"c_{clip_hash}")
+    if cache_payload:
+        clip_id, _ = compute_clip_id(cache_payload)
+    else:
+        clip_id = f"c_{_clip_id(f'{backend}-{environment}-{character_asset}-{render_preset}-{seconds}-{seed}')}"
+    clip_dir = safe_join("p2", "clips", clip_id)
     clip_dir.mkdir(parents=True, exist_ok=True)
     clip_path, _ = ensure_base_visual_or_fallback(
         seconds=seconds,
@@ -169,7 +176,7 @@ def generate_clip(
     ensure_min_filesize(clip_path)
     ensure_mp4_duration_close(clip_path, seconds, tolerance=0.05)
     manifest = clip_dir / "clip_manifest.json"
-    manifest.write_text(json.dumps({"clip_id": clip_hash, "path": str(clip_path)}, indent=2), encoding="utf-8")
+    manifest.write_text(json.dumps({"clip_id": clip_dir.name, "path": str(clip_path)}, indent=2), encoding="utf-8")
     return clip_path
 
 

@@ -338,7 +338,7 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
 
 def _run_anime_3d_clip(job_id: str, req: Anime3DRequest) -> None:
     from src.phase2.clips.clip_generator import (  # noqa: WPS433
-        clip_cache_id,
+        compute_clip_id,
         generate_clip_with_telemetry,
         md5_file,
         write_clip_meta,
@@ -596,7 +596,12 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                     "render_preset": os.getenv("MONEYOS_RENDER_PRESET", "fast_proof"),
                     "model": os.getenv("MONEYOS_ANIME3D_STYLE_PRESET", "key_art"),
                 }
-                cache_id = clip_cache_id(cache_payload)
+                clip_id, cache_payload = compute_clip_id(cache_payload)
+                if not clip_id or not isinstance(clip_id, str):
+                    raise RuntimeError(
+                        f"Missing clip_id for shot_index={index} payload={cache_payload}"
+                    )
+                cache_hash = clip_id.split("c_", 1)[-1]
                 clip_path, telemetry = generate_clip_with_telemetry(
                     seconds=duration_s,
                     backend=os.getenv("MONEYOS_VISUAL_BACKEND", "hybrid"),
@@ -607,6 +612,7 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                 )
                 clip_hash = md5_file(clip_path)
                 meta = {
+                    "clip_id": clip_id,
                     "episode_id": job_id,
                     "shot_index": index,
                     "seed": seed_value,
@@ -616,13 +622,14 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                     "w": 1280,
                     "h": 720,
                     "model": cache_payload["model"],
+                    "cache_hash": cache_hash,
                 }
                 write_clip_meta(clip_path.parent, meta, cache_payload, clip_hash)
                 if clip_hash in seen_hashes:
                     attempts += 1
                     print(
                         "[SHOT] "
-                        f"shot_index={index} seed={seed_value} cache_id={cache_id} "
+                        f"shot_index={index} seed={seed_value} clip_id={clip_id} "
                         f"md5={clip_hash} action=reroll attempt={attempts}"
                     )
                     print(
@@ -635,7 +642,7 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                 clips.append(clip_path)
                 print(
                     "[SHOT] "
-                    f"shot_index={index} seed={seed_value} cache_id={cache_id} "
+                    f"shot_index={index} seed={seed_value} clip_id={clip_id} "
                     f"md5={clip_hash} action=accepted"
                 )
                 with _jobs_lock:
