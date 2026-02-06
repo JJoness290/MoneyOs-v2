@@ -115,6 +115,61 @@ def _discover_assets(assets_dir: Path) -> dict[str, list[Path]]:
     }
 
 
+def _required_assets(assets_dir: Path) -> dict[str, Path]:
+    return {
+        "characters/hero.blend": assets_dir / "characters" / "hero.blend",
+        "characters/enemy.blend": assets_dir / "characters" / "enemy.blend",
+        "envs/city.blend": assets_dir / "envs" / "city.blend",
+        "anims/idle.fbx": assets_dir / "anims" / "idle.fbx",
+        "anims/run.fbx": assets_dir / "anims" / "run.fbx",
+        "anims/punch.fbx": assets_dir / "anims" / "punch.fbx",
+        "vfx/explosion.png": assets_dir / "vfx" / "explosion.png",
+        "vfx/energy_arc.png": assets_dir / "vfx" / "energy_arc.png",
+        "vfx/smoke.png": assets_dir / "vfx" / "smoke.png",
+    }
+
+
+def _find_missing_assets(assets_dir: Path) -> list[str]:
+    return [key for key, path in _required_assets(assets_dir).items() if not path.exists()]
+
+
+def _build_procedural_scene(scene: bpy.types.Scene, total_frames: int) -> None:
+    bpy.ops.mesh.primitive_plane_add(size=10, location=(0, 0, 0))
+    floor = bpy.context.active_object
+    floor.name = "Floor"
+    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(-1.5, 0, 0.5))
+    hero = bpy.context.active_object
+    hero.name = "Hero"
+    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(1.5, 0, 0.5))
+    enemy = bpy.context.active_object
+    enemy.name = "Enemy"
+    bpy.ops.object.light_add(type="AREA", location=(0, -3, 4))
+    light = bpy.context.active_object
+    light.data.energy = 600
+    bpy.ops.object.camera_add(location=(0, -6, 2), rotation=(1.3, 0, 0))
+    camera = bpy.context.active_object
+    scene.camera = camera
+    scene.frame_start = 1
+    scene.frame_end = total_frames
+    hero.location = (-1.5, 0, 0.5)
+    hero.keyframe_insert(data_path="location", frame=1)
+    hero.location = (-0.5, 0.6, 0.5)
+    hero.rotation_euler = (0, 0, math.radians(20))
+    hero.keyframe_insert(data_path="location", frame=total_frames)
+    hero.keyframe_insert(data_path="rotation_euler", frame=total_frames)
+    enemy.location = (1.5, 0, 0.5)
+    enemy.keyframe_insert(data_path="location", frame=1)
+    enemy.location = (0.5, -0.6, 0.5)
+    enemy.rotation_euler = (0, 0, math.radians(-20))
+    enemy.keyframe_insert(data_path="location", frame=total_frames)
+    enemy.keyframe_insert(data_path="rotation_euler", frame=total_frames)
+    camera.location = (0, -6, 2)
+    camera.keyframe_insert(data_path="location", frame=1)
+    camera.location = (0, -5, 2.5)
+    camera.keyframe_insert(data_path="location", frame=total_frames)
+    return None
+
+
 def _safe_set(obj: object, attr: str, value: object) -> bool:
     if hasattr(obj, attr):
         try:
@@ -1154,30 +1209,31 @@ def main() -> None:
     _seed_randomness(seed_value)
     rng = random.Random(seed_value)
     fingerprint = args.fingerprint.strip() or str(seed_value)
-
+    missing_assets = _find_missing_assets(assets_dir)
     strict_assets = int(args.strict_assets) == 1
+    procedural_fallback = False
+    used_assets: list[str] = []
+
+    if missing_assets and strict_assets:
+        error = f"missing assets: {', '.join(missing_assets)}"
+        _write_report(
+            report_path,
+            {
+                "status": "error",
+                "error": error,
+                "seed": seed_value,
+                "fingerprint": fingerprint,
+                "assets_dir": str(assets_dir),
+                "missing_assets": missing_assets,
+                "used_assets": used_assets,
+                "procedural_fallback": False,
+            },
+        )
+        print(f"[ASSETS] {error}", file=sys.stderr)
+        raise SystemExit(2)
+    if missing_assets and not strict_assets:
+        procedural_fallback = True
     assets_inventory = _discover_assets(assets_dir) if args.asset_mode == "local" else {}
-    if args.asset_mode == "local" and strict_assets:
-        missing_categories = []
-        for key in ("envs", "characters", "anims", "vfx"):
-            if not assets_inventory.get(key):
-                missing_categories.append(key)
-        if missing_categories:
-            error = (
-                f"Missing assets in categories {missing_categories}. assets_dir={assets_dir}"
-            )
-            _write_report(
-                report_path,
-                {
-                    "status": "error",
-                    "error": error,
-                    "seed": seed_value,
-                    "fingerprint": fingerprint,
-                    "assets_dir": str(assets_dir),
-                },
-            )
-            print(f"[ASSETS] {error}", file=sys.stderr)
-            raise SystemExit(2)
 
     env_candidates = assets_inventory.get("envs", [])
     char_candidates = assets_inventory.get("characters", [])
@@ -1187,6 +1243,11 @@ def main() -> None:
     enemy_asset = rng.choice(char_candidates) if char_candidates else None
     if hero_asset and enemy_asset and hero_asset == enemy_asset and len(char_candidates) > 1:
         enemy_asset = rng.choice([path for path in char_candidates if path != hero_asset])
+    used_assets = [
+        str(asset)
+        for asset in (env_blend, hero_asset, enemy_asset)
+        if asset is not None
+    ]
 
     assets_log = (
         f"[ASSETS] assets_dir={assets_dir} "
@@ -1259,6 +1320,39 @@ def main() -> None:
         )
     elif hasattr(scene, "eevee"):
         _configure_eevee(scene, args.quality)
+
+    if procedural_fallback:
+        print("[ASSETS] missing assets detected. Using procedural fallback.")
+        _build_procedural_scene(scene, total_frames)
+        _write_report(
+            report_path,
+            {
+                "status": "started",
+                "fingerprint": fingerprint,
+                "seed": seed_value,
+                "missing_assets": missing_assets,
+                "used_assets": used_assets,
+                "procedural_fallback": True,
+                "parsed_args": vars(args),
+            },
+        )
+        bpy.ops.render.render(animation=True, write_still=False)
+        render_report = {
+            "status": "complete",
+            "fingerprint": fingerprint,
+            "seed": seed_value,
+            "frame_end": scene.frame_end,
+            "fps": scene.render.fps,
+            "res": f"{scene.render.resolution_x}x{scene.render.resolution_y}",
+            "duration": args.duration,
+            "warnings": warnings,
+            "parsed_args": vars(args),
+            "missing_assets": missing_assets,
+            "used_assets": used_assets,
+            "procedural_fallback": True,
+        }
+        report_path.write_text(json.dumps(render_report, indent=2), encoding="utf-8")
+        return
 
     if args.asset_mode != "local":
         template_options = ["room", "street", "studio"]
@@ -1338,6 +1432,9 @@ def main() -> None:
             "fingerprint": fingerprint,
             "parsed_args": vars(args),
             "chosen_variation": chosen_variation,
+            "missing_assets": missing_assets,
+            "used_assets": used_assets,
+            "procedural_fallback": False,
             **selection,
         },
     )
@@ -1379,6 +1476,9 @@ def main() -> None:
         "mode_used": args.mode,
         "mode": args.mode,
         "style_preset": args.style_preset,
+        "missing_assets": missing_assets,
+        "used_assets": used_assets,
+        "procedural_fallback": False,
     }
     report_path.write_text(json.dumps(render_report, indent=2), encoding="utf-8")
 

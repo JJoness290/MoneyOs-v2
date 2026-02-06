@@ -72,10 +72,15 @@ def _required_asset_paths() -> dict[str, Path]:
     }
 
 
-def _ensure_assets() -> None:
+def _missing_required_assets() -> list[str]:
+    return [key for key, path in _required_asset_paths().items() if not path.exists()]
+
+
+def _ensure_assets(missing: list[str], strict_assets: bool) -> None:
     if ANIME3D_ASSET_MODE != "local":
         return
-    missing = [key for key, path in _required_asset_paths().items() if not path.exists()]
+    if not strict_assets:
+        return
     if missing:
         message = f"Missing assets (assets_root={get_assets_root()}):\n" + "\n".join(
             f"- {key}" for key in missing
@@ -463,7 +468,7 @@ def render_anime_3d_60s(
     character_asset = None
     mode = "default"
     seed_value: int | None = None
-    strict_assets = 1
+    strict_assets = 0
     action = None
     camera_preset = None
     start_frame = None
@@ -483,10 +488,14 @@ def render_anime_3d_60s(
         mode = str(overrides["mode"]).strip().lower()
     if overrides.get("seed") is not None:
         seed_value = int(overrides["seed"])
+    strict_assets_env = os.getenv("MONEYOS_STRICT_ASSETS")
+    strict_assets_explicit = False
     if overrides.get("strict_assets") is not None:
         strict_assets = int(bool(overrides["strict_assets"]))
-    else:
-        strict_assets = 1
+        strict_assets_explicit = True
+    elif strict_assets_env is not None:
+        strict_assets = 1 if strict_assets_env == "1" else 0
+        strict_assets_explicit = strict_assets == 1
     if overrides.get("action"):
         action = str(overrides["action"]).strip().lower()
     if overrides.get("camera_preset"):
@@ -529,7 +538,10 @@ def render_anime_3d_60s(
         quality = "fast"
     if duration_s <= 0:
         raise RuntimeError("Duration must be provided from audio beats and be > 0 seconds.")
-    _ensure_assets()
+    missing_assets = _missing_required_assets()
+    if (ANIME3D_ASSET_MODE == "auto" or missing_assets) and not strict_assets_explicit:
+        strict_assets = 0
+    _ensure_assets(missing_assets, strict_assets == 1)
     output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     if seed_value is None:
