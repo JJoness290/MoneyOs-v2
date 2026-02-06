@@ -120,6 +120,11 @@ class Anime3DRequest(BaseModel):
     strict_assets: Optional[bool] = None
 
 
+class AiVideoRequest(BaseModel):
+    script: str
+    audio_path: str
+
+
 @app.on_event("startup")
 def bootstrap_dependencies() -> None:
     ensure_dependencies()
@@ -1063,6 +1068,21 @@ async def finalize_anime_episode_3d(job_id: str = Body(..., embed=True)) -> JSON
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _set_status(job_id, "Complete", anime_3d_result=result, stage_key="done", progress_pct=100)
     return JSONResponse({"status": "ok", "job_id": job_id})
+
+
+@app.post("/jobs/ai-video-60s")
+async def generate_ai_video_60s(req: AiVideoRequest = Body(...)) -> JSONResponse:
+    from app.core.visuals.ai_video.pipeline import run_ai_video_60s  # noqa: WPS433
+
+    job_id = uuid.uuid4().hex
+    result = run_ai_video_60s(job_id, req.script, Path(req.audio_path))
+    return JSONResponse(
+        {
+            "status": "complete",
+            "output_video": str(result.final_video),
+            "report": str(result.report_path),
+        }
+    )
 
 
 @app.get("/status/{job_id}")
