@@ -158,11 +158,12 @@ def _assemble_frames_video(
     warnings: list[str],
     report_path: Path | None = None,
 ) -> None:
-    _ = audio_path
     encode_report_path = output_path.with_name("encode_report.json")
     frame_files = sorted(frames_dir.glob("frame_*.png"))
     if not frame_files:
         raise RuntimeError(f"No frames found in {frames_dir}")
+    if not audio_path.exists() or audio_path.stat().st_size == 0:
+        raise RuntimeError(f"audio missing or empty during encode: {audio_path}")
     first_frame = frames_dir / "frame_0001.png"
     if not first_frame.exists():
         sample = [path.name for path in frame_files[:10]]
@@ -203,6 +204,8 @@ def _assemble_frames_video(
         str(start_number),
         "-i",
         str(frames_dir / pattern),
+        "-i",
+        str(audio_path),
     ]
     if use_nvenc:
         args += [
@@ -216,6 +219,11 @@ def _assemble_frames_video(
             "yuv420p",
             "-movflags",
             "+faststart",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
         ]
         encoder_name = "h264_nvenc"
     else:
@@ -230,6 +238,11 @@ def _assemble_frames_video(
             "yuv420p",
             "-movflags",
             "+faststart",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
         ]
         encoder_name = "libx264"
     args.append(str(output_path))
@@ -254,6 +267,20 @@ def _assemble_frames_video(
         report_path,
         frames_dir,
     )
+    if report_path and report_path.exists():
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        payload.update(
+            {
+                "status": "complete",
+                "frame_count": frame_count,
+                "video_duration": frame_count / float(fps),
+                "final_video": str(output_path),
+            }
+        )
+        report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _augment_encode_report(
@@ -784,6 +811,15 @@ def render_anime_3d_60s(
         warnings,
         report_path,
     )
+    if not video_path.exists() and frames_dir.exists():
+        _assemble_frames_video(
+            frames_dir,
+            fps,
+            audio_path,
+            video_path,
+            warnings,
+            report_path,
+        )
     if not video_path.exists() and video_raw_path.exists():
         video_path = video_raw_path
     if not video_path.exists():
