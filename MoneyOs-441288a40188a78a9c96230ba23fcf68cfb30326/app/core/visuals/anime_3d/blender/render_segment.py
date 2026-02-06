@@ -372,6 +372,77 @@ def _find_missing_assets(assets_dir: Path) -> list[str]:
     return [key for key, path in _required_assets(assets_dir).items() if not path.exists()]
 
 
+def _create_procedural_humanoid(name: str, location: tuple[float, float, float]) -> bpy.types.Object:
+    print(f"[ANIME3D_CHAR] source=generated name={name}")
+    bpy.ops.object.empty_add(type="PLAIN_AXES", location=location)
+    root = bpy.context.active_object
+    root.name = name
+    material = bpy.data.materials.new(name=f"{name}_ProceduralMaterial")
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    principled = nodes.get("Principled BSDF")
+    if principled:
+        principled.inputs["Base Color"].default_value = (0.78, 0.7, 0.66, 1.0)
+        principled.inputs["Roughness"].default_value = 0.25
+        principled.inputs["Emission"].default_value = (0.08, 0.06, 0.05, 1.0)
+        principled.inputs["Emission Strength"].default_value = 0.08
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.35, depth=1.1, location=(location[0], location[1], 0.95))
+    torso = bpy.context.active_object
+    torso.name = f"{name}_Torso"
+    torso.scale.x = 0.85
+    torso.scale.y = 0.6
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.25, location=(location[0], location[1], 1.7))
+    head = bpy.context.active_object
+    head.name = f"{name}_Head"
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.08, depth=0.7, location=(location[0] + 0.45, location[1], 1.2))
+    arm_r = bpy.context.active_object
+    arm_r.name = f"{name}_Arm_R"
+    arm_r.rotation_euler = (0.0, math.radians(90), 0.0)
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.08, depth=0.7, location=(location[0] - 0.45, location[1], 1.2))
+    arm_l = bpy.context.active_object
+    arm_l.name = f"{name}_Arm_L"
+    arm_l.rotation_euler = (0.0, math.radians(90), 0.0)
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.1, depth=0.8, location=(location[0] + 0.18, location[1], 0.35))
+    leg_r = bpy.context.active_object
+    leg_r.name = f"{name}_Leg_R"
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.1, depth=0.8, location=(location[0] - 0.18, location[1], 0.35))
+    leg_l = bpy.context.active_object
+    leg_l.name = f"{name}_Leg_L"
+    for obj in (torso, head, arm_r, arm_l, leg_r, leg_l):
+        obj.parent = root
+        if obj.data.materials:
+            obj.data.materials[0] = material
+        else:
+            obj.data.materials.append(material)
+    if name.lower() == "hero":
+        for obj in (torso, head, arm_r, arm_l, leg_r, leg_l):
+            obj["mo_role"] = "subject"
+    return root
+
+
+def _animate_procedural_humanoid(root: bpy.types.Object, total_frames: int) -> None:
+    if total_frames <= 1:
+        return
+    start = 1
+    mid = max(2, total_frames // 2)
+    end = total_frames
+    root.location.y = root.location.y
+    root.keyframe_insert(data_path="location", frame=start)
+    root.location.y += 0.05
+    root.keyframe_insert(data_path="location", frame=mid)
+    root.location.y -= 0.05
+    root.keyframe_insert(data_path="location", frame=end)
+    for child in root.children:
+        if "Arm_" not in child.name:
+            continue
+        child.rotation_euler.z = 0.0
+        child.keyframe_insert(data_path="rotation_euler", frame=start)
+        child.rotation_euler.z = math.radians(4)
+        child.keyframe_insert(data_path="rotation_euler", frame=mid)
+        child.rotation_euler.z = math.radians(-4)
+        child.keyframe_insert(data_path="rotation_euler", frame=end)
+
+
 def _build_procedural_scene(scene: bpy.types.Scene, total_frames: int) -> None:
     bpy.ops.mesh.primitive_plane_add(size=10, location=(0, 0, 0))
     floor = bpy.context.active_object
@@ -384,52 +455,15 @@ def _build_procedural_scene(scene: bpy.types.Scene, total_frames: int) -> None:
     scene.camera = camera
     scene.frame_start = 1
     scene.frame_end = total_frames
+    hero = _create_procedural_humanoid("Hero", (-1.5, 0, 0))
+    enemy = _create_procedural_humanoid("Enemy", (1.5, 0, 0))
+    _animate_procedural_humanoid(hero, total_frames)
+    _animate_procedural_humanoid(enemy, total_frames)
     camera.location = (0, -6, 2)
     camera.keyframe_insert(data_path="location", frame=1)
     camera.location = (0, -5, 2.5)
     camera.keyframe_insert(data_path="location", frame=total_frames)
     return None
-
-
-def _generate_procedural_humanoid() -> bpy.types.Object:
-    print("[ANIME3D_RENDER] Procedural humanoid fallback active", flush=True)
-    bpy.ops.object.select_all(action="DESELECT")
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.35, depth=1.1, location=(0.0, 0.0, 0.95))
-    torso = bpy.context.active_object
-    torso.scale.x = 0.85
-    torso.scale.y = 0.6
-    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.25, location=(0.0, 0.0, 1.7))
-    head = bpy.context.active_object
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.08, depth=0.7, location=(0.45, 0.0, 1.2))
-    arm_r = bpy.context.active_object
-    arm_r.rotation_euler = (0.0, math.radians(90), 0.0)
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.08, depth=0.7, location=(-0.45, 0.0, 1.2))
-    arm_l = bpy.context.active_object
-    arm_l.rotation_euler = (0.0, math.radians(90), 0.0)
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.1, depth=0.8, location=(0.18, 0.0, 0.35))
-    leg_r = bpy.context.active_object
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.1, depth=0.8, location=(-0.18, 0.0, 0.35))
-    leg_l = bpy.context.active_object
-    for obj in (torso, head, arm_r, arm_l, leg_r, leg_l):
-        obj.select_set(True)
-    bpy.context.view_layer.objects.active = torso
-    bpy.ops.object.join()
-    humanoid = bpy.context.active_object
-    humanoid.name = "ANIME3D_PROCEDURAL_HUMAN"
-    humanoid.location = (0.0, 0.0, 0.0)
-    humanoid.rotation_euler = (0.0, 0.0, 0.0)
-    material = bpy.data.materials.new(name="ProceduralHumanMaterial")
-    material.use_nodes = True
-    nodes = material.node_tree.nodes
-    principled = nodes.get("Principled BSDF")
-    if principled:
-        principled.inputs["Roughness"].default_value = 0.4
-    if humanoid.data.materials:
-        humanoid.data.materials[0] = material
-    else:
-        humanoid.data.materials.append(material)
-    humanoid["mo_role"] = "subject"
-    return humanoid
 
 
 def _find_character_asset(workdir: Path) -> Path | None:
@@ -465,6 +499,9 @@ def _ensure_character(
     assets_dir: Path,
     seed_value: int,
 ) -> tuple[bpy.types.Object, str, str]:
+    existing_subject = _get_subject_object(scene)
+    if existing_subject:
+        return existing_subject, "generated", "procedural"
     if args.character_asset:
         asset_path = Path(args.character_asset)
         if asset_path.exists():
@@ -496,7 +533,8 @@ def _ensure_character(
         if subject:
             print(f"[ANIME3D_CHAR] source=asset_lib name={subject.name} format={fmt}")
             return subject, "asset_lib", fmt
-    subject = _generate_procedural_humanoid()
+    _create_procedural_humanoid("Hero", (0.0, 0.0, 0.0))
+    subject = _get_subject_object(scene)
     if subject is None:
         raise RuntimeError("Unable to generate procedural character")
     return subject, "generated", "procedural"
