@@ -1593,17 +1593,23 @@ def _configure_phase15_cycles(scene: bpy.types.Scene, args: argparse.Namespace) 
         prefs.get_devices()
     except Exception:  # noqa: BLE001
         pass
-    device_type = None
+    backend = None
     for candidate in ("OPTIX", "CUDA"):
         if any(device.type == candidate for device in prefs.devices):
-            device_type = candidate
+            backend = candidate
             break
-    if device_type is None:
+    if backend is None:
         raise RuntimeError("No GPU devices available")
-    prefs.compute_device_type = device_type
+    prefs.compute_device_type = backend
+    enabled_devices: list[str] = []
     for device in prefs.devices:
-        device.use = device.type == device_type
-    if not any(device.use for device in prefs.devices):
+        if device.type == "CPU":
+            device.use = False
+        else:
+            device.use = True
+        if device.use:
+            enabled_devices.append(f"{device.name}:{device.type}")
+    if not enabled_devices:
         raise RuntimeError("No GPU devices available")
     scene.cycles.device = "GPU"
     _safe_set(scene.cycles, "samples", args.phase15_samples)
@@ -1613,15 +1619,24 @@ def _configure_phase15_cycles(scene: bpy.types.Scene, args: argparse.Namespace) 
     _safe_set(scene.cycles, "caustics_reflective", False)
     _safe_set(scene.cycles, "caustics_refractive", False)
     _safe_set(scene.cycles, "use_denoising", True)
-    _safe_set(scene.cycles, "denoiser", "OPTIX")
+    denoise_enabled = False
+    if backend == "OPTIX":
+        denoise_enabled = _safe_set(scene.cycles, "denoiser", "OPTIX")
+    if not denoise_enabled:
+        _safe_set(scene.cycles, "denoiser", "OPENIMAGEDENOISE")
     _safe_set(scene.render, "use_persistent_data", True)
     _safe_set(scene.render, "use_motion_blur", False)
     _safe_set(scene.view_settings, "exposure", 0.9)
     _safe_set(scene.view_settings, "gamma", 1.0)
     if hasattr(scene.cycles, "tile_size"):
         _safe_set(scene.cycles, "tile_size", args.phase15_tile)
+    print(
+        "[ANIME3D_RENDER] "
+        f"engine=CYCLES backend={backend} enabled_devices={enabled_devices}"
+    )
     return {
-        "device": device_type.lower(),
+        "device_backend": backend.lower(),
+        "enabled_devices": enabled_devices,
         "samples": args.phase15_samples,
         "bounces": args.phase15_bounces,
         "denoise": True,
@@ -1758,7 +1773,7 @@ def main() -> None:
         phase15_info = _configure_phase15_cycles(scene, args)
         print(
             "[PHASE15] engine=cycles "
-            f"device={phase15_info['device']} "
+            f"device={phase15_info['device_backend']} "
             f"samples={phase15_info['samples']} "
             f"res={scene.render.resolution_x}x{scene.render.resolution_y} "
             f"fps={scene.render.fps} duration={args.duration:.2f}"
@@ -1957,7 +1972,7 @@ def main() -> None:
         "parsed_args": vars(args),
         "preset": preset,
         "engine": scene.render.engine,
-        "device": phase15_info["device"] if phase15_info else None,
+        "device": phase15_info["device_backend"] if phase15_info else None,
         "samples": phase15_info["samples"] if phase15_info else None,
         "bounces": phase15_info["bounces"] if phase15_info else None,
         "denoise": phase15_info["denoise"] if phase15_info else None,
