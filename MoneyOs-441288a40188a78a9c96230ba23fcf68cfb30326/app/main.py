@@ -8,7 +8,7 @@ import uuid
 import hashlib
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
@@ -156,6 +156,16 @@ def compute_clip_id(cache_payload: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]
     cache_hash = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
     clip_id = f"c_{cache_hash}"
     return clip_id, cache_payload
+
+
+def md5_file(path: Union[str, os.PathLike], chunk_size: int = 1024 * 1024) -> str:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"md5_file: missing file: {path}")
+    digest = hashlib.md5()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _load_perf_history() -> dict:
@@ -612,7 +622,7 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                     seed=str(seed_value),
                     cache_payload=cache_payload,
                 )
-                clip_md5 = md5_file(clip_path)
+                clip_md5 = md5_file(str(clip_path))
                 assert isinstance(clip_md5, str) and clip_md5
                 meta = {
                     "clip_id": clip_id,
