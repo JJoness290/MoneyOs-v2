@@ -512,7 +512,7 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
         phase_env, resolved_target, raw_phase = _resolve_phase_target_seconds()
         target_seconds = target_seconds or resolved_target
         clips = []
-        seen_hashes: set[str] = set()
+        seen_md5: set[str] = set()
         base_seed_env = os.getenv("MONEYOS_BASE_SEED")
         if base_seed_env and base_seed_env.strip().isdigit():
             base_seed = int(base_seed_env.strip())
@@ -612,7 +612,8 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                     seed=str(seed_value),
                     cache_payload=cache_payload,
                 )
-                clip_hash = md5_file(clip_path)
+                clip_md5 = md5_file(clip_path)
+                assert isinstance(clip_md5, str) and clip_md5
                 meta = {
                     "clip_id": clip_id,
                     "episode_id": job_id,
@@ -625,27 +626,28 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                     "h": 720,
                     "model": cache_payload["model"],
                     "cache_hash": cache_hash,
+                    "clip_md5": clip_md5,
                 }
-                write_clip_meta(clip_path.parent, meta, cache_payload, clip_hash)
-                if clip_hash in seen_hashes:
+                write_clip_meta(clip_path.parent, meta, cache_payload, clip_md5)
+                if clip_md5 in seen_md5:
                     attempts += 1
                     print(
                         "[SHOT] "
                         f"shot_index={index} seed={seed_value} clip_id={clip_id} "
-                        f"md5={clip_hash} action=reroll attempt={attempts}"
+                        f"md5={clip_md5} action=reroll attempt={attempts}"
                     )
                     print(
                         "[SHOT] "
-                        f"shot_index={index} duplicate_md5={clip_hash} "
+                        f"shot_index={index} duplicate_md5={clip_md5} "
                         f"next_seed={shot_seed_base + attempts * 123457}"
                     )
                     continue
-                seen_hashes.add(clip_hash)
+                seen_md5.add(clip_md5)
                 clips.append(clip_path)
                 print(
                     "[SHOT] "
                     f"shot_index={index} seed={seed_value} clip_id={clip_id} "
-                    f"md5={clip_hash} action=accepted"
+                    f"md5={clip_md5} action=accepted"
                 )
                 with _jobs_lock:
                     _last_clip_telemetry.update(telemetry)
@@ -667,7 +669,7 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
             else:
                 raise RuntimeError(
                     "Duplicate clip content detected after retries: "
-                    f"shot_index={index} hashes={sorted(seen_hashes)}"
+                    f"shot_index={index} hashes={sorted(seen_md5)}"
                 )
         output_path = safe_join("p2", "episodes", "episode_001.mp4")
         audio_path = safe_join("p2", "tmp", "episode_silence.wav")

@@ -68,7 +68,8 @@ def ensure_base_visual_or_fallback(
     if cache_payload:
         clip_id, _ = compute_clip_id(cache_payload)
     else:
-        clip_id = f"c_{_clip_id(f'{backend}-{environment}-{character_asset}-{render_preset}-{seconds}-{seed}')}"
+        cache_hash = _clip_id(f"{backend}-{environment}-{character_asset}-{render_preset}-{seconds}-{seed}")
+        clip_id = f"c_{cache_hash}"
     clip_dir = safe_join("p2", "clips", clip_id)
     clip_dir.mkdir(parents=True, exist_ok=True)
     clip_path = clip_dir / "clip.mp4"
@@ -88,7 +89,7 @@ def ensure_base_visual_or_fallback(
         )
         if not ok:
             raise RuntimeError(f"Path too long: {longest_path} ({longest_len})")
-        job_id = shorten_component(clip_hash)
+        job_id = shorten_component(clip_id)
         os.environ["MONEYOS_OUTPUT_ROOT"] = str(clip_dir)
         render_result = render_anime_3d_60s(job_id, overrides=overrides)
         clip_path.parent.mkdir(parents=True, exist_ok=True)
