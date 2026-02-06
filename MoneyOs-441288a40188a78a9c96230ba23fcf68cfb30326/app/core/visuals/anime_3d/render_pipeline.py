@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -24,6 +25,8 @@ from app.config import (
     ANIME3D_STYLE_PRESET,
     ANIME3D_OUTLINE_MODE,
     ANIME3D_POSTFX,
+    BLENDER_ENGINE,
+    BLENDER_GPU,
     OUTPUT_DIR,
     VFX_EMISSION_STRENGTH,
     VFX_SCALE,
@@ -314,22 +317,28 @@ def _validate_blender_artifacts(
     if not blender_cmd_path.exists():
         raise RuntimeError("blender_cmd.txt missing after render")
     cmd_text = blender_cmd_path.read_text(encoding="utf-8")
+
+    def fail(message: str) -> None:
+        snippet = cmd_text[:400]
+        raise RuntimeError(f"{message}. blender_cmd.txt head: {snippet}")
+
     if "--seed" not in cmd_text:
-        raise RuntimeError("blender_cmd.txt missing --seed argument")
+        fail("blender_cmd.txt missing --seed argument")
     if "--fingerprint" not in cmd_text:
-        raise RuntimeError("blender_cmd.txt missing --fingerprint argument")
+        fail("blender_cmd.txt missing --fingerprint argument")
     if not report_path.exists():
-        raise RuntimeError("render_report.json missing after render")
+        fail("render_report.json missing after render")
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise RuntimeError("render_report.json unreadable") from exc
+        snippet = cmd_text[:400]
+        raise RuntimeError(f"render_report.json unreadable. blender_cmd.txt head: {snippet}") from exc
     if not report.get("seed") or not report.get("fingerprint"):
-        raise RuntimeError("render_report.json missing seed/fingerprint")
+        fail("render_report.json missing seed/fingerprint")
     if expected_seed is not None and int(report.get("seed")) != expected_seed:
-        raise RuntimeError("render_report.json seed mismatch")
+        fail("render_report.json seed mismatch")
     if expected_fingerprint is not None and report.get("fingerprint") != expected_fingerprint:
-        raise RuntimeError("render_report.json fingerprint mismatch")
+        fail("render_report.json fingerprint mismatch")
 
 
 def _derive_episode_seed(job_id: str | None, output_dir: Path) -> int:
@@ -347,12 +356,14 @@ def _build_fingerprint(payload: dict[str, object]) -> str:
 
 
 def _format_cmd(args: list[str]) -> str:
-    def quote(value: str) -> str:
-        if any(char.isspace() for char in value):
-            return f"\"{value}\""
-        return value
+    if os.name == "nt":
+        return subprocess.list2cmdline([str(arg) for arg in args])
+    return " ".join(shlex.quote(str(arg)) for arg in args)
 
-    return " ".join(quote(str(arg)) for arg in args)
+
+def _assert_seed_fingerprint_in_cmd(cmd: list[str]) -> None:
+    if "--seed" not in cmd or "--fingerprint" not in cmd:
+        raise RuntimeError("Blender argv missing --seed/--fingerprint")
 
 
 def _write_test_dummy_frames(frames_dir: Path, seed_value: int) -> None:
@@ -521,11 +532,11 @@ def render_anime_3d_60s(
     _ensure_assets()
     output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
-    fingerprint_source = job_id or output_dir.name
     if seed_value is None:
-        seed_value = _derive_episode_seed(fingerprint_source, output_dir)
+        seed_value = _derive_episode_seed(job_id, output_dir)
     fingerprint_payload = {
-        "engine": os.getenv("MONEYOS_BLENDER_ENGINE", os.getenv("BLENDER_ENGINE", "eevee")),
+        "engine": BLENDER_ENGINE,
+        "gpu": "1" if BLENDER_GPU else "0",
         "environment": environment,
         "mode": mode,
         "style_preset": style_preset,
@@ -536,9 +547,6 @@ def render_anime_3d_60s(
         "fps": fps,
         "duration": f"{duration_s:.6f}",
         "assets_dir": str(get_assets_root()),
-        "render_preset": render_preset,
-        "seed": seed_value,
-        "id": fingerprint_source,
     }
     fingerprint = _build_fingerprint(fingerprint_payload)
     planned_paths = [
@@ -650,6 +658,7 @@ def render_anime_3d_60s(
             "--",
             *blender_args,
         ]
+        _assert_seed_fingerprint_in_cmd(cmd_preview)
         blender_cmd_path.write_text(_format_cmd(cmd_preview), encoding="utf-8")
         cmd_text = blender_cmd_path.read_text(encoding="utf-8")
         if "--seed" not in cmd_text or "--fingerprint" not in cmd_text:
@@ -681,6 +690,7 @@ def render_anime_3d_60s(
             warnings=warnings,
         )
     cmd = build_blender_command(script_copy_path, blender_args)
+    _assert_seed_fingerprint_in_cmd(cmd)
     blender_cmd_path.write_text(_format_cmd(cmd), encoding="utf-8")
     cmd_text = blender_cmd_path.read_text(encoding="utf-8")
     if "--seed" not in cmd_text or "--fingerprint" not in cmd_text:
@@ -747,6 +757,12 @@ def render_anime_3d_60s(
             f"Stderr (tail):\n{tail_stderr}"
         )
     _proof_static_frames(frames_dir, report_path)
+    _validate_blender_artifacts(
+        output_dir,
+        report_path,
+        expected_seed=None,
+        expected_fingerprint=None,
+    )
     _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
     _assemble_frames_video(
         frames_dir,
@@ -765,8 +781,8 @@ def render_anime_3d_60s(
     _validate_blender_artifacts(
         output_dir,
         report_path,
-        expected_seed=seed_value,
-        expected_fingerprint=fingerprint,
+        expected_seed=None,
+        expected_fingerprint=None,
     )
     validation = validate_episode(final_path, audio_path, report_path)
     warnings.extend(validation.warnings)
@@ -805,8 +821,8 @@ def finalize_anime_3d(job_id: str, status_callback: StatusCallback = None) -> An
     _validate_blender_artifacts(
         output_dir,
         report_path,
-        expected_seed=seed_value,
-        expected_fingerprint=fingerprint,
+        expected_seed=None,
+        expected_fingerprint=None,
     )
     validation = validate_episode(final_path, audio_path, report_path)
     warnings.extend(validation.warnings)

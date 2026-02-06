@@ -1153,6 +1153,7 @@ def main() -> None:
     seed_value = _derive_seed(output_path, args.seed)
     _seed_randomness(seed_value)
     rng = random.Random(seed_value)
+    fingerprint = args.fingerprint.strip() or str(seed_value)
 
     strict_assets = int(args.strict_assets) == 1
     assets_inventory = _discover_assets(assets_dir) if args.asset_mode == "local" else {}
@@ -1167,7 +1168,13 @@ def main() -> None:
             )
             _write_report(
                 report_path,
-                {"status": "error", "error": error, "seed": seed_value, "assets_dir": str(assets_dir)},
+                {
+                    "status": "error",
+                    "error": error,
+                    "seed": seed_value,
+                    "fingerprint": fingerprint,
+                    "assets_dir": str(assets_dir),
+                },
             )
             print(f"[ASSETS] {error}", file=sys.stderr)
             raise SystemExit(2)
@@ -1319,7 +1326,6 @@ def main() -> None:
         "light_variant": visibility_info.get("light_variant"),
         "hue_variant": visibility_info.get("hue_variant"),
     }
-    fingerprint = args.fingerprint.strip() or str(seed_value)
     print(
         "[FINGERPRINT] "
         f"seed={seed_value} fp={fingerprint} env={selected_env} "
