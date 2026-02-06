@@ -5,6 +5,7 @@ import os
 import threading
 import asyncio
 import uuid
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
@@ -336,7 +337,12 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
 
 
 def _run_anime_3d_clip(job_id: str, req: Anime3DRequest) -> None:
-    from src.phase2.clips.clip_generator import generate_clip_with_telemetry  # noqa: WPS433
+    from src.phase2.clips.clip_generator import (  # noqa: WPS433
+        clip_cache_id,
+        generate_clip_with_telemetry,
+        md5_file,
+        write_clip_meta,
+    )
 
     try:
         clip_path, telemetry = generate_clip_with_telemetry(
@@ -504,6 +510,12 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
         phase_env, resolved_target, raw_phase = _resolve_phase_target_seconds()
         target_seconds = target_seconds or resolved_target
         clips = []
+        seen_hashes: set[str] = set()
+        base_seed_env = os.getenv("MONEYOS_BASE_SEED")
+        if base_seed_env and base_seed_env.strip().isdigit():
+            base_seed = int(base_seed_env.strip())
+        else:
+            base_seed = int(hashlib.sha1(job_id.encode("utf-8")).hexdigest()[:8], 16)
         if phase_env in {"phase25", "production"}:
             plan = _build_phase25_shot_plan(target_seconds)
         else:
@@ -521,6 +533,7 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
             f"shot_seconds={[round(shot['duration'], 2) for shot in plan]} "
             f"total={sum(shot['duration'] for shot in plan):.2f}"
         )
+        print("[SHOT_UNIQUENESS] md5 guard enabled; per-clip meta.json captures cache payload + hash.")
         _set_status(
             job_id,
             "Generating hybrid episode clips...",
@@ -535,30 +548,118 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
             },
         )
         for index, beat in enumerate(plan, start=1):
-            clip_path, telemetry = generate_clip_with_telemetry(
-                seconds=float(beat["duration"]),
-                backend=os.getenv("MONEYOS_VISUAL_BACKEND", "hybrid"),
-                environment=beat["environment"],
-                mode=beat["shot"],
-                seed=f"{job_id}-{beat.get('seed_tag', index)}",
-            )
-            clips.append(clip_path)
-            with _jobs_lock:
-                _last_clip_telemetry.update(telemetry)
-            _set_status(
-                job_id,
-                f"Rendered clip {index}/{clips_expected}",
-                stage_key="visuals",
-                progress_pct=min(95, int((index / max(1, clips_expected)) * 90)),
-                extra={
-                    "clips_done": index,
-                    "backend_used_last_clip": telemetry.get("backend_used"),
-                    "gpu_used_last_clip": telemetry.get("gpu_used"),
-                    "peak_vram_mb_last_clip": telemetry.get("peak_vram_mb"),
-                    "base_visual_path_last_clip": telemetry.get("base_visual_path"),
-                    "base_visual_validator_result": telemetry.get("base_visual_validator_result"),
-                },
-            )
+            if phase_env not in {"phase25", "production"}:
+                clip_path, telemetry = generate_clip_with_telemetry(
+                    seconds=float(beat["duration"]),
+                    backend=os.getenv("MONEYOS_VISUAL_BACKEND", "hybrid"),
+                    environment=beat["environment"],
+                    mode=beat["shot"],
+                    seed=f"{job_id}-{beat.get('seed_tag', index)}",
+                )
+                clips.append(clip_path)
+                with _jobs_lock:
+                    _last_clip_telemetry.update(telemetry)
+                _set_status(
+                    job_id,
+                    f"Rendered clip {index}/{clips_expected}",
+                    stage_key="visuals",
+                    progress_pct=min(95, int((index / max(1, clips_expected)) * 90)),
+                    extra={
+                        "clips_done": index,
+                        "backend_used_last_clip": telemetry.get("backend_used"),
+                        "gpu_used_last_clip": telemetry.get("gpu_used"),
+                        "peak_vram_mb_last_clip": telemetry.get("peak_vram_mb"),
+                        "base_visual_path_last_clip": telemetry.get("base_visual_path"),
+                        "base_visual_validator_result": telemetry.get("base_visual_validator_result"),
+                    },
+                )
+                continue
+            attempts = 0
+            shot_seed_base = base_seed + index * 10007
+            environment = beat["environment"]
+            mode = beat["shot"]
+            duration_s = float(beat["duration"])
+            while attempts < 3:
+                seed_value = shot_seed_base + attempts * 123457
+                cache_payload = {
+                    "phase": "p2.5" if phase_env == "phase25" else phase_env,
+                    "episode_id": job_id,
+                    "shot_index": index,
+                    "seed": seed_value,
+                    "prompt": f"{environment}:{mode}",
+                    "duration_s": duration_s,
+                    "fps": 30,
+                    "w": 1280,
+                    "h": 720,
+                    "environment": environment,
+                    "mode": mode,
+                    "render_preset": os.getenv("MONEYOS_RENDER_PRESET", "fast_proof"),
+                    "model": os.getenv("MONEYOS_ANIME3D_STYLE_PRESET", "key_art"),
+                }
+                cache_id = clip_cache_id(cache_payload)
+                clip_path, telemetry = generate_clip_with_telemetry(
+                    seconds=duration_s,
+                    backend=os.getenv("MONEYOS_VISUAL_BACKEND", "hybrid"),
+                    environment=environment,
+                    mode=mode,
+                    seed=str(seed_value),
+                    cache_payload=cache_payload,
+                )
+                clip_hash = md5_file(clip_path)
+                meta = {
+                    "episode_id": job_id,
+                    "shot_index": index,
+                    "seed": seed_value,
+                    "prompt": f"{environment}:{mode}",
+                    "duration_s": duration_s,
+                    "fps": 30,
+                    "w": 1280,
+                    "h": 720,
+                    "model": cache_payload["model"],
+                }
+                write_clip_meta(clip_path.parent, meta, cache_payload, clip_hash)
+                if clip_hash in seen_hashes:
+                    attempts += 1
+                    print(
+                        "[SHOT] "
+                        f"shot_index={index} seed={seed_value} cache_id={cache_id} "
+                        f"md5={clip_hash} action=reroll attempt={attempts}"
+                    )
+                    print(
+                        "[SHOT] "
+                        f"shot_index={index} duplicate_md5={clip_hash} "
+                        f"next_seed={shot_seed_base + attempts * 123457}"
+                    )
+                    continue
+                seen_hashes.add(clip_hash)
+                clips.append(clip_path)
+                print(
+                    "[SHOT] "
+                    f"shot_index={index} seed={seed_value} cache_id={cache_id} "
+                    f"md5={clip_hash} action=accepted"
+                )
+                with _jobs_lock:
+                    _last_clip_telemetry.update(telemetry)
+                _set_status(
+                    job_id,
+                    f"Rendered clip {index}/{clips_expected}",
+                    stage_key="visuals",
+                    progress_pct=min(95, int((index / max(1, clips_expected)) * 90)),
+                    extra={
+                        "clips_done": index,
+                        "backend_used_last_clip": telemetry.get("backend_used"),
+                        "gpu_used_last_clip": telemetry.get("gpu_used"),
+                        "peak_vram_mb_last_clip": telemetry.get("peak_vram_mb"),
+                        "base_visual_path_last_clip": telemetry.get("base_visual_path"),
+                        "base_visual_validator_result": telemetry.get("base_visual_validator_result"),
+                    },
+                )
+                break
+            else:
+                raise RuntimeError(
+                    "Duplicate clip content detected after retries: "
+                    f"shot_index={index} hashes={sorted(seen_hashes)}"
+                )
         output_path = safe_join("p2", "episodes", "episode_001.mp4")
         audio_path = safe_join("p2", "tmp", "episode_silence.wav")
         create_silent_audio(target_seconds, audio_path)

@@ -52,6 +52,7 @@ def ensure_base_visual_or_fallback(
     render_preset: str,
     mode: str,
     seed: str,
+    cache_payload: dict | None = None,
 ) -> tuple[Path, dict[str, str | float | bool | None]]:
     telemetry: dict[str, str | float | bool | None] = {
         "backend_used": None,
@@ -64,7 +65,9 @@ def ensure_base_visual_or_fallback(
         telemetry["backend_used"] = "ai_video"
         telemetry["base_visual_validator_result"] = "ai_video_unavailable"
         telemetry["backend_used"] = "blender"
-    clip_hash = _clip_id(f"{backend}-{environment}-{character_asset}-{render_preset}-{seconds}-{seed}")
+    clip_hash = _clip_id_for_payload(cache_payload) if cache_payload else _clip_id(
+        f"{backend}-{environment}-{character_asset}-{render_preset}-{seconds}-{seed}"
+    )
     clip_dir = safe_join("p2", "clips", f"c_{clip_hash}")
     clip_dir.mkdir(parents=True, exist_ok=True)
     clip_path = clip_dir / "clip.mp4"
@@ -107,6 +110,37 @@ def _clip_id(seed: str) -> str:
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
 
 
+def _clip_id_for_payload(payload: dict) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(encoded.encode("utf-8")).hexdigest()[:12]
+
+
+def clip_cache_id(cache_payload: dict) -> str:
+    return _clip_id_for_payload(cache_payload)
+
+
+def md5_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.md5()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_clip_meta(
+    clip_dir: Path,
+    meta: dict[str, object],
+    cache_payload: dict[str, object],
+    file_hash: str,
+) -> None:
+    payload = {
+        **meta,
+        "cache_payload": cache_payload,
+        "file_hash_md5": file_hash,
+    }
+    (clip_dir / "meta.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def generate_clip(
     seconds: float = 3.0,
     backend: str = "blender",
@@ -115,8 +149,11 @@ def generate_clip(
     render_preset: str = "fast_proof",
     mode: str = "static_pose",
     seed: str = "seed",
+    cache_payload: dict | None = None,
 ) -> Path:
-    clip_hash = _clip_id(f"{backend}-{environment}-{character_asset}-{render_preset}-{seconds}-{seed}")
+    clip_hash = _clip_id_for_payload(cache_payload) if cache_payload else _clip_id(
+        f"{backend}-{environment}-{character_asset}-{render_preset}-{seconds}-{seed}"
+    )
     clip_dir = safe_join("p2", "clips", f"c_{clip_hash}")
     clip_dir.mkdir(parents=True, exist_ok=True)
     clip_path, _ = ensure_base_visual_or_fallback(
@@ -127,6 +164,7 @@ def generate_clip(
         render_preset=render_preset,
         mode=mode,
         seed=seed,
+        cache_payload=cache_payload,
     )
     ensure_min_filesize(clip_path)
     ensure_mp4_duration_close(clip_path, seconds, tolerance=0.05)
@@ -143,6 +181,7 @@ def generate_clip_with_telemetry(
     render_preset: str = "fast_proof",
     mode: str = "static_pose",
     seed: str = "seed",
+    cache_payload: dict | None = None,
 ) -> tuple[Path, dict[str, str | float | bool | None]]:
     start = time.time()
     clip_path, telemetry = ensure_base_visual_or_fallback(
@@ -153,6 +192,7 @@ def generate_clip_with_telemetry(
         render_preset=render_preset,
         mode=mode,
         seed=seed,
+        cache_payload=cache_payload,
     )
     ensure_min_filesize(clip_path)
     ensure_mp4_duration_close(clip_path, seconds, tolerance=0.05)
