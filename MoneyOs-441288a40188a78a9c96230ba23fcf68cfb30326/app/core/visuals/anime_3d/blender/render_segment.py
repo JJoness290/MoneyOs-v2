@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import random
 import sys
 import wave
@@ -87,6 +88,242 @@ def _seed_randomness(seed_value: int) -> None:
             scene.cycles.seed = seed_value
     except Exception:  # noqa: BLE001
         pass
+
+
+def configure_cycles_gpu_devices(prefer_optix: bool = True, force_gpu: bool = True) -> tuple[str | None, list[str]]:
+    try:
+        cycles_prefs = bpy.context.preferences.addons.get("cycles")
+    except Exception:  # noqa: BLE001
+        return None, []
+    if cycles_prefs is None:
+        return None, []
+    prefs = cycles_prefs.preferences
+    try:
+        prefs.get_devices()
+    except Exception:  # noqa: BLE001
+        return None, []
+    backend = None
+    candidates = ["OPTIX", "CUDA"] if prefer_optix else ["CUDA", "OPTIX"]
+    for candidate in candidates:
+        if any(device.type == candidate for device in prefs.devices):
+            backend = candidate
+            break
+    if backend:
+        prefs.compute_device_type = backend
+    enabled = []
+    for device in prefs.devices:
+        is_gpu = device.type in {"OPTIX", "CUDA", "HIP", "METAL", "ONEAPI"}
+        enable = is_gpu and ("RTX 3090" in device.name or "NVIDIA" in device.name or "GeForce" in device.name)
+        if force_gpu and device.type == "CPU":
+            enable = False
+        device.use = enable
+        if device.use:
+            enabled.append(f"{device.name} ({device.type})")
+    return backend, enabled
+
+
+def configure_cycles_render(
+    scene: bpy.types.Scene,
+    *,
+    width: int = 1920,
+    height: int = 1080,
+    samples: int = 96,
+    use_optix: bool = True,
+    force_gpu: bool = True,
+) -> tuple[str | None, list[str]]:
+    scene.render.engine = "CYCLES"
+    backend, enabled = configure_cycles_gpu_devices(prefer_optix=use_optix, force_gpu=force_gpu)
+    scene.cycles.device = "GPU" if enabled else "CPU"
+    scene.render.resolution_x = width
+    scene.render.resolution_y = height
+    scene.render.resolution_percentage = 100
+    _safe_set(scene.cycles, "samples", samples)
+    _safe_set(scene.cycles, "use_adaptive_sampling", True)
+    _safe_set(scene.cycles, "max_bounces", 6)
+    _safe_set(scene.cycles, "diffuse_bounces", 2)
+    _safe_set(scene.cycles, "glossy_bounces", 2)
+    _safe_set(scene.cycles, "transparent_max_bounces", 2)
+    _safe_set(scene.cycles, "caustics_reflective", False)
+    _safe_set(scene.cycles, "caustics_refractive", False)
+    _safe_set(scene.cycles, "use_denoising", True)
+    _safe_set(scene.cycles, "denoiser", "OPTIX" if use_optix else "OPENIMAGEDENOISE")
+    _safe_set(scene.view_settings, "view_transform", "Filmic")
+    _safe_set(scene.view_settings, "look", "Medium High Contrast")
+    return backend, enabled
+
+
+def log_render_backend(
+    scene: bpy.types.Scene,
+    backend: str | None,
+    enabled_devices: list[str],
+    samples: int,
+    use_optix: bool,
+) -> None:
+    print(
+        "[RENDER] engine="
+        f"{scene.render.engine} cycles_device={getattr(scene.cycles, 'device', None)} "
+        f"backend={backend} devices={enabled_devices}"
+    )
+    denoiser = getattr(scene.cycles, "denoiser", None)
+    print(
+        "[RENDER] "
+        f"samples={samples} res={scene.render.resolution_x}x{scene.render.resolution_y} "
+        f"denoise={denoiser} optix={use_optix}"
+    )
+
+
+def _get_subject_object(scene: bpy.types.Scene) -> bpy.types.Object | None:
+    for obj in scene.objects:
+        if obj.type == "MESH" and obj.get("mo_role") == "subject":
+            return obj
+    for obj in scene.objects:
+        if obj.type == "MESH":
+            return obj
+    return None
+
+
+def setup_anime_lighting(scene: bpy.types.Scene, subject_obj: bpy.types.Object | None, preset: str = "default") -> None:
+    collection = bpy.data.collections.get("ANIME_LIGHTS")
+    if collection is None:
+        collection = bpy.data.collections.new("ANIME_LIGHTS")
+        scene.collection.children.link(collection)
+    for obj in list(collection.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
+    subject_location = subject_obj.location if subject_obj else Vector((0, 0, 1))
+    key = bpy.data.lights.new(name="KeyLight", type="AREA")
+    key.energy = 1800
+    key.size = 4.0
+    key_obj = bpy.data.objects.new(name="KeyLight", object_data=key)
+    key_obj.location = subject_location + Vector((2.5, -2.0, 3.0))
+    key_obj.rotation_euler = (math.radians(60), 0, math.radians(40))
+    fill = bpy.data.lights.new(name="FillLight", type="AREA")
+    fill.energy = 450
+    fill.size = 3.0
+    fill_obj = bpy.data.objects.new(name="FillLight", object_data=fill)
+    fill_obj.location = subject_location + Vector((-3.0, -1.0, 2.0))
+    fill_obj.rotation_euler = (math.radians(55), 0, math.radians(-35))
+    rim = bpy.data.lights.new(name="RimLight", type="AREA")
+    rim.energy = 800
+    rim.size = 2.5
+    rim.color = (0.7, 0.8, 1.0) if preset != "emotional" else (1.0, 0.85, 0.7)
+    rim_obj = bpy.data.objects.new(name="RimLight", object_data=rim)
+    rim_obj.location = subject_location + Vector((0.0, 3.0, 2.5))
+    rim_obj.rotation_euler = (math.radians(120), 0, 0)
+    for obj in (key_obj, fill_obj, rim_obj):
+        collection.objects.link(obj)
+    world = scene.world
+    if world:
+        world.use_nodes = True
+        node_tree = world.node_tree
+        if node_tree and "Background" in node_tree.nodes:
+            node_tree.nodes["Background"].inputs[1].default_value = 0.1
+    print("[LIGHTS] anime 3-point lighting applied")
+
+
+def setup_anime_materials(obj_or_collection: object, preset: str = "default") -> None:
+    if isinstance(obj_or_collection, bpy.types.Collection):
+        objects = list(obj_or_collection.all_objects)
+    elif isinstance(obj_or_collection, bpy.types.Object):
+        objects = [obj_or_collection]
+    else:
+        return
+    for obj in objects:
+        if obj.type != "MESH":
+            continue
+        for slot in obj.material_slots:
+            mat = slot.material
+            if mat is None:
+                continue
+            mat.use_nodes = True
+            nodes = mat.node_tree.nodes
+            principled = nodes.get("Principled BSDF")
+            if principled:
+                principled.inputs["Roughness"].default_value = 0.45
+                principled.inputs["Specular"].default_value = 0.25
+                principled.inputs["Emission Strength"].default_value = 0.03
+            name_lower = mat.name.lower()
+            if any(tag in name_lower for tag in ("eye", "iris", "pupil")) and principled:
+                principled.inputs["Roughness"].default_value = 0.2
+                principled.inputs["Specular"].default_value = 0.5
+                principled.inputs["Emission Strength"].default_value = 0.05
+    print("[MATERIALS] anime materials applied")
+
+
+def setup_anime_camera_motion(
+    camera: bpy.types.Object,
+    subject: bpy.types.Object | None,
+    mode: str,
+    duration_frames: int,
+    rng_seed: int,
+) -> None:
+    if subject:
+        constraint = camera.constraints.new(type="TRACK_TO")
+        constraint.target = subject
+        constraint.track_axis = "TRACK_NEGATIVE_Z"
+        constraint.up_axis = "UP_Y"
+    random.seed(rng_seed)
+    start = camera.location.copy()
+    end = camera.location.copy()
+    if mode == "push_in":
+        end.y += 0.4
+        end.z += 0.15
+    elif mode == "orbit":
+        end.x += 0.4
+        end.y += 0.2
+    elif mode == "handheld":
+        end.x += 0.1
+        end.y += 0.1
+        end.z += 0.05
+    camera.location = start
+    camera.keyframe_insert(data_path="location", frame=1)
+    camera.location = end
+    camera.keyframe_insert(data_path="location", frame=duration_frames)
+    for fcurve in camera.animation_data.action.fcurves:
+        for keyframe in fcurve.keyframe_points:
+            keyframe.interpolation = "BEZIER"
+            keyframe.handle_left_type = "AUTO_CLAMPED"
+            keyframe.handle_right_type = "AUTO_CLAMPED"
+    print(f"[CAMERA] mode={mode}")
+
+
+def apply_anime_animation_polish(
+    rig: bpy.types.Object | None,
+    duration_frames: int,
+    rng_seed: int,
+) -> None:
+    if rig is None:
+        return
+    random.seed(rng_seed)
+    amplitude = 0.02
+    for obj in (rig,):
+        obj.location.z += amplitude
+        obj.keyframe_insert(data_path="location", frame=1)
+        obj.location.z -= amplitude
+        obj.keyframe_insert(data_path="location", frame=duration_frames)
+        if obj.animation_data:
+            for fcurve in obj.animation_data.action.fcurves:
+                for keyframe in fcurve.keyframe_points:
+                    keyframe.interpolation = "BEZIER"
+                    keyframe.handle_left_type = "AUTO_CLAMPED"
+                    keyframe.handle_right_type = "AUTO_CLAMPED"
+    print("[ANIM] polish applied")
+
+
+def setup_anime_compositor(scene: bpy.types.Scene, preset: str = "default") -> None:
+    scene.use_nodes = True
+    tree = scene.node_tree
+    tree.nodes.clear()
+    render_layers = tree.nodes.new(type="CompositorNodeRLayers")
+    color_balance = tree.nodes.new(type="CompositorNodeColorBalance")
+    glare = tree.nodes.new(type="CompositorNodeGlare")
+    glare.glare_type = "FOG_GLOW"
+    glare.threshold = 0.8
+    glare.quality = "LOW"
+    composite = tree.nodes.new(type="CompositorNodeComposite")
+    tree.links.new(render_layers.outputs["Image"], color_balance.inputs["Image"])
+    tree.links.new(color_balance.outputs["Image"], glare.inputs["Image"])
+    tree.links.new(glare.outputs["Image"], composite.inputs["Image"])
+    print("[COMP] compositor enabled")
 
 
 def _color_from_temperature(temp_k: float) -> tuple[float, float, float]:
@@ -1263,6 +1500,14 @@ def main() -> None:
     preset = args.render_preset
     phase15 = preset == "phase15_quality"
     phase15_info: dict[str, object] | None = None
+    quality_enabled = os.getenv("MONEYOS_ANIME3D_QUALITY", "1") != "0"
+    force_gpu = os.getenv("MONEYOS_ANIME3D_FORCE_GPU", "1") != "0"
+    light_preset = os.getenv("MONEYOS_ANIME3D_LIGHT_PRESET", "default").strip().lower()
+    try:
+        samples = int(os.getenv("MONEYOS_ANIME3D_SAMPLES", "96"))
+    except ValueError:
+        samples = 96
+    use_optix = os.getenv("MONEYOS_ANIME3D_USE_OPTIX", "1") != "0"
     tmp_dir = output_path.parent / "tmp" / f"seed_{seed_value}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -1287,6 +1532,18 @@ def main() -> None:
     else:
         scene.render.engine = "BLENDER_EEVEE" if args.engine == "eevee" else "CYCLES"
         scene.render.fps = args.fps
+    if quality_enabled:
+        backend, enabled_devices = configure_cycles_render(
+            scene,
+            width=1920,
+            height=1080,
+            samples=samples,
+            use_optix=use_optix,
+            force_gpu=force_gpu,
+        )
+        log_render_backend(scene, backend, enabled_devices, samples, use_optix)
+        if force_gpu and not enabled_devices:
+            raise RuntimeError("GPU render requested but no GPU devices were enabled.")
     if args.duration is None or args.duration <= 0:
         raise RuntimeError("Duration must be provided and > 0.")
     total_frames = max(1, int(round(args.duration * args.fps)))
@@ -1324,6 +1581,15 @@ def main() -> None:
     if procedural_fallback:
         print("[ASSETS] missing assets detected. Using procedural fallback.")
         _build_procedural_scene(scene, total_frames)
+        if quality_enabled:
+            subject_obj = _get_subject_object(scene)
+            setup_anime_lighting(scene, subject_obj, preset=light_preset)
+            setup_anime_materials(scene.collection, preset=light_preset)
+            setup_anime_compositor(scene, preset=light_preset)
+            if scene.camera:
+                camera_modes = ["push_in", "orbit", "handheld", "static"]
+                camera_mode = camera_modes[seed_value % len(camera_modes)]
+                setup_anime_camera_motion(scene.camera, subject_obj, camera_mode, total_frames, seed_value)
         _write_report(
             report_path,
             {
@@ -1407,6 +1673,18 @@ def main() -> None:
         fast_proof_like,
         args.mode,
     )
+    if quality_enabled:
+        subject_obj = _get_subject_object(scene)
+        setup_anime_lighting(scene, subject_obj, preset=light_preset)
+        setup_anime_materials(scene.collection, preset=light_preset)
+        setup_anime_compositor(scene, preset=light_preset)
+        camera_modes = ["push_in", "orbit", "handheld", "static"]
+        camera_mode = camera_modes[seed_value % len(camera_modes)]
+        camera_obj = objects.get("camera") if isinstance(objects, dict) else scene.camera
+        if camera_obj:
+            setup_anime_camera_motion(camera_obj, subject_obj, camera_mode, total_frames, seed_value)
+        rig_obj = objects.get("rig") if isinstance(objects, dict) else None
+        apply_anime_animation_polish(rig_obj, total_frames, seed_value)
 
     selection = {
         "seed": seed_value,
