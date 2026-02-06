@@ -1,0 +1,9 @@
+diffusers==0.30.2
+transformers==4.44.2
+accelerate==0.33.0
+safetensors==0.4.5
+sentencepiece==0.2.0
+torch==2.3.1
+torchvision==0.18.1
+opencv-python==4.10.0.84
+huggingface_hub==0.24.6

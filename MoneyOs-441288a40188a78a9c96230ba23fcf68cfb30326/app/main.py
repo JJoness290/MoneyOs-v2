@@ -1072,10 +1072,16 @@ async def finalize_anime_episode_3d(job_id: str = Body(..., embed=True)) -> JSON
 
 @app.post("/jobs/ai-video-60s")
 async def generate_ai_video_60s(req: AiVideoRequest = Body(...)) -> JSONResponse:
-    from app.core.visuals.ai_video.pipeline import run_ai_video_60s  # noqa: WPS433
+    from app.core.visuals.ai_video.pipeline import run_ai_video_job  # noqa: WPS433
 
     job_id = uuid.uuid4().hex
-    result = run_ai_video_60s(job_id, req.script, Path(req.audio_path))
+    _set_status(job_id, "Queued AI video", stage_key="ai_video", progress_pct=1)
+
+    def _status_update(message: str) -> None:
+        _set_status(job_id, message, stage_key="ai_video", progress_pct=50)
+
+    result = run_ai_video_job(job_id, req.script, Path(req.audio_path), status_callback=_status_update)
+    _set_status(job_id, "Complete", stage_key="done", progress_pct=100)
     return JSONResponse(
         {
             "status": "complete",
