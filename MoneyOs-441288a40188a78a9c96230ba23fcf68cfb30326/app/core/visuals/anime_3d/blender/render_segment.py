@@ -1224,6 +1224,7 @@ def main() -> None:
     total_frames = int(math.ceil(args.duration * args.fps))
     scene.frame_start = 1
     scene.frame_end = total_frames
+    scene.frame_set(0)
     try:
         width_str, height_str = args.res.lower().split("x", 1)
         scene.render.resolution_x = int(width_str)

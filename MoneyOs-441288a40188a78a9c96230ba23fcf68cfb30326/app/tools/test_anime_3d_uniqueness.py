@@ -56,7 +56,7 @@ def _load_fingerprint(output_dir: Path) -> str | None:
 
 def main() -> int:
     overrides = {
-        "duration_seconds": 2.0,
+        "duration_seconds": 4.0,
         "fps": 24,
         "res": "640x360",
     }
@@ -65,10 +65,10 @@ def main() -> int:
     result_a = render_anime_3d_60s(job_id_a, overrides=overrides)
     result_b = render_anime_3d_60s(job_id_b, overrides=overrides)
 
-    frame_a = result_a.output_dir / "frames" / "frame_0001.png"
-    frame_b = result_b.output_dir / "frames" / "frame_0001.png"
+    frame_a = result_a.output_dir / "frames" / "frame_0075.png"
+    frame_b = result_b.output_dir / "frames" / "frame_0075.png"
     if not frame_a.exists() or not frame_b.exists():
-        print("Missing frame_0001.png for comparison")
+        print("Missing frame_0075.png for comparison")
         return 2
     hash_a = _framehash(frame_a)
     hash_b = _framehash(frame_b)

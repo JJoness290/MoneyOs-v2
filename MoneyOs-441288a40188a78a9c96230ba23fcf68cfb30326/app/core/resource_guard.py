@@ -6,7 +6,42 @@ import threading
 import time
 from dataclasses import dataclass
 
-import psutil
+import importlib.util
+
+_psutil_spec = importlib.util.find_spec("psutil")
+if _psutil_spec:
+    import psutil
+else:
+    psutil = None  # type: ignore[assignment]
+
+    class _PsutilMissing(Exception):
+        pass
+
+    class _ProcessStub:
+        def nice(self, _value: int) -> None:
+            raise _PsutilMissing("psutil not available")
+
+    class _VirtualMemoryStub:
+        percent = 0.0
+
+    class _PsutilStub:
+        AccessDenied = _PsutilMissing
+        BELOW_NORMAL_PRIORITY_CLASS = 0
+
+        @staticmethod
+        def Process() -> _ProcessStub:
+            return _ProcessStub()
+
+        @staticmethod
+        def cpu_percent(interval: float | None = None) -> float:
+            _ = interval
+            return 0.0
+
+        @staticmethod
+        def virtual_memory() -> _VirtualMemoryStub:
+            return _VirtualMemoryStub()
+
+    psutil = _PsutilStub()  # type: ignore[assignment]
 
 from app.config import performance
 
