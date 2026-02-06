@@ -337,6 +337,10 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
     try:
         _set_status(job_id, "Generating audio", stage_key="audio", progress_pct=5)
         overrides = req.dict(exclude_none=True)
+        if req.duration_s is not None:
+            overrides["duration_s"] = float(req.duration_s)
+        if req.fps is not None:
+            overrides["fps"] = int(req.fps)
         if "duration_seconds" not in overrides and "duration_s" in overrides:
             overrides["duration_seconds"] = overrides["duration_s"]
         result = render_anime_3d_60s(

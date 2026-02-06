@@ -553,6 +553,8 @@ def render_anime_3d_60s(
         disable_overlays = bool(overrides["disable_overlays"])
     if overrides.get("duration_seconds") is not None:
         duration_s = float(overrides["duration_seconds"])
+    if overrides.get("duration_s") is not None:
+        duration_s = float(overrides["duration_s"])
     if overrides.get("fps") is not None:
         fps = int(overrides["fps"])
     if overrides.get("res"):
