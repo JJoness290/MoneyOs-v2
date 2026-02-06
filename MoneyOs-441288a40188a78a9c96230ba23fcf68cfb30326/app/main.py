@@ -425,7 +425,12 @@ async def debug_status() -> JSONResponse:
 
         caps = capabilities_snapshot(get_short_workdir() / "p2" / "cache" / "capabilities.json")
     except Exception as exc:  # noqa: BLE001
-        caps = {"error": str(exc)}
+        caps = {
+            "ffmpeg": {"available": False, "error": str(exc)},
+            "blender": {"available": False, "error": str(exc)},
+            "cuda": {"available": False, "error": str(exc)},
+            "ai_video": {"available": False, "error": str(exc)},
+        }
     assets_root = get_assets_root()
     required_assets = {
         "characters/hero.blend": (assets_root / "characters" / "hero.blend"),

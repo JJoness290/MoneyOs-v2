@@ -71,14 +71,20 @@ def detect_ai_backend() -> dict[str, object]:
 
 
 def capabilities_snapshot(cache_path: Path) -> dict[str, object]:
-    snapshot = {
-        "ffmpeg": detect_ffmpeg(),
-        "blender": detect_blender(),
-        "cuda": detect_cuda(),
-        "ai_video": detect_ai_backend(),
-        "short_workdir": os.getenv("MONEYOS_SHORT_WORKDIR", r"C:\\MoneyOS\\work"),
-        "path_max": int(os.getenv("MONEYOS_PATH_MAX", "220")),
-    }
+    snapshot: dict[str, object] = {}
+
+    def safe(name: str, fn) -> None:
+        try:
+            snapshot[name] = fn()
+        except Exception as exc:  # noqa: BLE001
+            snapshot[name] = {"available": False, "error": str(exc)}
+
+    safe("ffmpeg", detect_ffmpeg)
+    safe("blender", detect_blender)
+    safe("cuda", detect_cuda)
+    safe("ai_video", detect_ai_backend)
+    snapshot["short_workdir"] = os.getenv("MONEYOS_SHORT_WORKDIR", r"C:\\MoneyOS\\work")
+    snapshot["path_max"] = int(os.getenv("MONEYOS_PATH_MAX", "220"))
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
     return snapshot
