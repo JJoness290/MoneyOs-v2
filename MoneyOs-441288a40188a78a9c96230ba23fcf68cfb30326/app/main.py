@@ -529,8 +529,10 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
         phase_env, resolved_target, raw_phase = _resolve_phase_target_seconds()
         target_seconds = target_seconds or resolved_target
         clips: list[Path] = []
-        accepted: list[dict[str, str]] = []
+        accepted: list[dict[str, object]] = []
         seen_md5: set[str] = set()
+        diversity_threshold = 0.35
+        max_attempts_per_shot = 8
         base_seed_env = os.getenv("MONEYOS_BASE_SEED")
         if base_seed_env and base_seed_env.strip().isdigit():
             base_seed = int(base_seed_env.strip())
@@ -544,6 +546,21 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
         ensure_dir(tmp_root)
         if phase_env in {"phase25", "production"}:
             plan = _build_phase25_shot_plan(target_seconds)
+            from src.phase2.clips.ai_similarity_validator import (  # noqa: WPS433
+                compare_against_accepted,
+                embed_frames_with_clip,
+                extract_frames_ffmpeg,
+                format_similarity_log,
+            )
+            from src.phase2.clips.diversity_scorer import score_diversity  # noqa: WPS433
+            from src.phase2.clips.similarity_memory import SimilarityMemory  # noqa: WPS433
+            from src.phase2.director.ai_director import AiDirector  # noqa: WPS433
+
+            similarity_memory = SimilarityMemory(output_root / "p2" / "similarity_memory.json")
+            similarity_memory.load()
+            director = AiDirector()
+            recent_meta: list[dict[str, str]] = []
+            accepted_embeddings = similarity_memory.get_accepted_embeddings()
         else:
             plan = plan_episode(target_seconds)
         clips_expected = len(plan)
@@ -604,9 +621,28 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
             mode = beat["shot"]
             duration_s = float(beat["duration"])
             seed_value = base_seed + index * 10007
-            while attempts < 8:
+            last_plan: dict[str, str] | None = None
+            drop_used = False
+            while attempts < max_attempts_per_shot:
+                shot_plan = director.next_shot_plan(index, recent_meta)
+                if attempts > 0 and last_plan is not None:
+                    force_extreme = attempts >= max_attempts_per_shot - 2
+                    shot_plan = director.mutate_plan(
+                        last_plan,
+                        min_mutations=2,
+                        force_extreme=force_extreme,
+                    )
+                    print(f"[DIRECTOR] shot={index} forcing camera+action mutation")
+                elif attempts > 0:
+                    shot_plan = director.mutate_plan(shot_plan, min_mutations=2)
+                last_plan = dict(shot_plan)
+                mode = shot_plan.get("shot_type", mode)
                 prompt_base = beat.get("prompt") or beat.get("text") or f"{environment}:{mode}"
-                prompt = f"{prompt_base} | camera angle {index} | cinematic variation {seed_value % 7}"
+                prompt = (
+                    f"{prompt_base} | camera {shot_plan['camera']} | shot {shot_plan['shot_type']}"
+                    f" | action {shot_plan['action_bias']} | environment {shot_plan['environment_bias']}"
+                    f" | cinematic variation {seed_value % 7}"
+                )
                 cache_payload = {
                     "phase": "phase25",
                     "episode_id": job_id,
@@ -666,6 +702,58 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                     )
                     continue
                 seen_md5.add(clip_md5)
+                frames = extract_frames_ffmpeg(clip_path, num_frames=6)
+                embeddings = embed_frames_with_clip(frames)
+                is_duplicate, similarity_stats = compare_against_accepted(
+                    embeddings,
+                    accepted_embeddings,
+                    thresholds=similarity_memory.get_thresholds(),
+                )
+                similarity_log = format_similarity_log(similarity_stats)
+                if is_duplicate:
+                    print(f"[AI_SIMILARITY] shot={index} {similarity_log} → DUPLICATE")
+                    similarity_memory.record_reject(similarity_stats, reason="duplicate")
+                    adjustment = similarity_memory.adjust_thresholds()
+                    if adjustment:
+                        print(
+                            f"[LEARNING] {adjustment} mean_threshold → "
+                            f"{similarity_memory.thresholds.mean:.3f}"
+                        )
+                    similarity_memory.save()
+                    attempts += 1
+                    seed_value += 123457
+                    continue
+                print(f"[AI_SIMILARITY] shot={index} {similarity_log} → PASS")
+                diversity = score_diversity(embeddings, frames)
+                diversity_score = diversity.get("diversity_score", 0.0)
+                if diversity_score < diversity_threshold:
+                    print(f"[DIVERSITY] shot={index} score={diversity_score:.2f} → REJECTED")
+                    attempts += 1
+                    seed_value += 123457
+                    if attempts >= max_attempts_per_shot and not drop_used and accepted:
+                        drop_used = True
+                        lowest = min(accepted, key=lambda item: item.get("diversity_score", 1.0))
+                        print(
+                            "[DIVERSITY] "
+                            f"dropping lowest-diversity clip={lowest.get('clip_id')}"
+                        )
+                        accepted.remove(lowest)
+                        clips.remove(Path(lowest["clip_path"]))
+                        accepted_embeddings[:] = [
+                            item for item in accepted_embeddings if item.get("clip_id") != lowest.get("clip_id")
+                        ]
+                        recent_meta[:] = [
+                            item for item in recent_meta if item.get("clip_id") != lowest.get("clip_id")
+                        ]
+                        similarity_memory.accepted = [
+                            item
+                            for item in similarity_memory.accepted
+                            if item.get("clip_id") != lowest.get("clip_id")
+                        ]
+                        similarity_memory.save()
+                        attempts = max_attempts_per_shot - 2
+                    continue
+                print(f"[DIVERSITY] shot={index} score={diversity_score:.2f} → PASS")
                 meta = {
                     "phase": "phase25",
                     "clip_id": clip_id,
@@ -673,14 +761,34 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                     "seed": seed_value,
                     "duration_s": float(beat.get("seconds", 0) or duration_s),
                     "prompt": prompt,
+                    "shot_plan": shot_plan,
                     "clip_md5": clip_md5,
                     "source_final_path": str(final_mp4_path),
                     "cache_payload": cache_payload,
+                    "diversity_score": diversity_score,
+                    "motion_score": diversity.get("motion_score"),
+                    "scene_score": diversity.get("scene_score"),
                 }
                 meta_path = clip_dir / "meta.json"
                 meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
                 print(f"[PHASE25_CLIP] clip={clip_path} meta={meta_path} md5={clip_md5}")
-                accepted.append({"clip_id": clip_id, "clip_path": str(clip_path)})
+                accepted.append(
+                    {
+                        "clip_id": clip_id,
+                        "clip_path": str(clip_path),
+                        "diversity_score": diversity_score,
+                    }
+                )
+                recent_meta.append({"clip_id": clip_id, "shot_plan": shot_plan})
+                accepted_embeddings.append({"clip_id": clip_id, "embeddings": embeddings})
+                similarity_memory.record_accept(clip_id, embeddings, similarity_stats, diversity)
+                adjustment = similarity_memory.adjust_thresholds()
+                if adjustment:
+                    print(
+                        f"[LEARNING] {adjustment} mean_threshold → "
+                        f"{similarity_memory.thresholds.mean:.3f}"
+                    )
+                similarity_memory.save()
                 clips.append(clip_path)
                 print(
                     "[SHOT_UNIQUENESS] "
@@ -705,7 +813,7 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                 break
             else:
                 raise RuntimeError(
-                    "Duplicate clip content detected after retries: "
+                    "Clip rejected after retries: "
                     f"shot_index={index} hashes={sorted(seen_md5)}"
                 )
         if phase_env in {"phase25", "production"}:
