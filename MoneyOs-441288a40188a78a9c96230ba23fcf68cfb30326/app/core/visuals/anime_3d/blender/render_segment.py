@@ -51,6 +51,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--phase15-bounces", type=int, default=6)
     parser.add_argument("--phase15-res", default="1920x1080")
     parser.add_argument("--phase15-tile", type=int, default=256)
+    parser.add_argument("--force-procedural-humanoid", type=int, default=0)
     return parser.parse_args(argv)
 
 
@@ -90,39 +91,46 @@ def _seed_randomness(seed_value: int) -> None:
         pass
 
 
-def _configure_cycles_gpu_optix(scene: bpy.types.Scene, args: argparse.Namespace) -> None:
-    try:
-        cycles_prefs = bpy.context.preferences.addons.get("cycles")
-    except Exception:  # noqa: BLE001
-        cycles_prefs = None
-    if cycles_prefs is None:
-        raise RuntimeError("Cycles addon not available; cannot configure GPU rendering")
-    prefs = cycles_prefs.preferences
-    try:
-        prefs.get_devices()
-    except Exception:  # noqa: BLE001
-        pass
-    backend = None
-    candidates = ["OPTIX", "CUDA"]
-    for candidate in candidates:
-        if any(device.type == candidate for device in prefs.devices):
-            backend = candidate
-            break
-    if backend:
-        prefs.compute_device_type = backend
-    enabled = []
-    for device in prefs.devices:
-        is_gpu = device.type in {"OPTIX", "CUDA", "HIP", "METAL", "ONEAPI"}
-        enable = is_gpu and ("NVIDIA" in device.name or "GeForce" in device.name or "RTX" in device.name)
-        if device.type == "CPU":
-            enable = False
-        device.use = enable
-        if device.use:
-            enabled.append(f"{device.name} ({device.type})")
-    if not enabled:
-        raise RuntimeError("No GPU devices available")
-    scene.render.engine = "CYCLES"
-    scene.cycles.device = "GPU"
+def _configure_cycles_gpu_optix(scene: bpy.types.Scene, args: argparse.Namespace) -> dict[str, object]:
+    requested_gpu = str(args.gpu) == "1" and (args.engine or "").lower() == "cycles"
+    compute_device_type = "NONE"
+    devices_info: list[dict[str, object]] = []
+    chosen_device = "CPU"
+    if requested_gpu:
+        try:
+            prefs = bpy.context.preferences
+            cycles_prefs = prefs.addons["cycles"].preferences
+            cycles_prefs.get_devices()
+            if any(device.type == "OPTIX" for device in cycles_prefs.devices):
+                compute_device_type = "OPTIX"
+            elif any(device.type == "CUDA" for device in cycles_prefs.devices):
+                compute_device_type = "CUDA"
+            cycles_prefs.compute_device_type = compute_device_type
+            for device in cycles_prefs.devices:
+                device.use = device.type != "CPU"
+                devices_info.append(
+                    {"name": device.name, "type": device.type, "use": bool(device.use)}
+                )
+            if compute_device_type in {"OPTIX", "CUDA"} and any(
+                device["use"] for device in devices_info if device["type"] != "CPU"
+            ):
+                scene.cycles.device = "GPU"
+                chosen_device = "GPU"
+            else:
+                scene.cycles.device = "CPU"
+                chosen_device = "CPU"
+        except Exception:  # noqa: BLE001
+            scene.cycles.device = "CPU"
+            chosen_device = "CPU"
+            compute_device_type = "NONE"
+    print(
+        "[ANIME3D_GPU] "
+        f"engine={args.engine} requested_gpu={int(requested_gpu)} "
+        f"compute_device_type={compute_device_type} devices={[(d['name'], d['type'], d['use']) for d in devices_info]} "
+        f"chosen_device={chosen_device}"
+    )
+    if requested_gpu:
+        scene.render.engine = "CYCLES"
     quality = (args.quality or "balanced").lower()
     samples = args.phase15_samples
     if quality == "fast":
@@ -142,15 +150,21 @@ def _configure_cycles_gpu_optix(scene: bpy.types.Scene, args: argparse.Namespace
     _safe_set(scene.cycles, "caustics_reflective", False)
     _safe_set(scene.cycles, "caustics_refractive", False)
     _safe_set(scene.cycles, "use_denoising", True)
-    _safe_set(scene.cycles, "denoiser", "OPTIX" if backend == "OPTIX" else "OPENIMAGEDENOISE")
+    _safe_set(scene.cycles, "denoiser", "OPTIX" if compute_device_type == "OPTIX" else "OPENIMAGEDENOISE")
     _safe_set(scene.view_settings, "view_transform", "Filmic")
     _safe_set(scene.view_settings, "look", "Medium High Contrast")
     denoiser = getattr(scene.cycles, "denoiser", None)
     print(
         "[ANIME3D_RENDER] "
-        f"engine=CYCLES backend={backend} devices={enabled} samples={samples} "
+        f"engine=CYCLES backend={compute_device_type} devices={devices_info} samples={samples} "
         f"bounces={bounces} denoise={denoiser}"
     )
+    return {
+        "requested": requested_gpu,
+        "compute_device_type": compute_device_type,
+        "devices": devices_info,
+        "scene_device": chosen_device,
+    }
 
 
 def _apply_resolution(scene: bpy.types.Scene, args: argparse.Namespace) -> None:
@@ -372,7 +386,7 @@ def _find_missing_assets(assets_dir: Path) -> list[str]:
     return [key for key, path in _required_assets(assets_dir).items() if not path.exists()]
 
 
-def _create_procedural_humanoid(name: str, location: tuple[float, float, float]) -> bpy.types.Object:
+def _create_procedural_humanoid(name: str, location: tuple[float, float, float]) -> tuple[bpy.types.Object, int]:
     print(f"[ANIME3D_CHAR] source=generated name={name}")
     bpy.ops.object.empty_add(type="PLAIN_AXES", location=location)
     root = bpy.context.active_object
@@ -417,7 +431,7 @@ def _create_procedural_humanoid(name: str, location: tuple[float, float, float])
     if name.lower() == "hero":
         for obj in (torso, head, arm_r, arm_l, leg_r, leg_l):
             obj["mo_role"] = "subject"
-    return root
+    return root, 6
 
 
 def _animate_procedural_humanoid(root: bpy.types.Object, total_frames: int) -> None:
@@ -443,7 +457,11 @@ def _animate_procedural_humanoid(root: bpy.types.Object, total_frames: int) -> N
         child.keyframe_insert(data_path="rotation_euler", frame=end)
 
 
-def _build_procedural_scene(scene: bpy.types.Scene, total_frames: int) -> None:
+def _build_procedural_scene(
+    scene: bpy.types.Scene,
+    total_frames: int,
+    force_procedural_humanoid: bool,
+) -> bool:
     bpy.ops.mesh.primitive_plane_add(size=10, location=(0, 0, 0))
     floor = bpy.context.active_object
     floor.name = "Floor"
@@ -455,15 +473,39 @@ def _build_procedural_scene(scene: bpy.types.Scene, total_frames: int) -> None:
     scene.camera = camera
     scene.frame_start = 1
     scene.frame_end = total_frames
-    hero = _create_procedural_humanoid("Hero", (-1.5, 0, 0))
-    enemy = _create_procedural_humanoid("Enemy", (1.5, 0, 0))
+    procedural_humanoid = False
+    if force_procedural_humanoid:
+        procedural_humanoid = True
+        hero, hero_parts = _create_procedural_humanoid("Hero", (-1.5, 0, 0))
+        enemy, enemy_parts = _create_procedural_humanoid("Enemy", (1.5, 0, 0))
+        print(
+            "[ANIME3D_CHAR] "
+            f"procedural_humanoid=1 created=Hero parts={hero_parts} "
+            f"created=Enemy parts={enemy_parts}"
+        )
+    else:
+        bpy.ops.mesh.primitive_cube_add(size=1.0, location=(-1.5, 0, 0.5))
+        hero = bpy.context.active_object
+        hero.name = "Hero"
+        hero["mo_role"] = "subject"
+        bpy.ops.mesh.primitive_cube_add(size=1.0, location=(1.5, 0, 0.5))
+        enemy = bpy.context.active_object
+        enemy.name = "Enemy"
     _animate_procedural_humanoid(hero, total_frames)
     _animate_procedural_humanoid(enemy, total_frames)
+    hero.location = (-1.5, 0, 0)
+    hero.keyframe_insert(data_path="location", frame=1)
+    hero.location = (-0.4, 0.0, 0)
+    hero.keyframe_insert(data_path="location", frame=total_frames)
+    enemy.location = (1.5, 0, 0)
+    enemy.keyframe_insert(data_path="location", frame=1)
+    enemy.location = (0.4, 0.0, 0)
+    enemy.keyframe_insert(data_path="location", frame=total_frames)
     camera.location = (0, -6, 2)
     camera.keyframe_insert(data_path="location", frame=1)
     camera.location = (0, -5, 2.5)
     camera.keyframe_insert(data_path="location", frame=total_frames)
-    return None
+    return procedural_humanoid
 
 
 def _find_character_asset(workdir: Path) -> Path | None:
@@ -1678,6 +1720,12 @@ def main() -> None:
     except Exception:  # noqa: BLE001
         pass
 
+    gpu_info = {
+        "requested": False,
+        "compute_device_type": "NONE",
+        "devices": [],
+        "scene_device": "CPU",
+    }
     if args.fast_proof:
         engine = "BLENDER_EEVEE_NEXT"
         try:
@@ -1688,8 +1736,8 @@ def main() -> None:
     else:
         scene.render.engine = "BLENDER_EEVEE" if args.engine == "eevee" else "CYCLES"
         scene.render.fps = args.fps
-    if quality_enabled and (args.engine != "eevee" or force_gpu):
-        _configure_cycles_gpu_optix(scene, args)
+    if (args.engine or "").lower() == "cycles" and str(args.gpu) == "1":
+        gpu_info = _configure_cycles_gpu_optix(scene, args)
     if args.duration is None or args.duration <= 0:
         raise RuntimeError("Duration must be provided and > 0.")
     total_frames = max(1, int(round(args.duration * args.fps)))
@@ -1718,9 +1766,14 @@ def main() -> None:
     elif hasattr(scene, "eevee"):
         _configure_eevee(scene, args.quality)
 
+    procedural_humanoid = False
     if procedural_fallback:
         print("[ASSETS] missing assets detected. Using procedural fallback.")
-        _build_procedural_scene(scene, total_frames)
+        procedural_humanoid = _build_procedural_scene(
+            scene,
+            total_frames,
+            force_procedural_humanoid=bool(args.force_procedural_humanoid),
+        )
         subject_obj, char_source, char_fmt = _ensure_character(scene, args, assets_dir, seed_value)
         _apply_outlines(scene, outlines_mode)
         if quality_enabled:
@@ -1768,6 +1821,8 @@ def main() -> None:
             "duration": args.duration,
             "warnings": warnings,
             "parsed_args": vars(args),
+            "gpu": gpu_info,
+            "procedural_humanoid": procedural_humanoid,
             "missing_assets": missing_assets,
             "used_assets": used_assets,
             "procedural_fallback": True,
@@ -1924,6 +1979,8 @@ def main() -> None:
         "mode_used": args.mode,
         "mode": args.mode,
         "style_preset": args.style_preset,
+        "gpu": gpu_info,
+        "procedural_humanoid": procedural_humanoid,
         "missing_assets": missing_assets,
         "used_assets": used_assets,
         "procedural_fallback": False,
