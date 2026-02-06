@@ -6,6 +6,8 @@ import threading
 import asyncio
 import uuid
 import hashlib
+import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
@@ -166,6 +168,10 @@ def md5_file(path: Union[str, os.PathLike], chunk_size: int = 1024 * 1024) -> st
         for chunk in iter(lambda: handle.read(chunk_size), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def ensure_dir(path: Union[str, os.PathLike]) -> None:
+    os.makedirs(path, exist_ok=True)
 
 
 def _load_perf_history() -> dict:
@@ -517,17 +523,25 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
     )
     from src.phase2.episodes.episode_planner import plan_episode  # noqa: WPS433
     from src.utils.win_paths import safe_join  # noqa: WPS433
+    from app.core.visuals.ffmpeg_utils import run_ffmpeg  # noqa: WPS433
 
     try:
         phase_env, resolved_target, raw_phase = _resolve_phase_target_seconds()
         target_seconds = target_seconds or resolved_target
-        clips = []
+        clips: list[Path] = []
+        accepted: list[dict[str, str]] = []
         seen_md5: set[str] = set()
         base_seed_env = os.getenv("MONEYOS_BASE_SEED")
         if base_seed_env and base_seed_env.strip().isdigit():
             base_seed = int(base_seed_env.strip())
         else:
-            base_seed = int(hashlib.sha1(job_id.encode("utf-8")).hexdigest()[:8], 16)
+            base_seed = int(time.time())
+        output_root = get_output_root()
+        phase25_root = output_root / "p2"
+        clips_root = phase25_root / "clips"
+        tmp_root = phase25_root / "tmp"
+        ensure_dir(clips_root)
+        ensure_dir(tmp_root)
         if phase_env in {"phase25", "production"}:
             plan = _build_phase25_shot_plan(target_seconds)
         else:
@@ -545,7 +559,6 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
             f"shot_seconds={[round(shot['duration'], 2) for shot in plan]} "
             f"total={sum(shot['duration'] for shot in plan):.2f}"
         )
-        print("[SHOT_UNIQUENESS] md5 guard enabled; per-clip meta.json captures cache payload + hash.")
         _set_status(
             job_id,
             "Generating hybrid episode clips...",
@@ -587,14 +600,13 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                 )
                 continue
             attempts = 0
-            shot_seed_base = base_seed + index * 10007
             environment = beat["environment"]
             mode = beat["shot"]
             duration_s = float(beat["duration"])
+            seed_value = base_seed + index * 10007
             while attempts < 3:
-                seed_value = shot_seed_base + attempts * 123457
                 cache_payload = {
-                    "phase": "p2.5" if phase_env == "phase25" else phase_env,
+                    "phase": "p2.5",
                     "episode_id": job_id,
                     "shot_index": index,
                     "seed": seed_value,
@@ -614,7 +626,10 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                         f"Missing clip_id for shot_index={index} payload={cache_payload}"
                     )
                 cache_hash = clip_id.split("c_", 1)[-1]
-                clip_path, telemetry = generate_clip_with_telemetry(
+                clip_dir = clips_root / clip_id
+                ensure_dir(clip_dir)
+                clip_path = clip_dir / "clip.mp4"
+                final_mp4_path, telemetry = generate_clip_with_telemetry(
                     seconds=duration_s,
                     backend=os.getenv("MONEYOS_VISUAL_BACKEND", "hybrid"),
                     environment=environment,
@@ -622,42 +637,38 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                     seed=str(seed_value),
                     cache_payload=cache_payload,
                 )
-                clip_md5 = md5_file(str(clip_path))
+                final_mp4_path = Path(final_mp4_path)
+                if not final_mp4_path.exists():
+                    raise RuntimeError(f"Missing rendered clip for shot_index={index}: {final_mp4_path}")
+                clip_md5 = md5_file(str(final_mp4_path))
                 assert isinstance(clip_md5, str) and clip_md5
-                meta = {
-                    "clip_id": clip_id,
-                    "episode_id": job_id,
-                    "shot_index": index,
-                    "seed": seed_value,
-                    "prompt": f"{environment}:{mode}",
-                    "duration_s": duration_s,
-                    "fps": 30,
-                    "w": 1280,
-                    "h": 720,
-                    "model": cache_payload["model"],
-                    "cache_hash": cache_hash,
-                    "clip_md5": clip_md5,
-                }
-                write_clip_meta(clip_path.parent, meta, cache_payload, clip_md5)
                 if clip_md5 in seen_md5:
                     attempts += 1
+                    seed_value += 123457
                     print(
-                        "[SHOT] "
-                        f"shot_index={index} seed={seed_value} clip_id={clip_id} "
-                        f"md5={clip_md5} action=reroll attempt={attempts}"
-                    )
-                    print(
-                        "[SHOT] "
-                        f"shot_index={index} duplicate_md5={clip_md5} "
-                        f"next_seed={shot_seed_base + attempts * 123457}"
+                        "[SHOT_UNIQUENESS] "
+                        f"shot={index} duplicate md5={clip_md5} reroll seed={seed_value} attempt={attempts}"
                     )
                     continue
                 seen_md5.add(clip_md5)
+                if final_mp4_path.resolve() != clip_path.resolve():
+                    shutil.copy2(final_mp4_path, clip_path)
+                meta = {
+                    "clip_id": clip_id,
+                    "shot_index": index,
+                    "seed": seed_value,
+                    "duration_s": duration_s,
+                    "prompt": beat.get("prompt") or beat.get("text") or f"{environment}:{mode}",
+                    "clip_md5": clip_md5,
+                    "source_final_path": str(final_mp4_path),
+                    "cache_payload": cache_payload,
+                }
+                (clip_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+                accepted.append({"clip_id": clip_id, "clip_path": str(clip_path)})
                 clips.append(clip_path)
                 print(
-                    "[SHOT] "
-                    f"shot_index={index} seed={seed_value} clip_id={clip_id} "
-                    f"md5={clip_md5} action=accepted"
+                    "[SHOT_UNIQUENESS] "
+                    f"shot={index} seed={seed_value} clip_id={clip_id} md5={clip_md5} accepted"
                 )
                 with _jobs_lock:
                     _last_clip_telemetry.update(telemetry)
@@ -681,11 +692,43 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                     "Duplicate clip content detected after retries: "
                     f"shot_index={index} hashes={sorted(seen_md5)}"
                 )
-        output_path = safe_join("p2", "episodes", "episode_001.mp4")
-        audio_path = safe_join("p2", "tmp", "episode_silence.wav")
-        create_silent_audio(target_seconds, audio_path)
-        assemble_episode(clips, audio_path, output_path)
-        print(f"[CONCAT] segments={len(clips)} output={output_path}")
+        if phase_env in {"phase25", "production"}:
+            concat_path = tmp_root / "concat.txt"
+            concat_lines = [f"file '{Path(item['clip_path']).as_posix()}'" for item in accepted]
+            concat_path.write_text("\n".join(concat_lines), encoding="utf-8")
+            output_path = phase25_root / "out_phase25.mp4"
+            run_ffmpeg(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    str(concat_path),
+                    "-fflags",
+                    "+genpts",
+                    "-avoid_negative_ts",
+                    "make_zero",
+                    "-c:v",
+                    "h264_nvenc",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-r",
+                    "30",
+                    "-movflags",
+                    "+faststart",
+                    str(output_path),
+                ]
+            )
+            print(f"[CONCAT] segments={len(concat_lines)} output={output_path}")
+        else:
+            output_path = safe_join("p2", "episodes", "episode_001.mp4")
+            audio_path = safe_join("p2", "tmp", "episode_silence.wav")
+            create_silent_audio(target_seconds, audio_path)
+            assemble_episode(clips, audio_path, output_path)
+            print(f"[CONCAT] segments={len(clips)} output={output_path}")
         produced_seconds = get_video_duration_seconds(output_path)
         if phase_env in {"phase25", "production"} and abs(produced_seconds - target_seconds) > 0.2:
             raise RuntimeError(
