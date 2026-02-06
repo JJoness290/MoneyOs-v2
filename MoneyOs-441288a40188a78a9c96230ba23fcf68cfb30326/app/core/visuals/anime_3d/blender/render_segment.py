@@ -90,20 +90,20 @@ def _seed_randomness(seed_value: int) -> None:
         pass
 
 
-def configure_cycles_gpu_optix(prefer_optix: bool = True, force_gpu: bool = True) -> tuple[str | None, list[str]]:
+def _configure_cycles_gpu_optix(scene: bpy.types.Scene, args: argparse.Namespace) -> None:
     try:
         cycles_prefs = bpy.context.preferences.addons.get("cycles")
     except Exception:  # noqa: BLE001
-        return None, []
+        cycles_prefs = None
     if cycles_prefs is None:
-        return None, []
+        raise RuntimeError("Cycles addon not available; cannot configure GPU rendering")
     prefs = cycles_prefs.preferences
     try:
         prefs.get_devices()
     except Exception:  # noqa: BLE001
-        return None, []
+        pass
     backend = None
-    candidates = ["OPTIX", "CUDA"] if prefer_optix else ["CUDA", "OPTIX"]
+    candidates = ["OPTIX", "CUDA"]
     for candidate in candidates:
         if any(device.type == candidate for device in prefs.devices):
             backend = candidate
@@ -113,59 +113,60 @@ def configure_cycles_gpu_optix(prefer_optix: bool = True, force_gpu: bool = True
     enabled = []
     for device in prefs.devices:
         is_gpu = device.type in {"OPTIX", "CUDA", "HIP", "METAL", "ONEAPI"}
-        enable = is_gpu and ("RTX 3090" in device.name or "NVIDIA" in device.name or "GeForce" in device.name)
-        if force_gpu and device.type == "CPU":
+        enable = is_gpu and ("NVIDIA" in device.name or "GeForce" in device.name or "RTX" in device.name)
+        if device.type == "CPU":
             enable = False
         device.use = enable
         if device.use:
             enabled.append(f"{device.name} ({device.type})")
-    return backend, enabled
-
-
-def configure_cycles_render(
-    scene: bpy.types.Scene,
-    *,
-    width: int = 1920,
-    height: int = 1080,
-    samples: int = 96,
-    use_optix: bool = True,
-    force_gpu: bool = True,
-) -> tuple[str | None, list[str]]:
+    if not enabled:
+        raise RuntimeError("No GPU devices available")
     scene.render.engine = "CYCLES"
-    backend, enabled = configure_cycles_gpu_optix(prefer_optix=use_optix, force_gpu=force_gpu)
-    scene.cycles.device = "GPU" if enabled else "CPU"
-    scene.render.resolution_x = width
-    scene.render.resolution_y = height
-    scene.render.resolution_percentage = 100
+    scene.cycles.device = "GPU"
+    quality = (args.quality or "balanced").lower()
+    samples = args.phase15_samples
+    if quality == "fast":
+        samples = 64
+    elif quality == "max":
+        samples = 128
+    elif quality == "balanced":
+        samples = 96
+    samples = max(64, min(int(samples), 256))
     _safe_set(scene.cycles, "samples", samples)
     _safe_set(scene.cycles, "use_adaptive_sampling", True)
-    _safe_set(scene.cycles, "max_bounces", 6)
+    bounces = max(4, min(int(args.phase15_bounces), 8))
+    _safe_set(scene.cycles, "max_bounces", bounces)
     _safe_set(scene.cycles, "diffuse_bounces", 2)
     _safe_set(scene.cycles, "glossy_bounces", 2)
     _safe_set(scene.cycles, "transparent_max_bounces", 2)
     _safe_set(scene.cycles, "caustics_reflective", False)
     _safe_set(scene.cycles, "caustics_refractive", False)
     _safe_set(scene.cycles, "use_denoising", True)
-    _safe_set(scene.cycles, "denoiser", "OPTIX" if use_optix else "OPENIMAGEDENOISE")
+    _safe_set(scene.cycles, "denoiser", "OPTIX" if backend == "OPTIX" else "OPENIMAGEDENOISE")
     _safe_set(scene.view_settings, "view_transform", "Filmic")
     _safe_set(scene.view_settings, "look", "Medium High Contrast")
-    return backend, enabled
-
-
-def log_render_backend(
-    scene: bpy.types.Scene,
-    backend: str | None,
-    enabled_devices: list[str],
-    samples: int,
-    use_optix: bool,
-) -> None:
     denoiser = getattr(scene.cycles, "denoiser", None)
     print(
         "[ANIME3D_RENDER] "
-        f"engine={scene.render.engine} device={getattr(scene.cycles, 'device', None)} "
-        f"backend={backend} devices={enabled_devices} samples={samples} "
-        f"denoise={denoiser} res={scene.render.resolution_x}x{scene.render.resolution_y}"
+        f"engine=CYCLES backend={backend} devices={enabled} samples={samples} "
+        f"bounces={bounces} denoise={denoiser}"
     )
+
+
+def _apply_resolution(scene: bpy.types.Scene, args: argparse.Namespace) -> None:
+    width = 1920
+    height = 1080
+    try:
+        width_str, height_str = args.res.lower().split("x", 1)
+        width = int(width_str)
+        height = int(height_str)
+    except ValueError:
+        width = 1920
+        height = 1080
+    scene.render.resolution_x = width
+    scene.render.resolution_y = height
+    scene.render.resolution_percentage = 100
+    print(f"[ANIME3D_RENDER] FINAL_RES={width}x{height}")
 
 
 def _get_subject_object(scene: bpy.types.Scene) -> bpy.types.Object | None:
@@ -178,7 +179,7 @@ def _get_subject_object(scene: bpy.types.Scene) -> bpy.types.Object | None:
     return None
 
 
-def setup_anime_lighting(scene: bpy.types.Scene, subject_obj: bpy.types.Object | None, preset: str = "default") -> None:
+def _setup_anime_lighting(scene: bpy.types.Scene, subject_obj: bpy.types.Object | None) -> None:
     collection = bpy.data.collections.get("ANIME_LIGHTS")
     if collection is None:
         collection = bpy.data.collections.new("ANIME_LIGHTS")
@@ -201,7 +202,7 @@ def setup_anime_lighting(scene: bpy.types.Scene, subject_obj: bpy.types.Object |
     rim = bpy.data.lights.new(name="RimLight", type="AREA")
     rim.energy = 800
     rim.size = 2.5
-    rim.color = (0.7, 0.8, 1.0) if preset != "emotional" else (1.0, 0.85, 0.7)
+    rim.color = (0.7, 0.8, 1.0)
     rim_obj = bpy.data.objects.new(name="RimLight", object_data=rim)
     rim_obj.location = subject_location + Vector((0.0, 3.0, 2.5))
     rim_obj.rotation_euler = (math.radians(120), 0, 0)
@@ -216,7 +217,7 @@ def setup_anime_lighting(scene: bpy.types.Scene, subject_obj: bpy.types.Object |
     world_strength = 0.1
     if world:
         world_strength = node_tree.nodes["Background"].inputs[1].default_value
-    print(f"[ANIME3D_LIGHTS] created key/fill/rim world={world_strength}")
+    print(f"[ANIME3D_LIGHTS] key={key.energy} fill={fill.energy} rim={rim.energy} world={world_strength}")
 
 
 def setup_anime_materials(obj_or_collection: object, preset: str = "default") -> None:
@@ -308,7 +309,9 @@ def apply_anime_animation_polish(
     print("[ANIM] polish applied")
 
 
-def setup_anime_compositor(scene: bpy.types.Scene, preset: str = "default") -> None:
+def _setup_anime_compositor(scene: bpy.types.Scene, args: argparse.Namespace) -> None:
+    if args.postfx != "on":
+        return
     scene.use_nodes = True
     tree = scene.node_tree
     tree.nodes.clear()
@@ -322,7 +325,7 @@ def setup_anime_compositor(scene: bpy.types.Scene, preset: str = "default") -> N
     tree.links.new(render_layers.outputs["Image"], color_balance.inputs["Image"])
     tree.links.new(color_balance.outputs["Image"], glare.inputs["Image"])
     tree.links.new(glare.outputs["Image"], composite.inputs["Image"])
-    print("[ANIME3D_COMP] bloom=fog_glow contrast=enabled")
+    print("[ANIME3D_COMP] enabled=1")
 
 
 def _color_from_temperature(temp_k: float) -> tuple[float, float, float]:
@@ -373,12 +376,6 @@ def _build_procedural_scene(scene: bpy.types.Scene, total_frames: int) -> None:
     bpy.ops.mesh.primitive_plane_add(size=10, location=(0, 0, 0))
     floor = bpy.context.active_object
     floor.name = "Floor"
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.5, depth=1.0, location=(-1.5, 0, 0.5))
-    hero = bpy.context.active_object
-    hero.name = "Hero"
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.5, depth=1.0, location=(1.5, 0, 0.5))
-    enemy = bpy.context.active_object
-    enemy.name = "Enemy"
     bpy.ops.object.light_add(type="AREA", location=(0, -3, 4))
     light = bpy.context.active_object
     light.data.energy = 600
@@ -387,18 +384,6 @@ def _build_procedural_scene(scene: bpy.types.Scene, total_frames: int) -> None:
     scene.camera = camera
     scene.frame_start = 1
     scene.frame_end = total_frames
-    hero.location = (-1.5, 0, 0.5)
-    hero.keyframe_insert(data_path="location", frame=1)
-    hero.location = (-0.5, 0.6, 0.5)
-    hero.rotation_euler = (0, 0, math.radians(20))
-    hero.keyframe_insert(data_path="location", frame=total_frames)
-    hero.keyframe_insert(data_path="rotation_euler", frame=total_frames)
-    enemy.location = (1.5, 0, 0.5)
-    enemy.keyframe_insert(data_path="location", frame=1)
-    enemy.location = (0.5, -0.6, 0.5)
-    enemy.rotation_euler = (0, 0, math.radians(-20))
-    enemy.keyframe_insert(data_path="location", frame=total_frames)
-    enemy.keyframe_insert(data_path="rotation_euler", frame=total_frames)
     camera.location = (0, -6, 2)
     camera.keyframe_insert(data_path="location", frame=1)
     camera.location = (0, -5, 2.5)
@@ -406,33 +391,60 @@ def _build_procedural_scene(scene: bpy.types.Scene, total_frames: int) -> None:
     return None
 
 
-def _generate_procedural_character(seed_value: int) -> bpy.types.Object:
+def _generate_procedural_character(
+    seed_value: int,
+    name_prefix: str = "AnimeCharacter",
+    location: tuple[float, float, float] = (0.0, 0.0, 0.0),
+) -> bpy.types.Object:
     random.seed(seed_value)
-    bpy.ops.object.empty_add(type="PLAIN_AXES", location=(0, 0, 1))
-    root = bpy.context.active_object
-    root.name = "AnimeCharacterRoot"
-    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.25, location=(0, 0, 1.7))
+    base = Vector(location)
+    bpy.ops.object.armature_add(enter_editmode=True, location=base + Vector((0.0, 0.0, 1.0)))
+    armature = bpy.context.active_object
+    armature.name = f"{name_prefix}_Armature"
+    bones = armature.data.edit_bones
+    root_bone = bones[0]
+    root_bone.name = "root"
+    head_bone = bones.new("head")
+    head_bone.head = (0.0, 0.0, 0.5)
+    head_bone.tail = (0.0, 0.0, 0.8)
+    jaw_bone = bones.new("jaw")
+    jaw_bone.head = (0.0, 0.0, 0.4)
+    jaw_bone.tail = (0.0, 0.0, 0.5)
+    jaw_bone.parent = head_bone
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.25, location=base + Vector((0.0, 0.0, 1.7)))
     head = bpy.context.active_object
-    head.parent = root
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.2, depth=0.6, location=(0, 0, 1.25))
+    head.name = f"{name_prefix}_Head"
+    head.parent = armature
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.2, depth=0.6, location=base + Vector((0.0, 0.0, 1.25)))
     torso = bpy.context.active_object
-    torso.parent = root
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.08, depth=0.5, location=(0.25, 0, 1.2))
+    torso.name = f"{name_prefix}_Torso"
+    torso.parent = armature
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.08, depth=0.5, location=base + Vector((0.25, 0.0, 1.2)))
     arm_r = bpy.context.active_object
+    arm_r.name = f"{name_prefix}_Arm_R"
     arm_r.rotation_euler = (0, 0, math.radians(90))
-    arm_r.parent = root
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.08, depth=0.5, location=(-0.25, 0, 1.2))
+    arm_r.parent = armature
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.08, depth=0.5, location=base + Vector((-0.25, 0.0, 1.2)))
     arm_l = bpy.context.active_object
+    arm_l.name = f"{name_prefix}_Arm_L"
     arm_l.rotation_euler = (0, 0, math.radians(90))
-    arm_l.parent = root
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.09, depth=0.6, location=(0.12, 0, 0.6))
+    arm_l.parent = armature
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.09, depth=0.6, location=base + Vector((0.12, 0.0, 0.6)))
     leg_r = bpy.context.active_object
-    leg_r.parent = root
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.09, depth=0.6, location=(-0.12, 0, 0.6))
+    leg_r.name = f"{name_prefix}_Leg_R"
+    leg_r.parent = armature
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.09, depth=0.6, location=base + Vector((-0.12, 0.0, 0.6)))
     leg_l = bpy.context.active_object
-    leg_l.parent = root
+    leg_l.name = f"{name_prefix}_Leg_L"
+    leg_l.parent = armature
     head["mo_role"] = "subject"
     torso["mo_role"] = "subject"
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in (head, torso, arm_r, arm_l, leg_r, leg_l, armature):
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = torso
+    bpy.ops.object.parent_set(type="ARMATURE_AUTO")
     print(f"[ANIME3D_CHAR] source=generated type=procedural_anime seed={seed_value}")
     return head
 
@@ -464,14 +476,46 @@ def _import_character_asset(asset_path: Path) -> tuple[bpy.types.Object | None, 
     return subject, ext.lstrip(".")
 
 
-def ensure_character_present(workdir: Path, seed_value: int) -> tuple[bpy.types.Object, str, str]:
-    asset_path = _find_character_asset(workdir)
+def _ensure_character(
+    scene: bpy.types.Scene,
+    args: argparse.Namespace,
+    assets_dir: Path,
+    seed_value: int,
+) -> tuple[bpy.types.Object, str, str]:
+    if args.character_asset:
+        asset_path = Path(args.character_asset)
+        if asset_path.exists():
+            subject, fmt = _import_character_asset(asset_path)
+            if subject:
+                print(f"[ANIME3D_CHAR] source=provided name={subject.name} format={fmt}")
+                return subject, "provided", fmt
+    asset_path = None
+    chars_dir = assets_dir / "characters"
+    if chars_dir.exists():
+        for ext in (".blend", ".fbx", ".glb", ".gltf"):
+            matches = sorted(chars_dir.glob(f"*{ext}"))
+            if matches:
+                asset_path = matches[0]
+                break
+    if asset_path and asset_path.suffix.lower() == ".blend":
+        with bpy.data.libraries.load(str(asset_path), link=False) as (data_from, data_to):
+            data_to.objects = list(data_from.objects)
+        for obj in data_to.objects:
+            if obj is None:
+                continue
+            scene.collection.objects.link(obj)
+        subject = next((obj for obj in data_to.objects if obj and obj.type == "MESH"), None)
+        if subject:
+            print(f"[ANIME3D_CHAR] source=asset_lib name={subject.name} format=blend")
+            return subject, "asset_lib", "blend"
     if asset_path:
         subject, fmt = _import_character_asset(asset_path)
         if subject:
-            print(f"[ANIME3D_CHAR] source=provided path={asset_path} format={fmt} rig=unknown meshes=1")
-            return subject, "provided", fmt
+            print(f"[ANIME3D_CHAR] source=asset_lib name={subject.name} format={fmt}")
+            return subject, "asset_lib", fmt
     subject = _generate_procedural_character(seed_value)
+    if subject is None:
+        raise RuntimeError("Unable to generate procedural character")
     return subject, "generated", "procedural"
 
 
@@ -1602,7 +1646,6 @@ def main() -> None:
         samples = int(os.getenv("MONEYOS_ANIME3D_SAMPLES", "96"))
     except ValueError:
         samples = 96
-    use_optix = os.getenv("MONEYOS_ANIME3D_USE_OPTIX", "1") != "0"
     tmp_dir = output_path.parent / "tmp" / f"seed_{seed_value}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -1620,50 +1663,24 @@ def main() -> None:
             scene.render.engine = engine
         except Exception:  # noqa: BLE001
             scene.render.engine = "BLENDER_EEVEE"
-        scene.render.resolution_x = 1920
-        scene.render.resolution_y = 1080
-        scene.render.resolution_percentage = 100
         scene.render.fps = 30
     else:
         scene.render.engine = "BLENDER_EEVEE" if args.engine == "eevee" else "CYCLES"
         scene.render.fps = args.fps
-    if quality_enabled:
-        backend, enabled_devices = configure_cycles_render(
-            scene,
-            width=1920,
-            height=1080,
-            samples=samples,
-            use_optix=use_optix,
-            force_gpu=force_gpu,
-        )
-        log_render_backend(scene, backend, enabled_devices, samples, use_optix)
-        if force_gpu and not enabled_devices:
-            raise RuntimeError("GPU render requested but no GPU devices were enabled.")
+    if quality_enabled and (args.engine != "eevee" or force_gpu):
+        _configure_cycles_gpu_optix(scene, args)
     if args.duration is None or args.duration <= 0:
         raise RuntimeError("Duration must be provided and > 0.")
     total_frames = max(1, int(round(args.duration * args.fps)))
     scene.frame_start = 1
     scene.frame_end = total_frames
     scene.frame_set(0)
-    try:
-        width_str, height_str = args.res.lower().split("x", 1)
-        scene.render.resolution_x = int(width_str)
-        scene.render.resolution_y = int(height_str)
-    except ValueError:
-        scene.render.resolution_x = 1920
-        scene.render.resolution_y = 1080
+    _apply_resolution(scene, args)
     scene.render.image_settings.file_format = "PNG"
     scene.render.use_file_extension = True
     frames_dir = output_path.parent / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     scene.render.filepath = str(frames_dir / "frame_####")
-    scene.render.resolution_x = 1920
-    scene.render.resolution_y = 1080
-    scene.render.resolution_percentage = 100
-    print(
-        f"[ANIME3D_RENDER] FINAL_RES={scene.render.resolution_x}x{scene.render.resolution_y} "
-        f"FPS={scene.render.fps}"
-    )
 
     scene.render.use_freestyle = args.outline_mode == "freestyle"
     if hasattr(scene.render, "line_thickness"):
@@ -1683,13 +1700,13 @@ def main() -> None:
     if procedural_fallback:
         print("[ASSETS] missing assets detected. Using procedural fallback.")
         _build_procedural_scene(scene, total_frames)
-        subject_obj, char_source, char_fmt = ensure_character_present(output_path.parent, seed_value)
+        subject_obj, char_source, char_fmt = _ensure_character(scene, args, assets_dir, seed_value)
         _apply_outlines(scene, outlines_mode)
         if quality_enabled:
-            setup_anime_lighting(scene, subject_obj, preset=light_preset)
+            _setup_anime_lighting(scene, subject_obj)
             setup_anime_materials(scene.collection, preset=light_preset)
             if compositor_enabled:
-                setup_anime_compositor(scene, preset=light_preset)
+                _setup_anime_compositor(scene, args)
             if scene.camera:
                 camera_modes = ["push_in", "orbit", "handheld", "static"]
                 camera_mode = camera_modes[seed_value % len(camera_modes)]
@@ -1783,11 +1800,11 @@ def main() -> None:
         args.mode,
     )
     if quality_enabled:
-        subject_obj, char_source, char_fmt = ensure_character_present(output_path.parent, seed_value)
-        setup_anime_lighting(scene, subject_obj, preset=light_preset)
+        subject_obj, char_source, char_fmt = _ensure_character(scene, args, assets_dir, seed_value)
+        _setup_anime_lighting(scene, subject_obj)
         setup_anime_materials(scene.collection, preset=light_preset)
         if compositor_enabled:
-            setup_anime_compositor(scene, preset=light_preset)
+            _setup_anime_compositor(scene, args)
         camera_modes = ["push_in", "orbit", "handheld", "static"]
         camera_mode = camera_modes[seed_value % len(camera_modes)]
         camera_obj = objects.get("camera") if isinstance(objects, dict) else scene.camera
