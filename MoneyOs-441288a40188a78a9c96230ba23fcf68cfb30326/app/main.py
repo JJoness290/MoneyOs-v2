@@ -640,7 +640,12 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                 final_mp4_path = Path(final_mp4_path)
                 if not final_mp4_path.exists():
                     raise RuntimeError(f"Missing rendered clip for shot_index={index}: {final_mp4_path}")
-                shutil.copy2(str(final_mp4_path), str(clip_path))
+                src = Path(final_mp4_path).resolve()
+                dst = Path(clip_path).resolve()
+                if src != dst:
+                    shutil.copy2(str(src), str(dst))
+                else:
+                    print(f"[PHASE25_COPY_SKIP] src==dst {dst}")
                 clip_md5 = md5_file(str(clip_path))
                 assert isinstance(clip_md5, str) and clip_md5
                 if clip_md5 in seen_md5:
