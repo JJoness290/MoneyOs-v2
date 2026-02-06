@@ -90,7 +90,7 @@ def _seed_randomness(seed_value: int) -> None:
         pass
 
 
-def configure_cycles_gpu_devices(prefer_optix: bool = True, force_gpu: bool = True) -> tuple[str | None, list[str]]:
+def configure_cycles_gpu_optix(prefer_optix: bool = True, force_gpu: bool = True) -> tuple[str | None, list[str]]:
     try:
         cycles_prefs = bpy.context.preferences.addons.get("cycles")
     except Exception:  # noqa: BLE001
@@ -132,7 +132,7 @@ def configure_cycles_render(
     force_gpu: bool = True,
 ) -> tuple[str | None, list[str]]:
     scene.render.engine = "CYCLES"
-    backend, enabled = configure_cycles_gpu_devices(prefer_optix=use_optix, force_gpu=force_gpu)
+    backend, enabled = configure_cycles_gpu_optix(prefer_optix=use_optix, force_gpu=force_gpu)
     scene.cycles.device = "GPU" if enabled else "CPU"
     scene.render.resolution_x = width
     scene.render.resolution_y = height
@@ -159,16 +159,12 @@ def log_render_backend(
     samples: int,
     use_optix: bool,
 ) -> None:
-    print(
-        "[RENDER] engine="
-        f"{scene.render.engine} cycles_device={getattr(scene.cycles, 'device', None)} "
-        f"backend={backend} devices={enabled_devices}"
-    )
     denoiser = getattr(scene.cycles, "denoiser", None)
     print(
-        "[RENDER] "
-        f"samples={samples} res={scene.render.resolution_x}x{scene.render.resolution_y} "
-        f"denoise={denoiser} optix={use_optix}"
+        "[ANIME3D_RENDER] "
+        f"engine={scene.render.engine} device={getattr(scene.cycles, 'device', None)} "
+        f"backend={backend} devices={enabled_devices} samples={samples} "
+        f"denoise={denoiser} res={scene.render.resolution_x}x{scene.render.resolution_y}"
     )
 
 
@@ -217,7 +213,10 @@ def setup_anime_lighting(scene: bpy.types.Scene, subject_obj: bpy.types.Object |
         node_tree = world.node_tree
         if node_tree and "Background" in node_tree.nodes:
             node_tree.nodes["Background"].inputs[1].default_value = 0.1
-    print("[LIGHTS] anime 3-point lighting applied")
+    world_strength = 0.1
+    if world:
+        world_strength = node_tree.nodes["Background"].inputs[1].default_value
+    print(f"[ANIME3D_LIGHTS] created key/fill/rim world={world_strength}")
 
 
 def setup_anime_materials(obj_or_collection: object, preset: str = "default") -> None:
@@ -323,7 +322,7 @@ def setup_anime_compositor(scene: bpy.types.Scene, preset: str = "default") -> N
     tree.links.new(render_layers.outputs["Image"], color_balance.inputs["Image"])
     tree.links.new(color_balance.outputs["Image"], glare.inputs["Image"])
     tree.links.new(glare.outputs["Image"], composite.inputs["Image"])
-    print("[COMP] compositor enabled")
+    print("[ANIME3D_COMP] bloom=fog_glow contrast=enabled")
 
 
 def _color_from_temperature(temp_k: float) -> tuple[float, float, float]:
@@ -374,10 +373,10 @@ def _build_procedural_scene(scene: bpy.types.Scene, total_frames: int) -> None:
     bpy.ops.mesh.primitive_plane_add(size=10, location=(0, 0, 0))
     floor = bpy.context.active_object
     floor.name = "Floor"
-    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(-1.5, 0, 0.5))
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.5, depth=1.0, location=(-1.5, 0, 0.5))
     hero = bpy.context.active_object
     hero.name = "Hero"
-    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(1.5, 0, 0.5))
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.5, depth=1.0, location=(1.5, 0, 0.5))
     enemy = bpy.context.active_object
     enemy.name = "Enemy"
     bpy.ops.object.light_add(type="AREA", location=(0, -3, 4))
@@ -436,6 +435,44 @@ def _generate_procedural_character(seed_value: int) -> bpy.types.Object:
     torso["mo_role"] = "subject"
     print(f"[ANIME3D_CHAR] source=generated type=procedural_anime seed={seed_value}")
     return head
+
+
+def _find_character_asset(workdir: Path) -> Path | None:
+    search_dirs = [workdir, workdir / "assets", workdir / "characters"]
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        for ext in (".glb", ".gltf", ".fbx", ".vrm"):
+            matches = sorted(directory.glob(f"*{ext}"))
+            if matches:
+                return matches[0]
+    return None
+
+
+def _import_character_asset(asset_path: Path) -> tuple[bpy.types.Object | None, str]:
+    ext = asset_path.suffix.lower()
+    if ext in {".glb", ".gltf"}:
+        bpy.ops.import_scene.gltf(filepath=str(asset_path))
+    elif ext == ".fbx":
+        bpy.ops.import_scene.fbx(filepath=str(asset_path))
+    elif ext == ".vrm":
+        return None, "vrm_unsupported"
+    meshes = [obj for obj in bpy.context.selected_objects if obj.type == "MESH"]
+    if not meshes:
+        meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
+    subject = meshes[0] if meshes else None
+    return subject, ext.lstrip(".")
+
+
+def ensure_character_present(workdir: Path, seed_value: int) -> tuple[bpy.types.Object, str, str]:
+    asset_path = _find_character_asset(workdir)
+    if asset_path:
+        subject, fmt = _import_character_asset(asset_path)
+        if subject:
+            print(f"[ANIME3D_CHAR] source=provided path={asset_path} format={fmt} rig=unknown meshes=1")
+            return subject, "provided", fmt
+    subject = _generate_procedural_character(seed_value)
+    return subject, "generated", "procedural"
 
 
 def _apply_outlines(scene: bpy.types.Scene, mode: str) -> None:
@@ -1583,8 +1620,8 @@ def main() -> None:
             scene.render.engine = engine
         except Exception:  # noqa: BLE001
             scene.render.engine = "BLENDER_EEVEE"
-        scene.render.resolution_x = 1280
-        scene.render.resolution_y = 720
+        scene.render.resolution_x = 1920
+        scene.render.resolution_y = 1080
         scene.render.resolution_percentage = 100
         scene.render.fps = 30
     else:
@@ -1613,13 +1650,20 @@ def main() -> None:
         scene.render.resolution_x = int(width_str)
         scene.render.resolution_y = int(height_str)
     except ValueError:
-        scene.render.resolution_x = 1280
-        scene.render.resolution_y = 720
+        scene.render.resolution_x = 1920
+        scene.render.resolution_y = 1080
     scene.render.image_settings.file_format = "PNG"
     scene.render.use_file_extension = True
     frames_dir = output_path.parent / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     scene.render.filepath = str(frames_dir / "frame_####")
+    scene.render.resolution_x = 1920
+    scene.render.resolution_y = 1080
+    scene.render.resolution_percentage = 100
+    print(
+        f"[ANIME3D_RENDER] FINAL_RES={scene.render.resolution_x}x{scene.render.resolution_y} "
+        f"FPS={scene.render.fps}"
+    )
 
     scene.render.use_freestyle = args.outline_mode == "freestyle"
     if hasattr(scene.render, "line_thickness"):
@@ -1639,7 +1683,7 @@ def main() -> None:
     if procedural_fallback:
         print("[ASSETS] missing assets detected. Using procedural fallback.")
         _build_procedural_scene(scene, total_frames)
-        subject_obj = _generate_procedural_character(seed_value)
+        subject_obj, char_source, char_fmt = ensure_character_present(output_path.parent, seed_value)
         _apply_outlines(scene, outlines_mode)
         if quality_enabled:
             setup_anime_lighting(scene, subject_obj, preset=light_preset)
@@ -1653,7 +1697,7 @@ def main() -> None:
         if watermark_enabled:
             _apply_watermark(
                 scene,
-                f"key_art_v1 | 1080p | S{samples} | CHAR:procedural | SRC:generated",
+                f"key_art_v1 | 1080p | S{samples} | CHAR:{char_fmt} | SRC:{char_source}",
             )
         _write_report(
             report_path,
@@ -1739,7 +1783,7 @@ def main() -> None:
         args.mode,
     )
     if quality_enabled:
-        subject_obj = _get_subject_object(scene)
+        subject_obj, char_source, char_fmt = ensure_character_present(output_path.parent, seed_value)
         setup_anime_lighting(scene, subject_obj, preset=light_preset)
         setup_anime_materials(scene.collection, preset=light_preset)
         if compositor_enabled:
@@ -1755,7 +1799,7 @@ def main() -> None:
         if watermark_enabled:
             _apply_watermark(
                 scene,
-                f"key_art_v1 | 1080p | S{samples} | CHAR:asset | SRC:provided",
+                f"key_art_v1 | 1080p | S{samples} | CHAR:{char_fmt} | SRC:{char_source}",
             )
 
     selection = {
