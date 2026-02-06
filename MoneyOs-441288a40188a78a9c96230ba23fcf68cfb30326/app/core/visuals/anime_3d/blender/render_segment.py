@@ -1319,9 +1319,7 @@ def main() -> None:
         "light_variant": visibility_info.get("light_variant"),
         "hue_variant": visibility_info.get("hue_variant"),
     }
-    fingerprint = args.fingerprint.strip() or hashlib.sha1(
-        json.dumps(selection, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:12]
+    fingerprint = args.fingerprint.strip() or str(seed_value)
     print(
         "[FINGERPRINT] "
         f"seed={seed_value} fp={fingerprint} env={selected_env} "

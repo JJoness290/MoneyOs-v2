@@ -58,6 +58,17 @@ def _load_fingerprint(output_dir: Path) -> str | None:
     return data.get("fingerprint")
 
 
+def _extract_seed(cmd_path: Path) -> str | None:
+    if not cmd_path.exists():
+        return None
+    text = cmd_path.read_text(encoding="utf-8")
+    parts = text.split()
+    for idx, token in enumerate(parts):
+        if token == "--seed" and idx + 1 < len(parts):
+            return parts[idx + 1]
+    return None
+
+
 def main() -> int:
     overrides = {
         "duration_seconds": 4.0,
@@ -69,6 +80,15 @@ def main() -> int:
     job_id_b = uuid.uuid4().hex
     result_a = render_anime_3d_60s(job_id_a, overrides=overrides)
     result_b = render_anime_3d_60s(job_id_b, overrides=overrides)
+
+    seed_a = _extract_seed(result_a.output_dir / "blender_cmd.txt")
+    seed_b = _extract_seed(result_b.output_dir / "blender_cmd.txt")
+    if seed_a is None or seed_b is None:
+        print("Missing --seed in blender_cmd.txt")
+        return 3
+    if seed_a == seed_b:
+        print("Uniqueness test failed: seeds match")
+        return 1
 
     frame_a = result_a.output_dir / "frames" / "frame_0075.png"
     frame_b = result_b.output_dir / "frames" / "frame_0075.png"
@@ -85,6 +105,8 @@ def main() -> int:
         md5_b = _md5(result_b.output_dir / "segment.mp4")
     print(f"fingerprint_a={_load_fingerprint(result_a.output_dir)}")
     print(f"fingerprint_b={_load_fingerprint(result_b.output_dir)}")
+    print(f"seed_a={seed_a}")
+    print(f"seed_b={seed_b}")
     print(f"framehash_a={hash_a}")
     print(f"framehash_b={hash_b}")
     print(f"segment_md5_a={md5_a}")

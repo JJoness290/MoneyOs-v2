@@ -60,7 +60,7 @@ def build_blender_command(
     engine = BLENDER_ENGINE
     gpu_flag = "1" if BLENDER_GPU else "0"
     if flags_requiring_value is None:
-        flags_requiring_value = {"--character-asset"}
+        flags_requiring_value = {"--character-asset", "--seed", "--fingerprint"}
     validate_no_empty_value_flags(args, flags_requiring_value)
     return [
         str(blender_path),

@@ -323,7 +323,7 @@ def _validate_blender_artifacts(output_dir: Path, report_path: Path) -> None:
 
 
 def _derive_episode_seed(job_id: str | None, output_dir: Path) -> int:
-    seed_source = job_id if job_id else str(output_dir)
+    seed_source = job_id if job_id else output_dir.name
     digest = hashlib.sha256(seed_source.encode("utf-8")).hexdigest()
     seed_value = int(digest[:8], 16) & 0x7FFFFFFF
     if seed_value == 0:
@@ -331,22 +331,43 @@ def _derive_episode_seed(job_id: str | None, output_dir: Path) -> int:
     return seed_value
 
 
-def _build_fingerprint(payload: dict[str, object]) -> str:
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha1(encoded.encode("utf-8")).hexdigest()[:12]
+def _build_fingerprint(fingerprint_source: str) -> str:
+    return fingerprint_source
 
 
 def _write_test_dummy_frames(frames_dir: Path, seed_value: int) -> None:
     frames_dir.mkdir(parents=True, exist_ok=True)
     r_value = seed_value % 255
     g_value = (seed_value // 7) % 255
-    b_value = 120
-    for index in range(1, 76):
+    for index in range(1, 151):
+        b_value = (120 + index) % 255
         target = frames_dir / f"frame_{index:04d}.png"
         with target.open("w", encoding="utf-8") as handle:
             handle.write("P3\\n64 64\\n255\\n")
             for _ in range(64 * 64):
                 handle.write(f"{r_value} {g_value} {b_value} ")
+
+
+def _proof_static_frames(frames_dir: Path, report_path: Path) -> None:
+    frame_targets = ["frame_0001.png", "frame_0075.png", "frame_0150.png"]
+    hashes: list[str] = []
+    for name in frame_targets:
+        path = frames_dir / name
+        if not path.exists():
+            continue
+        hashes.append(hashlib.sha256(path.read_bytes()).hexdigest())
+    if not hashes:
+        return
+    all_identical = len(set(hashes)) == 1
+    mouth_keyframes = 0
+    if report_path.exists():
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            mouth_keyframes = int(payload.get("mouth_keyframes", 0) or 0)
+        except json.JSONDecodeError:
+            mouth_keyframes = 0
+    if all_identical or (hashes[0] == hashes[-1] and mouth_keyframes > 0):
+        raise RuntimeError("motion check failed: frames appear static")
 
 
 def _generate_audio(output_dir: Path, duration_s: float, status_callback: StatusCallback) -> Path:
@@ -480,20 +501,10 @@ def render_anime_3d_60s(
     _ensure_assets()
     output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
+    fingerprint_source = job_id or output_dir.name
     if seed_value is None:
-        seed_value = _derive_episode_seed(job_id, output_dir)
-    fingerprint_payload = {
-        "episode_id": job_id,
-        "seed": seed_value,
-        "assets_dir": str(get_assets_root()),
-        "environment": environment,
-        "mode": mode,
-        "style_preset": style_preset,
-        "duration": f"{duration_s:.6f}",
-        "fps": fps,
-        "res": res,
-    }
-    fingerprint = _build_fingerprint(fingerprint_payload)
+        seed_value = _derive_episode_seed(fingerprint_source, output_dir)
+    fingerprint = _build_fingerprint(fingerprint_source)
     planned_paths = [
         output_dir / "render_report.json",
         output_dir / "segment.mp4",
@@ -612,6 +623,7 @@ def render_anime_3d_60s(
         }
         report_path.write_text(json.dumps(report_payload, indent=2), encoding="utf-8")
         _write_test_dummy_frames(frames_dir, seed_value)
+        _proof_static_frames(frames_dir, report_path)
         if shutil.which("ffmpeg"):
             _assemble_frames_video(frames_dir, fps, audio_path, video_path, warnings, report_path)
         else:
@@ -687,6 +699,7 @@ def render_anime_3d_60s(
             f"Stdout (tail):\n{tail_stdout}\n"
             f"Stderr (tail):\n{tail_stderr}"
         )
+    _proof_static_frames(frames_dir, report_path)
     _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
     _assemble_frames_video(
         frames_dir,
