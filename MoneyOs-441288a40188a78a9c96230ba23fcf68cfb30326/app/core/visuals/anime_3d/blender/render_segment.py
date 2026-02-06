@@ -29,6 +29,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--assets-dir", required=True)
     parser.add_argument("--asset-mode", default="auto")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--fingerprint", default="")
     parser.add_argument("--strict-assets", type=int, default=1)
     parser.add_argument("--environment", default="room")
     parser.add_argument("--character-asset", default="")
@@ -78,6 +79,14 @@ def _seed_randomness(seed_value: int) -> None:
         np = None
     if np is not None:
         np.random.seed(seed_value)
+    try:
+        scene = bpy.context.scene
+        if hasattr(scene, "seed"):
+            scene.seed = seed_value
+        if hasattr(scene, "cycles") and hasattr(scene.cycles, "seed"):
+            scene.cycles.seed = seed_value
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _color_from_temperature(temp_k: float) -> tuple[float, float, float]:
@@ -358,7 +367,7 @@ def _create_scene(
     }
 
 
-def _ensure_world_light(scene: bpy.types.Scene) -> float:
+def _ensure_world_light(scene: bpy.types.Scene, rng: random.Random) -> tuple[float, float]:
     if scene.world is None:
         scene.world = bpy.data.worlds.new("World")
     world = scene.world
@@ -370,10 +379,11 @@ def _ensure_world_light(scene: bpy.types.Scene) -> float:
     background = nodes.new(type="ShaderNodeBackground")
     strength = 1.7
     background.inputs["Strength"].default_value = strength
+    hue_variant = rng.uniform(-0.06, 0.06)
     gradient = nodes.new(type="ShaderNodeTexGradient")
     ramp = nodes.new(type="ShaderNodeValToRGB")
-    ramp.color_ramp.elements[0].color = (0.55, 0.62, 0.7, 1.0)
-    ramp.color_ramp.elements[1].color = (0.15, 0.18, 0.22, 1.0)
+    ramp.color_ramp.elements[0].color = (0.55 + hue_variant, 0.62, 0.7, 1.0)
+    ramp.color_ramp.elements[1].color = (0.15, 0.18 + hue_variant, 0.22, 1.0)
     mapping = nodes.new(type="ShaderNodeMapping")
     tex_coord = nodes.new(type="ShaderNodeTexCoord")
     links.new(tex_coord.outputs.get("Generated"), mapping.inputs.get("Vector"))
@@ -381,7 +391,7 @@ def _ensure_world_light(scene: bpy.types.Scene) -> float:
     links.new(gradient.outputs.get("Fac"), ramp.inputs.get("Fac"))
     links.new(ramp.outputs.get("Color"), background.inputs.get("Color"))
     links.new(background.outputs.get("Background"), output.inputs.get("Surface"))
-    return strength
+    return strength, hue_variant
 
 
 def _ensure_ground_plane() -> bpy.types.Object:
@@ -411,7 +421,7 @@ def _ensure_ground_plane() -> bpy.types.Object:
     return plane
 
 
-def _ensure_light_rig(rng: random.Random | None = None) -> tuple[list[bpy.types.Object], dict[str, object]]:
+def _ensure_light_rig(rng: random.Random | None = None) -> tuple[list[bpy.types.Object], dict[str, object], str]:
     lights: list[bpy.types.Object] = []
     bpy.ops.object.light_add(type="AREA", location=(4.0, -3.5, 4.5))
     key = bpy.context.active_object
@@ -436,6 +446,7 @@ def _ensure_light_rig(rng: random.Random | None = None) -> tuple[list[bpy.types.
         "color": list(getattr(key.data, "color", (1.0, 1.0, 1.0))),
         "rotation": [key.rotation_euler.x, key.rotation_euler.y, key.rotation_euler.z],
     }
+    light_variant = "base"
     if rng:
         jitter = rng.uniform(-0.3, 0.3)
         key.rotation_euler.z += jitter
@@ -449,7 +460,8 @@ def _ensure_light_rig(rng: random.Random | None = None) -> tuple[list[bpy.types.
             "rotation": [key.rotation_euler.x, key.rotation_euler.y, key.rotation_euler.z],
             "temperature": temp,
         }
-    return lights, key_params
+        light_variant = "jittered"
+    return lights, key_params, light_variant
 
 
 def _ensure_visual_density(scene: bpy.types.Scene, duration_s: float, fps: int) -> None:
@@ -633,23 +645,28 @@ def _setup_visibility_scene(
     camera: bpy.types.Object | None,
     rng: random.Random,
 ) -> dict[str, object]:
-    world_strength = _ensure_world_light(scene)
+    world_strength, hue_variant = _ensure_world_light(scene, rng)
     _ensure_ground_plane()
-    _, key_light_params = _ensure_light_rig(rng)
+    _, key_light_params, light_variant = _ensure_light_rig(rng)
     _safe_set(scene.view_settings, "exposure", 0.8 + rng.uniform(-0.15, 0.15))
     framing = _frame_camera(camera) if camera else None
     camera_params = framing["camera_params"] if framing else None
     camera_preset_name = None
+    camera_variant = None
     if camera:
         preset = rng.choice(_camera_presets())
         camera_preset_name = preset.get("name")
         camera_params = _apply_camera_preset(camera, preset, rng)
+        camera_variant = camera_preset_name
     return {
         "world_strength": world_strength,
         "subject_bbox": framing["subject_bbox"] if framing else None,
         "camera_params": camera_params,
         "camera_preset": camera_preset_name,
         "key_light_params": key_light_params,
+        "camera_variant": camera_variant,
+        "light_variant": light_variant,
+        "hue_variant": hue_variant,
     }
 
 
@@ -1296,11 +1313,28 @@ def main() -> None:
         "mode": args.mode,
         "style_preset": args.style_preset,
     }
-    fingerprint = hashlib.sha256(json.dumps(selection, sort_keys=True).encode("utf-8")).hexdigest()[:16]
-    print(f"[FINGERPRINT] {fingerprint}")
+    chosen_variation = {
+        "camera_variant": visibility_info.get("camera_variant"),
+        "light_variant": visibility_info.get("light_variant"),
+        "hue_variant": visibility_info.get("hue_variant"),
+    }
+    fingerprint = args.fingerprint.strip() or hashlib.sha1(
+        json.dumps(selection, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:12]
+    print(
+        "[FINGERPRINT] "
+        f"seed={seed_value} fp={fingerprint} env={selected_env} "
+        f"mode={args.mode} assets={assets_dir}"
+    )
     _write_report(
         report_path,
-        {"status": "started", "fingerprint": fingerprint, "parsed_args": vars(args), **selection},
+        {
+            "status": "started",
+            "fingerprint": fingerprint,
+            "parsed_args": vars(args),
+            "chosen_variation": chosen_variation,
+            **selection,
+        },
     )
 
     bpy.ops.render.render(animation=True, write_still=False)
@@ -1329,6 +1363,7 @@ def main() -> None:
         "subject_bbox": visibility_info.get("subject_bbox"),
         "camera_params": visibility_info.get("camera_params"),
         "world_strength": visibility_info.get("world_strength"),
+        "chosen_variation": chosen_variation,
         "seed": seed_value,
         "assets_dir": str(assets_dir),
         "selected_environment": selected_env,

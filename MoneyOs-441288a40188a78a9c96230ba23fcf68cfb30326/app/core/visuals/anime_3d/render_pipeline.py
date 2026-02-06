@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import time
 import wave
+import zlib
 from typing import Callable
 
 from moviepy.editor import AudioFileClip, CompositeAudioClip
@@ -303,10 +304,36 @@ def _framehash_for_image(image_path: Path) -> str | None:
     return lines[-1].split(",")[-1].strip()
 
 
+def _validate_blender_artifacts(output_dir: Path, report_path: Path) -> None:
+    blender_cmd_path = output_dir / "blender_cmd.txt"
+    if not blender_cmd_path.exists():
+        raise RuntimeError("blender_cmd.txt missing after render")
+    cmd_text = blender_cmd_path.read_text(encoding="utf-8")
+    if "--seed" not in cmd_text:
+        raise RuntimeError("blender_cmd.txt missing --seed argument")
+    if "--fingerprint" not in cmd_text:
+        raise RuntimeError("blender_cmd.txt missing --fingerprint argument")
+    if not report_path.exists():
+        raise RuntimeError("render_report.json missing after render")
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("render_report.json unreadable") from exc
+    if not report.get("seed") or not report.get("fingerprint"):
+        raise RuntimeError("render_report.json missing seed/fingerprint")
+
+
 def _derive_episode_seed(job_id: str | None, output_dir: Path) -> int:
     seed_source = job_id if job_id else str(output_dir)
-    digest = hashlib.sha256(seed_source.encode("utf-8")).hexdigest()
-    return int(digest[:8], 16)
+    seed_value = zlib.crc32(seed_source.encode("utf-8")) & 0xFFFFFFFF
+    if seed_value == 0:
+        seed_value = 1
+    return int(min(seed_value, 2_000_000_000))
+
+
+def _build_fingerprint(payload: dict[str, object]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(encoded.encode("utf-8")).hexdigest()[:12]
 
 
 def _generate_audio(output_dir: Path, duration_s: float, status_callback: StatusCallback) -> Path:
@@ -442,6 +469,18 @@ def render_anime_3d_60s(
     output_dir.mkdir(parents=True, exist_ok=True)
     if seed_value is None:
         seed_value = _derive_episode_seed(job_id, output_dir)
+    fingerprint_payload = {
+        "episode_id": job_id,
+        "seed": seed_value,
+        "assets_dir": str(get_assets_root()),
+        "environment": environment,
+        "mode": mode,
+        "style_preset": style_preset,
+        "duration": f"{duration_s:.6f}",
+        "fps": fps,
+        "res": res,
+    }
+    fingerprint = _build_fingerprint(fingerprint_payload)
     planned_paths = [
         output_dir / "render_report.json",
         output_dir / "segment.mp4",
@@ -480,6 +519,7 @@ def render_anime_3d_60s(
     add_opt(blender_args, "--character-asset", character_asset)
     add_opt(blender_args, "--mode", mode)
     add_opt(blender_args, "--seed", seed_value)
+    add_opt(blender_args, "--fingerprint", fingerprint)
     add_opt(blender_args, "--action", action)
     add_opt(blender_args, "--camera-preset", camera_preset)
     add_opt(blender_args, "--start-frame", start_frame)
@@ -520,6 +560,7 @@ def render_anime_3d_60s(
             "--character-asset",
             "--mode",
             "--seed",
+            "--fingerprint",
             "--style-preset",
             "--outline-mode",
             "--postfx",
@@ -617,6 +658,7 @@ def render_anime_3d_60s(
         raise RuntimeError("segment.mp4 missing after frame encode")
     final_path = output_dir / "final.mp4"
     _finalize_mux(video_path, audio_path, final_path)
+    _validate_blender_artifacts(output_dir, report_path)
     validation = validate_episode(final_path, audio_path, report_path)
     warnings.extend(validation.warnings)
     if not validation.valid:
@@ -651,6 +693,7 @@ def finalize_anime_3d(job_id: str, status_callback: StatusCallback = None) -> An
     if not video_path.exists():
         raise RuntimeError("No video_raw.mp4 or segment.mp4 found to finalize")
     _finalize_mux(video_path, audio_path, final_path)
+    _validate_blender_artifacts(output_dir, report_path)
     validation = validate_episode(final_path, audio_path, report_path)
     warnings.extend(validation.warnings)
     if not validation.valid:
