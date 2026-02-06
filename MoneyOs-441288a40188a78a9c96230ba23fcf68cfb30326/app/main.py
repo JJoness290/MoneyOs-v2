@@ -3,13 +3,14 @@ from __future__ import annotations
 import threading
 import uuid
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from app.config import VIDEO_DIR
+from app.config import OUTPUT_DIR, VIDEO_DIR
 from app.core.pipeline import PipelineResult, run_pipeline
+from src.phase2.clips.phase25_pipeline import Phase25ClipPipeline
 
 app = FastAPI()
 
@@ -50,6 +51,20 @@ def _set_error(job_id: str, message: str) -> None:
         payload = _jobs.setdefault(job_id, {"status": STATUS_IDLE})
         payload["status"] = message
         payload["success"] = False
+
+
+def run_phase25_clips(
+    render_clip: Callable[[dict, int], Path],
+    shot_count: int,
+    max_retries: int = 4,
+) -> list[Path]:
+    pipeline = Phase25ClipPipeline(
+        output_dir=OUTPUT_DIR / "p2" / "clips",
+        memory_path=OUTPUT_DIR / "p2" / "similarity_memory.json",
+        max_retries=max_retries,
+    )
+    attempts = pipeline.generate_clips(shot_count, render_clip)
+    return [attempt.path for attempt in attempts]
 
 
 def _run_job(job_id: str) -> None:
