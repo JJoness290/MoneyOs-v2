@@ -407,6 +407,61 @@ def _build_procedural_scene(scene: bpy.types.Scene, total_frames: int) -> None:
     return None
 
 
+def _generate_procedural_character(seed_value: int) -> bpy.types.Object:
+    random.seed(seed_value)
+    bpy.ops.object.empty_add(type="PLAIN_AXES", location=(0, 0, 1))
+    root = bpy.context.active_object
+    root.name = "AnimeCharacterRoot"
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.25, location=(0, 0, 1.7))
+    head = bpy.context.active_object
+    head.parent = root
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.2, depth=0.6, location=(0, 0, 1.25))
+    torso = bpy.context.active_object
+    torso.parent = root
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.08, depth=0.5, location=(0.25, 0, 1.2))
+    arm_r = bpy.context.active_object
+    arm_r.rotation_euler = (0, 0, math.radians(90))
+    arm_r.parent = root
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.08, depth=0.5, location=(-0.25, 0, 1.2))
+    arm_l = bpy.context.active_object
+    arm_l.rotation_euler = (0, 0, math.radians(90))
+    arm_l.parent = root
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.09, depth=0.6, location=(0.12, 0, 0.6))
+    leg_r = bpy.context.active_object
+    leg_r.parent = root
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.09, depth=0.6, location=(-0.12, 0, 0.6))
+    leg_l = bpy.context.active_object
+    leg_l.parent = root
+    head["mo_role"] = "subject"
+    torso["mo_role"] = "subject"
+    print(f"[ANIME3D_CHAR] source=generated type=procedural_anime seed={seed_value}")
+    return head
+
+
+def _apply_outlines(scene: bpy.types.Scene, mode: str) -> None:
+    mode = mode.strip().lower()
+    if mode == "off":
+        scene.render.use_freestyle = False
+        return
+    if mode == "freestyle":
+        scene.render.use_freestyle = True
+        if hasattr(scene.render, "line_thickness"):
+            scene.render.line_thickness = 1.5
+        return
+    scene.render.use_freestyle = False
+
+
+def _apply_watermark(scene: bpy.types.Scene, label: str) -> None:
+    if scene.camera is None:
+        return
+    bpy.ops.object.text_add(location=(0, 0, 0))
+    text_obj = bpy.context.active_object
+    text_obj.data.body = label
+    text_obj.scale = (0.2, 0.2, 0.2)
+    text_obj.location = scene.camera.location + Vector((1.2, 1.2, -0.6))
+    print("[ANIME3D_STYLE] key_art_v1 applied")
+
+
 def _safe_set(obj: object, attr: str, value: object) -> bool:
     if hasattr(obj, attr):
         try:
@@ -1503,6 +1558,9 @@ def main() -> None:
     quality_enabled = os.getenv("MONEYOS_ANIME3D_QUALITY", "1") != "0"
     force_gpu = os.getenv("MONEYOS_ANIME3D_FORCE_GPU", "1") != "0"
     light_preset = os.getenv("MONEYOS_ANIME3D_LIGHT_PRESET", "default").strip().lower()
+    outlines_mode = os.getenv("MONEYOS_ANIME3D_OUTLINES", "freestyle")
+    compositor_enabled = os.getenv("MONEYOS_ANIME3D_COMPOSITOR", "1") != "0"
+    watermark_enabled = os.getenv("MONEYOS_ANIME3D_WATERMARK", "1") != "0"
     try:
         samples = int(os.getenv("MONEYOS_ANIME3D_SAMPLES", "96"))
     except ValueError:
@@ -1581,15 +1639,22 @@ def main() -> None:
     if procedural_fallback:
         print("[ASSETS] missing assets detected. Using procedural fallback.")
         _build_procedural_scene(scene, total_frames)
+        subject_obj = _generate_procedural_character(seed_value)
+        _apply_outlines(scene, outlines_mode)
         if quality_enabled:
-            subject_obj = _get_subject_object(scene)
             setup_anime_lighting(scene, subject_obj, preset=light_preset)
             setup_anime_materials(scene.collection, preset=light_preset)
-            setup_anime_compositor(scene, preset=light_preset)
+            if compositor_enabled:
+                setup_anime_compositor(scene, preset=light_preset)
             if scene.camera:
                 camera_modes = ["push_in", "orbit", "handheld", "static"]
                 camera_mode = camera_modes[seed_value % len(camera_modes)]
                 setup_anime_camera_motion(scene.camera, subject_obj, camera_mode, total_frames, seed_value)
+        if watermark_enabled:
+            _apply_watermark(
+                scene,
+                f"key_art_v1 | 1080p | S{samples} | CHAR:procedural | SRC:generated",
+            )
         _write_report(
             report_path,
             {
@@ -1677,7 +1742,8 @@ def main() -> None:
         subject_obj = _get_subject_object(scene)
         setup_anime_lighting(scene, subject_obj, preset=light_preset)
         setup_anime_materials(scene.collection, preset=light_preset)
-        setup_anime_compositor(scene, preset=light_preset)
+        if compositor_enabled:
+            setup_anime_compositor(scene, preset=light_preset)
         camera_modes = ["push_in", "orbit", "handheld", "static"]
         camera_mode = camera_modes[seed_value % len(camera_modes)]
         camera_obj = objects.get("camera") if isinstance(objects, dict) else scene.camera
@@ -1685,6 +1751,12 @@ def main() -> None:
             setup_anime_camera_motion(camera_obj, subject_obj, camera_mode, total_frames, seed_value)
         rig_obj = objects.get("rig") if isinstance(objects, dict) else None
         apply_anime_animation_polish(rig_obj, total_frames, seed_value)
+        _apply_outlines(scene, outlines_mode)
+        if watermark_enabled:
+            _apply_watermark(
+                scene,
+                f"key_art_v1 | 1080p | S{samples} | CHAR:asset | SRC:provided",
+            )
 
     selection = {
         "seed": seed_value,
