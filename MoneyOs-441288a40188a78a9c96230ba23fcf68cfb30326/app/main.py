@@ -102,6 +102,7 @@ class AnimeEpisodeRequest(BaseModel):
 
 class Anime3DRequest(BaseModel):
     duration_seconds: Optional[float] = None
+    duration_s: Optional[float] = None
     fps: Optional[int] = None
     res: Optional[str] = None
     quality: Optional[str] = None
@@ -335,10 +336,13 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
 
     try:
         _set_status(job_id, "Generating audio", stage_key="audio", progress_pct=5)
+        overrides = req.dict(exclude_none=True)
+        if "duration_seconds" not in overrides and "duration_s" in overrides:
+            overrides["duration_seconds"] = overrides["duration_s"]
         result = render_anime_3d_60s(
             job_id,
             status_callback=_update,
-            overrides=req.dict(exclude_none=True),
+            overrides=overrides,
         )
         phase = normalize_phase(os.getenv("MONEYOS_PHASE"))
         strict_vfx = os.getenv("MONEYOS_STRICT_VFX", "0") == "1"

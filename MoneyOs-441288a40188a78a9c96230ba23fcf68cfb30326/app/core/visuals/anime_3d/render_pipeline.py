@@ -37,7 +37,7 @@ from app.core.tts import generate_tts
 from app.core.visuals.anime_3d.blender_runner import build_blender_command
 from src.utils.cli_args import add_opt, validate_no_empty_value_flags
 from app.core.visuals.anime_3d.validators import validate_episode
-from app.core.visuals.ffmpeg_utils import has_nvenc, run_ffmpeg
+from app.core.visuals.ffmpeg_utils import has_nvenc, run_ffmpeg, _fallback_to_x264, _uses_nvenc
 from src.utils.win_paths import planned_paths_preflight
 
 
@@ -158,6 +158,24 @@ def _assemble_frames_video(
     warnings: list[str],
     report_path: Path | None = None,
 ) -> None:
+    def _run_ffmpeg_with_logs(command: list[str], output_dir: Path) -> None:
+        mux_cmd_path = output_dir / "mux_cmd.txt"
+        mux_stdout_path = output_dir / "mux_stdout.txt"
+        mux_stderr_path = output_dir / "mux_stderr.txt"
+        mux_cmd_path.write_text(" ".join(command), encoding="utf-8")
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0 and _uses_nvenc(command):
+            fallback = _fallback_to_x264(command)
+            mux_cmd_path.write_text(
+                mux_cmd_path.read_text(encoding="utf-8") + "\n" + " ".join(fallback),
+                encoding="utf-8",
+            )
+            result = subprocess.run(fallback, capture_output=True, text=True, check=False)
+        mux_stdout_path.write_text(result.stdout or "", encoding="utf-8")
+        mux_stderr_path.write_text(result.stderr or "", encoding="utf-8")
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg mux failed; see {mux_stderr_path}")
+
     encode_report_path = output_path.with_name("encode_report.json")
     frame_files = sorted(frames_dir.glob("frame_*.png"))
     if not frame_files:
@@ -256,7 +274,7 @@ def _assemble_frames_video(
         "warnings": warnings,
     }
     try:
-        run_ffmpeg(args)
+        _run_ffmpeg_with_logs(args, output_path.parent)
     except Exception as exc:  # noqa: BLE001
         encode_report["error"] = str(exc)
         encode_report_path.write_text(json.dumps(encode_report, indent=2), encoding="utf-8")
@@ -277,7 +295,9 @@ def _assemble_frames_video(
                 "status": "complete",
                 "frame_count": frame_count,
                 "video_duration": frame_count / float(fps),
+                "output_video": str(output_path),
                 "final_video": str(output_path),
+                "muxed": True,
             }
         )
         report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

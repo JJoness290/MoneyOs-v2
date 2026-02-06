@@ -1289,7 +1289,7 @@ def main() -> None:
         scene.render.fps = args.fps
     if args.duration is None or args.duration <= 0:
         raise RuntimeError("Duration must be provided and > 0.")
-    total_frames = int(math.ceil(args.duration * args.fps))
+    total_frames = max(1, int(round(args.duration * args.fps)))
     scene.frame_start = 1
     scene.frame_end = total_frames
     scene.frame_set(0)
@@ -1337,6 +1337,14 @@ def main() -> None:
             },
         )
         bpy.ops.render.render(animation=True, write_still=False)
+        rendered_report = {
+            "status": "rendered",
+            "frame_count": scene.frame_end,
+            "frames_dir": str(frames_dir),
+            "seed": seed_value,
+            "fingerprint": fingerprint,
+        }
+        report_path.write_text(json.dumps(rendered_report, indent=2), encoding="utf-8")
         render_report = {
             "status": "complete",
             "fingerprint": fingerprint,
@@ -1440,6 +1448,14 @@ def main() -> None:
     )
 
     bpy.ops.render.render(animation=True, write_still=False)
+    rendered_report = {
+        "status": "rendered",
+        "frame_count": scene.frame_end,
+        "frames_dir": str(frames_dir),
+        "seed": seed_value,
+        "fingerprint": fingerprint,
+    }
+    report_path.write_text(json.dumps(rendered_report, indent=2), encoding="utf-8")
 
     render_report = {
         "status": "complete",
