@@ -1370,6 +1370,7 @@ def main() -> None:
         "selected_characters": selection["selected_characters"],
         "camera_preset_name": visibility_info.get("camera_preset"),
         "key_light_params": visibility_info.get("key_light_params"),
+        "mode_used": args.mode,
         "mode": args.mode,
         "style_preset": args.style_preset,
     }

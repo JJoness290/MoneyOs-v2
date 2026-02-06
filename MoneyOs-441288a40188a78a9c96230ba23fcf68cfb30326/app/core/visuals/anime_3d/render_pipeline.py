@@ -303,7 +303,13 @@ def _framehash_for_image(image_path: Path) -> str | None:
     return lines[-1].split(",")[-1].strip()
 
 
-def _validate_blender_artifacts(output_dir: Path, report_path: Path) -> None:
+def _validate_blender_artifacts(
+    output_dir: Path,
+    report_path: Path,
+    *,
+    expected_seed: int | None = None,
+    expected_fingerprint: str | None = None,
+) -> None:
     blender_cmd_path = output_dir / "blender_cmd.txt"
     if not blender_cmd_path.exists():
         raise RuntimeError("blender_cmd.txt missing after render")
@@ -320,6 +326,10 @@ def _validate_blender_artifacts(output_dir: Path, report_path: Path) -> None:
         raise RuntimeError("render_report.json unreadable") from exc
     if not report.get("seed") or not report.get("fingerprint"):
         raise RuntimeError("render_report.json missing seed/fingerprint")
+    if expected_seed is not None and int(report.get("seed")) != expected_seed:
+        raise RuntimeError("render_report.json seed mismatch")
+    if expected_fingerprint is not None and report.get("fingerprint") != expected_fingerprint:
+        raise RuntimeError("render_report.json fingerprint mismatch")
 
 
 def _derive_episode_seed(job_id: str | None, output_dir: Path) -> int:
@@ -331,8 +341,18 @@ def _derive_episode_seed(job_id: str | None, output_dir: Path) -> int:
     return seed_value
 
 
-def _build_fingerprint(fingerprint_source: str) -> str:
-    return fingerprint_source
+def _build_fingerprint(payload: dict[str, object]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _format_cmd(args: list[str]) -> str:
+    def quote(value: str) -> str:
+        if any(char.isspace() for char in value):
+            return f"\"{value}\""
+        return value
+
+    return " ".join(quote(str(arg)) for arg in args)
 
 
 def _write_test_dummy_frames(frames_dir: Path, seed_value: int) -> None:
@@ -504,7 +524,23 @@ def render_anime_3d_60s(
     fingerprint_source = job_id or output_dir.name
     if seed_value is None:
         seed_value = _derive_episode_seed(fingerprint_source, output_dir)
-    fingerprint = _build_fingerprint(fingerprint_source)
+    fingerprint_payload = {
+        "engine": os.getenv("MONEYOS_BLENDER_ENGINE", os.getenv("BLENDER_ENGINE", "eevee")),
+        "environment": environment,
+        "mode": mode,
+        "style_preset": style_preset,
+        "outline_mode": outline_mode,
+        "postfx": postfx,
+        "quality": quality,
+        "res": res,
+        "fps": fps,
+        "duration": f"{duration_s:.6f}",
+        "assets_dir": str(get_assets_root()),
+        "render_preset": render_preset,
+        "seed": seed_value,
+        "id": fingerprint_source,
+    }
+    fingerprint = _build_fingerprint(fingerprint_payload)
     planned_paths = [
         output_dir / "render_report.json",
         output_dir / "segment.mp4",
@@ -614,7 +650,10 @@ def render_anime_3d_60s(
             "--",
             *blender_args,
         ]
-        blender_cmd_path.write_text(" ".join(cmd_preview), encoding="utf-8")
+        blender_cmd_path.write_text(_format_cmd(cmd_preview), encoding="utf-8")
+        cmd_text = blender_cmd_path.read_text(encoding="utf-8")
+        if "--seed" not in cmd_text or "--fingerprint" not in cmd_text:
+            raise RuntimeError("blender_cmd.txt missing --seed/--fingerprint")
         report_payload = {
             "status": "test",
             "seed": seed_value,
@@ -628,7 +667,12 @@ def render_anime_3d_60s(
             _assemble_frames_video(frames_dir, fps, audio_path, video_path, warnings, report_path)
         else:
             video_path.write_text(f"seed={seed_value}\\n", encoding="utf-8")
-        _validate_blender_artifacts(output_dir, report_path)
+        _validate_blender_artifacts(
+            output_dir,
+            report_path,
+            expected_seed=seed_value,
+            expected_fingerprint=fingerprint,
+        )
         return Anime3DResult(
             output_dir=output_dir,
             final_video=video_path,
@@ -637,7 +681,10 @@ def render_anime_3d_60s(
             warnings=warnings,
         )
     cmd = build_blender_command(script_copy_path, blender_args)
-    blender_cmd_path.write_text(" ".join(cmd), encoding="utf-8")
+    blender_cmd_path.write_text(_format_cmd(cmd), encoding="utf-8")
+    cmd_text = blender_cmd_path.read_text(encoding="utf-8")
+    if "--seed" not in cmd_text or "--fingerprint" not in cmd_text:
+        raise RuntimeError("blender_cmd.txt missing --seed/--fingerprint")
     character_asset_label = character_asset if character_asset else "<omitted>"
     _emit_status(
         status_callback,
@@ -715,7 +762,12 @@ def render_anime_3d_60s(
         raise RuntimeError("segment.mp4 missing after frame encode")
     final_path = output_dir / "final.mp4"
     _finalize_mux(video_path, audio_path, final_path)
-    _validate_blender_artifacts(output_dir, report_path)
+    _validate_blender_artifacts(
+        output_dir,
+        report_path,
+        expected_seed=seed_value,
+        expected_fingerprint=fingerprint,
+    )
     validation = validate_episode(final_path, audio_path, report_path)
     warnings.extend(validation.warnings)
     if not validation.valid:
@@ -750,7 +802,12 @@ def finalize_anime_3d(job_id: str, status_callback: StatusCallback = None) -> An
     if not video_path.exists():
         raise RuntimeError("No video_raw.mp4 or segment.mp4 found to finalize")
     _finalize_mux(video_path, audio_path, final_path)
-    _validate_blender_artifacts(output_dir, report_path)
+    _validate_blender_artifacts(
+        output_dir,
+        report_path,
+        expected_seed=seed_value,
+        expected_fingerprint=fingerprint,
+    )
     validation = validate_episode(final_path, audio_path, report_path)
     warnings.extend(validation.warnings)
     if not validation.valid:
