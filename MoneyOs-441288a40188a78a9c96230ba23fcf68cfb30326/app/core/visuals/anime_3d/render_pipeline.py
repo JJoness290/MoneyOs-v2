@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
-import math
 import math
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import time
 import wave
@@ -147,6 +148,7 @@ def _assemble_frames_video(
     audio_path: Path,
     output_path: Path,
     warnings: list[str],
+    report_path: Path | None = None,
 ) -> None:
     _ = audio_path
     encode_report_path = output_path.with_name("encode_report.json")
@@ -238,7 +240,73 @@ def _assemble_frames_video(
         encode_report["error"] = str(exc)
         encode_report_path.write_text(json.dumps(encode_report, indent=2), encoding="utf-8")
         raise
+    _augment_encode_report(
+        encode_report_path,
+        encode_report,
+        report_path,
+        frames_dir,
+    )
+
+
+def _augment_encode_report(
+    encode_report_path: Path,
+    encode_report: dict,
+    report_path: Path | None,
+    frames_dir: Path,
+) -> None:
+    if report_path and report_path.exists():
+        try:
+            render_payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            render_payload = {}
+        for key in ("seed", "fingerprint"):
+            if key in render_payload:
+                encode_report[key] = render_payload[key]
+    if shutil.which("ffmpeg"):
+        first_frame = frames_dir / "frame_0001.png"
+        last_frame = frames_dir / "frame_0001.png"
+        if first_frame.exists():
+            encode_report["first_frame_hash"] = _framehash_for_image(first_frame)
+        frame_files = sorted(frames_dir.glob("frame_*.png"))
+        if frame_files:
+            last_frame = frame_files[-1]
+        if last_frame.exists():
+            encode_report["last_frame_hash"] = _framehash_for_image(last_frame)
     encode_report_path.write_text(json.dumps(encode_report, indent=2), encoding="utf-8")
+
+
+def _framehash_for_image(image_path: Path) -> str | None:
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(image_path),
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "framehash",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    lines = [line for line in result.stdout.splitlines() if line and not line.startswith("#")]
+    if not lines:
+        return None
+    return lines[-1].split(",")[-1].strip()
+
+
+def _derive_episode_seed(job_id: str | None, output_dir: Path) -> int:
+    seed_source = job_id if job_id else str(output_dir)
+    digest = hashlib.sha256(seed_source.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
 
 
 def _generate_audio(output_dir: Path, duration_s: float, status_callback: StatusCallback) -> Path:
@@ -303,6 +371,7 @@ def render_anime_3d_60s(
     character_asset = None
     mode = "default"
     seed_value: int | None = None
+    strict_assets = 1
     action = None
     camera_preset = None
     start_frame = None
@@ -322,6 +391,10 @@ def render_anime_3d_60s(
         mode = str(overrides["mode"]).strip().lower()
     if overrides.get("seed") is not None:
         seed_value = int(overrides["seed"])
+    if overrides.get("strict_assets") is not None:
+        strict_assets = int(bool(overrides["strict_assets"]))
+    else:
+        strict_assets = 1
     if overrides.get("action"):
         action = str(overrides["action"]).strip().lower()
     if overrides.get("camera_preset"):
@@ -367,6 +440,8 @@ def render_anime_3d_60s(
     _ensure_assets()
     output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if seed_value is None:
+        seed_value = _derive_episode_seed(job_id, output_dir)
     planned_paths = [
         output_dir / "render_report.json",
         output_dir / "segment.mp4",
@@ -397,6 +472,7 @@ def render_anime_3d_60s(
     add_opt(blender_args, "--report", report_path)
     add_opt(blender_args, "--assets-dir", get_assets_root())
     add_opt(blender_args, "--asset-mode", ANIME3D_ASSET_MODE)
+    add_opt(blender_args, "--strict-assets", strict_assets)
     if phase15:
         add_opt(blender_args, "--engine", "cycles")
     add_opt(blender_args, "--render-preset", render_preset)
@@ -437,11 +513,13 @@ def render_anime_3d_60s(
             "--report",
             "--assets-dir",
             "--asset-mode",
+            "--strict-assets",
             "--engine",
             "--render-preset",
             "--environment",
             "--character-asset",
             "--mode",
+            "--seed",
             "--style-preset",
             "--outline-mode",
             "--postfx",
@@ -531,6 +609,7 @@ def render_anime_3d_60s(
         audio_path,
         video_path,
         warnings,
+        report_path,
     )
     if not video_path.exists() and video_raw_path.exists():
         video_path = video_raw_path
@@ -566,7 +645,7 @@ def finalize_anime_3d(job_id: str, status_callback: StatusCallback = None) -> An
     report_path = output_dir / "render_report.json"
     if not video_path.exists() and frames_dir.exists():
         _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
-        _assemble_frames_video(frames_dir, ANIME3D_FPS, audio_path, video_path, warnings)
+        _assemble_frames_video(frames_dir, ANIME3D_FPS, audio_path, video_path, warnings, report_path)
     if not video_path.exists() and video_raw_path.exists():
         video_path = video_raw_path
     if not video_path.exists():
