@@ -147,7 +147,14 @@ def bootstrap_dependencies() -> None:
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[GPU] status unavailable: {exc}")
-    web_url = os.getenv("MONEYOS_WEB_URL", "http://127.0.0.1:8000")
+    web_url = os.getenv("MONEYOS_WEB_URL")
+    if not web_url:
+        host = os.getenv("MONEYOS_WEB_HOST", "127.0.0.1")
+        port = os.getenv("MONEYOS_WEB_PORT") or os.getenv("UVICORN_PORT") or os.getenv("PORT")
+        if port:
+            web_url = f"http://{host}:{port}"
+        else:
+            web_url = "http://127.0.0.1:8000"
     print(f"[WEB] MoneyOS web running on {web_url}")
 
 
@@ -339,6 +346,13 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
     try:
         _set_status(job_id, "Generating audio", stage_key="audio", progress_pct=5)
         overrides = req.dict(exclude_none=True)
+        overrides.setdefault("render_preset", "phase15_quality")
+        overrides.setdefault("quality", "max")
+        overrides.setdefault("postfx", True)
+        overrides.setdefault("res", "1920x1080")
+        overrides.setdefault("outline_mode", "off")
+        overrides.setdefault("style_preset", "key_art")
+        overrides.setdefault("disable_overlays", False)
         if req.duration_s is not None:
             overrides["duration_s"] = float(req.duration_s)
         if req.fps is not None:

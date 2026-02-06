@@ -631,9 +631,7 @@ def render_anime_3d_60s(
     report_path = output_dir / "render_report.json"
     frames_dir = output_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
-    script_path = Path(__file__).parent / "blender" / "render_segment.py"
-    script_copy_path = output_dir / "blender_script.py"
-    script_copy_path.write_text(script_path.read_text(encoding="utf-8"), encoding="utf-8")
+    script_path = (Path(__file__).parent / "blender" / "render_segment.py").resolve()
     blender_args: list[str] = []
     add_opt(blender_args, "--output", video_path)
     add_opt(blender_args, "--audio", audio_path)
@@ -715,7 +713,7 @@ def render_anime_3d_60s(
             "--background",
             "--factory-startup",
             "--python",
-            str(script_copy_path),
+            str(script_path),
             "--",
             *blender_args,
         ]
@@ -750,7 +748,7 @@ def render_anime_3d_60s(
             duration_seconds=duration_s,
             warnings=warnings,
         )
-    cmd = build_blender_command(script_copy_path, blender_args)
+    cmd = build_blender_command(script_path, blender_args)
     _assert_seed_fingerprint_in_cmd(cmd)
     blender_cmd_path.write_text(_format_cmd(cmd), encoding="utf-8")
     cmd_text = blender_cmd_path.read_text(encoding="utf-8")
