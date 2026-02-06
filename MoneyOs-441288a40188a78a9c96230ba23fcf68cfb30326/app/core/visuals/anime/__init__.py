@@ -1,0 +1,1 @@
+"""Anime visuals generator package."""
