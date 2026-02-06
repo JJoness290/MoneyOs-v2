@@ -94,7 +94,7 @@ def _resolve_output_dir(args: Iterable[str]) -> Path:
 
 
 def _write_spawn_error(output_dir: Path, command: list[str], error: Exception) -> None:
-    payload = {"stage": "spawn", "error": str(error), "cmd": command}
+    payload = {"stage": "spawn", "error": str(error), "cmd": command, "cwd": str(Path.cwd())}
     (output_dir / "blender_error.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 

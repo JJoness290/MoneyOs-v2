@@ -116,6 +116,7 @@ class Anime3DRequest(BaseModel):
     character_asset: Optional[str] = None
     disable_overlays: Optional[bool] = None
     mode: Optional[str] = None
+    strict_assets: Optional[bool] = None
 
 
 @app.on_event("startup")
@@ -967,7 +968,24 @@ async def generate_anime_episode_3d_60s(
     from app.core.visuals.anime_3d.render_pipeline import _ensure_assets  # noqa: WPS433
 
     try:
-        _ensure_assets()
+        assets_root = get_assets_root()
+        required_assets = {
+            "characters/hero.blend": (assets_root / "characters" / "hero.blend"),
+            "characters/enemy.blend": (assets_root / "characters" / "enemy.blend"),
+            "envs/city.blend": (assets_root / "envs" / "city.blend"),
+            "anims/idle.fbx": (assets_root / "anims" / "idle.fbx"),
+            "anims/run.fbx": (assets_root / "anims" / "run.fbx"),
+            "anims/punch.fbx": (assets_root / "anims" / "punch.fbx"),
+            "vfx/explosion.png": (assets_root / "vfx" / "explosion.png"),
+            "vfx/energy_arc.png": (assets_root / "vfx" / "energy_arc.png"),
+            "vfx/smoke.png": (assets_root / "vfx" / "smoke.png"),
+        }
+        missing = [key for key, path in required_assets.items() if not path.exists()]
+        strict_env = os.getenv("MONEYOS_STRICT_ASSETS") == "1"
+        strict_req = bool(req.strict_assets) if req.strict_assets is not None else False
+        explicit_strict = strict_env or strict_req
+        strict_assets = 1 if explicit_strict else 0
+        _ensure_assets(missing, strict_assets)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     job_id = uuid.uuid4().hex
