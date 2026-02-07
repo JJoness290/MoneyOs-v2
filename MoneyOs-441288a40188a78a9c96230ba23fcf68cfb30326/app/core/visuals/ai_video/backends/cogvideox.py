@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from huggingface_hub import try_to_load_from_cache
-
 from app.core.visuals.ai_video.backends.base import AiVideoBackend, BackendResult, BackendUnavailable
 
 
@@ -12,38 +10,63 @@ class CogVideoXBackend(AiVideoBackend):
     name = "COGVIDEOX"
 
     def __init__(self) -> None:
-        self.model_id = os.getenv("MONEYOS_COGVIDEOX_MODEL_ID", "zai-org/CogVideoX-5b")
+        self.model_id = os.getenv(
+            "MONEYOS_COGVIDEOX_MODEL_ID",
+            os.getenv("MONEYOS_AI_VIDEO_MODEL_ID", "zai-org/CogVideoX-5b"),
+        )
         self._pipe = None
         self._device = "cpu"
+        self._dtype = "float32"
 
-    def is_available(self) -> bool:
-        cached = try_to_load_from_cache(self.model_id, "model_index.json")
-        return cached is not None
+    @staticmethod
+    def is_available() -> bool:
+        try:
+            from diffusers import CogVideoXPipeline  # noqa: F401
+        except Exception as exc:  # noqa: BLE001
+            print(f"[AI-VIDEO] backend=COGVIDEOX import_failed={exc}")
+            return False
+        return True
 
     def load(self) -> None:
         if self._pipe is not None:
             return
         if not self.is_available():
-            raise BackendUnavailable(
-                "CogVideoX model not found in local cache. "
-                "Run: python -c \"from huggingface_hub import snapshot_download; "
-                f"snapshot_download('{self.model_id}')\""
-            )
+            raise BackendUnavailable("CogVideoX pipeline import failed; see logs.")
         if os.getenv("MONEYOS_USE_GPU", "1") != "0":
             import torch
 
             self._device = "cuda" if torch.cuda.is_available() else "cpu"
-        import torch
         from diffusers import CogVideoXPipeline
 
-        dtype = torch.bfloat16
+        import torch
+
+        dtype = torch.float16 if self._device == "cuda" else torch.float32
+        self._dtype = "float16" if self._device == "cuda" else "float32"
         pipe = CogVideoXPipeline.from_pretrained(
             self.model_id,
             torch_dtype=dtype,
-            local_files_only=True,
         )
         pipe = pipe.to(self._device)
+        if hasattr(pipe, "enable_xformers_memory_efficient_attention"):
+            try:
+                pipe.enable_xformers_memory_efficient_attention()
+            except Exception:  # noqa: BLE001
+                pass
+        if hasattr(pipe, "enable_attention_slicing"):
+            try:
+                pipe.enable_attention_slicing()
+            except Exception:  # noqa: BLE001
+                pass
+        if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
+            try:
+                pipe.vae.enable_tiling()
+            except Exception:  # noqa: BLE001
+                pass
         self._pipe = pipe
+        print(
+            "[AI-VIDEO] "
+            f"backend=COGVIDEOX model_id={self.model_id} device={self._device} dtype={self._dtype}"
+        )
 
     def generate(
         self,
@@ -59,11 +82,12 @@ class CogVideoXBackend(AiVideoBackend):
         out_path: Path,
     ) -> BackendResult:
         self.load()
-        import torch
         from diffusers.utils import export_to_video
 
         if self._pipe is None:
             raise BackendUnavailable("CogVideoX pipeline not loaded")
+        import torch
+
         generator = torch.Generator(device=self._device).manual_seed(seed)
         frames = self._pipe(
             prompt=prompt,

@@ -40,17 +40,38 @@ def _select_backend() -> AiVideoBackend:
     requested = os.getenv("MONEYOS_AI_VIDEO_BACKEND", "AUTO").strip().upper()
     requested = requested.replace("COGVIDEＯX", "COGVIDEOX")
     options = _backend_preference()
+    availability = []
+    for backend in options:
+        try:
+            available = backend.is_available()  # type: ignore[call-arg]
+        except Exception as exc:  # noqa: BLE001
+            available = False
+            print(f"[AI-VIDEO] backend={backend.name} is_available_error={exc}")
+        availability.append((backend.name, available))
+    print(f"[AI-VIDEO] backend_availability={availability}")
     if requested != "AUTO":
         for backend in options:
             if backend.name == requested:
-                if backend.is_available():
+                if backend.is_available():  # type: ignore[call-arg]
                     return backend
-                raise BackendUnavailable(f"Requested backend unavailable: {requested}")
+                raise BackendUnavailable(
+                    f"Requested backend unavailable: {requested}; is_available returned False; see logs"
+                )
         raise BackendUnavailable(f"Unknown backend: {requested}")
     for backend in options:
-        if backend.is_available():
+        if backend.is_available():  # type: ignore[call-arg]
             return backend
     raise BackendUnavailable("No AI video backend available. Install CogVideoX/SVD/AnimateDiff.")
+
+
+def backend_availability_table() -> dict[str, bool]:
+    table: dict[str, bool] = {}
+    for backend in _backend_preference():
+        try:
+            table[backend.name] = bool(backend.is_available())  # type: ignore[call-arg]
+        except Exception:  # noqa: BLE001
+            table[backend.name] = False
+    return table
 
 
 def _mean_abs_diff(img_a: Image.Image, img_b: Image.Image) -> float:

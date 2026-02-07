@@ -1073,6 +1073,7 @@ async def finalize_anime_episode_3d(job_id: str = Body(..., embed=True)) -> JSON
 @app.post("/jobs/ai-video-60s")
 async def generate_ai_video_60s(req: AiVideoRequest = Body(...)) -> JSONResponse:
     from app.core.visuals.ai_video.pipeline import run_ai_video_job  # noqa: WPS433
+    from app.core.visuals.ai_video.generator import backend_availability_table, BackendUnavailable  # noqa: WPS433
 
     job_id = uuid.uuid4().hex
     _set_status(job_id, "Queued AI video", stage_key="ai_video", progress_pct=1)
@@ -1080,7 +1081,23 @@ async def generate_ai_video_60s(req: AiVideoRequest = Body(...)) -> JSONResponse
     def _status_update(message: str) -> None:
         _set_status(job_id, message, stage_key="ai_video", progress_pct=50)
 
-    result = run_ai_video_job(job_id, req.script, Path(req.audio_path), status_callback=_status_update)
+    try:
+        result = run_ai_video_job(job_id, req.script, Path(req.audio_path), status_callback=_status_update)
+    except BackendUnavailable as exc:
+        availability = backend_availability_table()
+        payload = {
+            "error": str(exc),
+            "selected_backend": os.getenv("MONEYOS_AI_VIDEO_BACKEND", "AUTO"),
+            "env": {
+                "MONEYOS_AI_VIDEO_BACKEND": os.getenv("MONEYOS_AI_VIDEO_BACKEND"),
+                "MONEYOS_COGVIDEOX_MODEL_ID": os.getenv("MONEYOS_COGVIDEOX_MODEL_ID"),
+                "MONEYOS_AI_VIDEO_MODEL_ID": os.getenv("MONEYOS_AI_VIDEO_MODEL_ID"),
+                "MONEYOS_USE_GPU": os.getenv("MONEYOS_USE_GPU"),
+            },
+            "availability": availability,
+        }
+        _set_error(job_id, f"Error: {exc}", extra=payload)
+        return JSONResponse(payload, status_code=500)
     _set_status(job_id, "Complete", stage_key="done", progress_pct=100)
     return JSONResponse(
         {

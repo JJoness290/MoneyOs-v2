@@ -47,6 +47,7 @@ ffmpeg -version
 
 ```powershell
 $env:MONEYOS_AI_VIDEO_BACKEND="AUTO"   # AUTO | COGVIDEOX | SVD | ANIMATEDIFF
+$env:MONEYOS_COGVIDEOX_MODEL_ID="zai-org/CogVideoX-5b"
 $env:MONEYOS_AI_CLIP_SECONDS="3"
 $env:MONEYOS_AI_TOTAL_SECONDS="60"
 $env:MONEYOS_AI_FPS="16"
@@ -56,6 +57,14 @@ $env:MONEYOS_AI_STEPS="30"
 $env:MONEYOS_AI_GUIDANCE="6.0"
 $env:MONEYOS_USE_GPU="1"
 $env:MONEYOS_NVENC="1"
+```
+
+### PowerShell example (recommended)
+
+```powershell
+$env:MONEYOS_AI_VIDEO_BACKEND="COGVIDEOX"
+$env:MONEYOS_COGVIDEOX_MODEL_ID="zai-org/CogVideoX-5b"
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
 
 ## 6) Run API job
@@ -72,3 +81,5 @@ Outputs:
 outputs/ai_video/<job_id>/final/final.mp4
 outputs/ai_video/<job_id>/final/report.json
 ```
+
+> Note: First run downloads several GB of model weights into the HuggingFace cache. Ensure you have disk space and internet access.
