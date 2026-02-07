@@ -89,7 +89,35 @@ def _audio_valid(audio_path: Path) -> bool:
     return duration > 0.1
 
 
-def _check_motion(video_path: Path, output_dir: Path) -> bool:
+def _framehash_for_image(image_path: Path) -> str | None:
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(image_path),
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "framehash",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    lines = [line for line in result.stdout.splitlines() if line and not line.startswith("#")]
+    if not lines:
+        return None
+    return lines[-1].split(",")[-1].strip()
+
+
+def _check_motion(video_path: Path, output_dir: Path, report_path: Path) -> tuple[bool, dict]:
     frame_a = output_dir / "frame_a.png"
     frame_b = output_dir / "frame_b.png"
     for path in (frame_a, frame_b):
@@ -128,14 +156,28 @@ def _check_motion(video_path: Path, output_dir: Path) -> bool:
         check=False,
     )
     if not frame_a.exists() or not frame_b.exists():
-        return False
+        return False, {}
     image_a = Image.open(frame_a)
     image_b = Image.open(frame_b)
     diff = ImageChops.difference(image_a, image_b)
     bbox = diff.getbbox()
     image_a.close()
     image_b.close()
-    return bbox is not None
+    seed_value = None
+    if report_path.exists():
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            seed_value = report.get("seed")
+        except json.JSONDecodeError:
+            seed_value = None
+    return (
+        bbox is not None,
+        {
+            "seed": seed_value,
+            "frame_a_hash": _framehash_for_image(frame_a),
+            "frame_b_hash": _framehash_for_image(frame_b),
+        },
+    )
 
 
 def _check_vfx_emissive(video_path: Path, output_dir: Path) -> bool:
@@ -192,8 +234,16 @@ def validate_episode(video_path: Path, audio_path: Path, report_path: Path) -> V
         return ValidationReport(valid=False, message="missing duration metadata", warnings=warnings)
     if abs(video_duration - audio_duration) > 0.05:
         return ValidationReport(valid=False, message="audio/video duration mismatch", warnings=warnings)
-    if not _check_motion(video_path, video_path.parent):
-        return ValidationReport(valid=False, message="motion check failed", warnings=warnings)
+    motion_ok, motion_info = _check_motion(video_path, video_path.parent, report_path)
+    if not motion_ok:
+        seed_label = motion_info.get("seed")
+        hash_a = motion_info.get("frame_a_hash")
+        hash_b = motion_info.get("frame_b_hash")
+        message = (
+            "motion check failed "
+            f"seed={seed_label} frame_a={hash_a} frame_b={hash_b}"
+        )
+        return ValidationReport(valid=False, message=message, warnings=warnings)
     if not _check_vfx_emissive(video_path, video_path.parent):
         warnings.append("vfx_emissive_check_failed")
         if strict_vfx or is_phase2_or_higher(phase):

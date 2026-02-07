@@ -3,7 +3,28 @@ from __future__ import annotations
 import os
 from math import floor
 
-import psutil
+import importlib.util
+
+_psutil_spec = importlib.util.find_spec("psutil")
+if _psutil_spec:
+    import psutil
+else:
+    psutil = None  # type: ignore[assignment]
+
+    class _VirtualMemoryStub:
+        total = 8 * (1024**3)
+
+    class _PsutilStub:
+        @staticmethod
+        def cpu_count(logical: bool = True) -> int:
+            _ = logical
+            return 1
+
+        @staticmethod
+        def virtual_memory() -> _VirtualMemoryStub:
+            return _VirtualMemoryStub()
+
+    psutil = _PsutilStub()  # type: ignore[assignment]
 
 _RAM_MODE_CACHE: str | None = None
 _RAM_MODE_LOGGED = False

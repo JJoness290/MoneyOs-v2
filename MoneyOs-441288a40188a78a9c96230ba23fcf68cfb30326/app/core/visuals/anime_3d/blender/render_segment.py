@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import math
+import hashlib
 import json
 import math
+import os
+import random
 import sys
 import wave
 from pathlib import Path
@@ -27,6 +29,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--report", required=True)
     parser.add_argument("--assets-dir", required=True)
     parser.add_argument("--asset-mode", default="auto")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--fingerprint", default="")
+    parser.add_argument("--strict-assets", type=int, default=1)
     parser.add_argument("--environment", default="room")
     parser.add_argument("--character-asset", default="")
     parser.add_argument("--mode", default="default")
@@ -46,6 +51,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--phase15-bounces", type=int, default=6)
     parser.add_argument("--phase15-res", default="1920x1080")
     parser.add_argument("--phase15-tile", type=int, default=256)
+    parser.add_argument("--force-procedural-humanoid", type=int, default=0)
     return parser.parse_args(argv)
 
 
@@ -58,6 +64,546 @@ def _clear_scene() -> None:
 
 def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _derive_seed(output_path: Path, seed_value: int | None) -> int:
+    if seed_value is not None:
+        return int(seed_value)
+    digest = hashlib.sha256(str(output_path.parent).encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
+
+
+def _seed_randomness(seed_value: int) -> None:
+    random.seed(seed_value)
+    try:
+        import numpy as np  # noqa: WPS433
+    except Exception:  # noqa: BLE001
+        np = None
+    if np is not None:
+        np.random.seed(seed_value)
+    try:
+        scene = bpy.context.scene
+        if hasattr(scene, "seed"):
+            scene.seed = seed_value
+        if hasattr(scene, "cycles") and hasattr(scene.cycles, "seed"):
+            scene.cycles.seed = seed_value
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _configure_cycles_gpu_optix(scene: bpy.types.Scene, args: argparse.Namespace) -> dict[str, object]:
+    requested_gpu = str(args.gpu) == "1" and (args.engine or "").lower() == "cycles"
+    compute_device_type = "NONE"
+    devices_info: list[dict[str, object]] = []
+    chosen_device = "CPU"
+    if requested_gpu:
+        try:
+            prefs = bpy.context.preferences
+            cycles_prefs = prefs.addons["cycles"].preferences
+            cycles_prefs.get_devices()
+            if any(device.type == "OPTIX" for device in cycles_prefs.devices):
+                compute_device_type = "OPTIX"
+            elif any(device.type == "CUDA" for device in cycles_prefs.devices):
+                compute_device_type = "CUDA"
+            cycles_prefs.compute_device_type = compute_device_type
+            for device in cycles_prefs.devices:
+                device.use = device.type != "CPU"
+                devices_info.append(
+                    {"name": device.name, "type": device.type, "use": bool(device.use)}
+                )
+            if compute_device_type in {"OPTIX", "CUDA"} and any(
+                device["use"] for device in devices_info if device["type"] != "CPU"
+            ):
+                scene.cycles.device = "GPU"
+                chosen_device = "GPU"
+            else:
+                scene.cycles.device = "CPU"
+                chosen_device = "CPU"
+        except Exception:  # noqa: BLE001
+            scene.cycles.device = "CPU"
+            chosen_device = "CPU"
+            compute_device_type = "NONE"
+    print(
+        "[ANIME3D_GPU] "
+        f"engine={args.engine} requested_gpu={int(requested_gpu)} "
+        f"compute_device_type={compute_device_type} devices={[(d['name'], d['type'], d['use']) for d in devices_info]} "
+        f"chosen_device={chosen_device}"
+    )
+    if requested_gpu:
+        scene.render.engine = "CYCLES"
+    quality = (args.quality or "balanced").lower()
+    samples = args.phase15_samples
+    if quality == "fast":
+        samples = 64
+    elif quality == "max":
+        samples = 128
+    elif quality == "balanced":
+        samples = 96
+    samples = max(64, min(int(samples), 256))
+    _safe_set(scene.cycles, "samples", samples)
+    _safe_set(scene.cycles, "use_adaptive_sampling", True)
+    bounces = max(4, min(int(args.phase15_bounces), 8))
+    _safe_set(scene.cycles, "max_bounces", bounces)
+    _safe_set(scene.cycles, "diffuse_bounces", 2)
+    _safe_set(scene.cycles, "glossy_bounces", 2)
+    _safe_set(scene.cycles, "transparent_max_bounces", 2)
+    _safe_set(scene.cycles, "caustics_reflective", False)
+    _safe_set(scene.cycles, "caustics_refractive", False)
+    _safe_set(scene.cycles, "use_denoising", True)
+    _safe_set(scene.cycles, "denoiser", "OPTIX" if compute_device_type == "OPTIX" else "OPENIMAGEDENOISE")
+    _safe_set(scene.view_settings, "view_transform", "Filmic")
+    _safe_set(scene.view_settings, "look", "Medium High Contrast")
+    denoiser = getattr(scene.cycles, "denoiser", None)
+    print(
+        "[ANIME3D_RENDER] "
+        f"engine=CYCLES backend={compute_device_type} devices={devices_info} samples={samples} "
+        f"bounces={bounces} denoise={denoiser}"
+    )
+    return {
+        "requested": requested_gpu,
+        "compute_device_type": compute_device_type,
+        "devices": devices_info,
+        "scene_device": chosen_device,
+    }
+
+
+def _apply_resolution(scene: bpy.types.Scene, args: argparse.Namespace) -> None:
+    width = 1920
+    height = 1080
+    try:
+        width_str, height_str = args.res.lower().split("x", 1)
+        width = int(width_str)
+        height = int(height_str)
+    except ValueError:
+        width = 1920
+        height = 1080
+    scene.render.resolution_x = width
+    scene.render.resolution_y = height
+    scene.render.resolution_percentage = 100
+    print(f"[ANIME3D_RENDER] FINAL_RES={width}x{height}")
+
+
+def _get_subject_object(scene: bpy.types.Scene) -> bpy.types.Object | None:
+    for obj in scene.objects:
+        if obj.type == "MESH" and obj.get("mo_role") == "subject":
+            return obj
+    for obj in scene.objects:
+        if obj.type == "MESH":
+            return obj
+    return None
+
+
+def _setup_anime_lighting(scene: bpy.types.Scene, subject_obj: bpy.types.Object | None) -> None:
+    collection = bpy.data.collections.get("ANIME_LIGHTS")
+    if collection is None:
+        collection = bpy.data.collections.new("ANIME_LIGHTS")
+        scene.collection.children.link(collection)
+    for obj in list(collection.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
+    subject_location = subject_obj.location if subject_obj else Vector((0, 0, 1))
+    key = bpy.data.lights.new(name="KeyLight", type="AREA")
+    key.energy = 1800
+    key.size = 4.0
+    key_obj = bpy.data.objects.new(name="KeyLight", object_data=key)
+    key_obj.location = subject_location + Vector((2.5, -2.0, 3.0))
+    key_obj.rotation_euler = (math.radians(60), 0, math.radians(40))
+    fill = bpy.data.lights.new(name="FillLight", type="AREA")
+    fill.energy = 450
+    fill.size = 3.0
+    fill_obj = bpy.data.objects.new(name="FillLight", object_data=fill)
+    fill_obj.location = subject_location + Vector((-3.0, -1.0, 2.0))
+    fill_obj.rotation_euler = (math.radians(55), 0, math.radians(-35))
+    rim = bpy.data.lights.new(name="RimLight", type="AREA")
+    rim.energy = 800
+    rim.size = 2.5
+    rim.color = (0.7, 0.8, 1.0)
+    rim_obj = bpy.data.objects.new(name="RimLight", object_data=rim)
+    rim_obj.location = subject_location + Vector((0.0, 3.0, 2.5))
+    rim_obj.rotation_euler = (math.radians(120), 0, 0)
+    for obj in (key_obj, fill_obj, rim_obj):
+        collection.objects.link(obj)
+    world = scene.world
+    if world:
+        world.use_nodes = True
+        node_tree = world.node_tree
+        if node_tree and "Background" in node_tree.nodes:
+            node_tree.nodes["Background"].inputs[1].default_value = 0.1
+    world_strength = 0.1
+    if world:
+        world_strength = node_tree.nodes["Background"].inputs[1].default_value
+    print(f"[ANIME3D_LIGHTS] key={key.energy} fill={fill.energy} rim={rim.energy} world={world_strength}")
+
+
+def setup_anime_materials(obj_or_collection: object, preset: str = "default") -> None:
+    if isinstance(obj_or_collection, bpy.types.Collection):
+        objects = list(obj_or_collection.all_objects)
+    elif isinstance(obj_or_collection, bpy.types.Object):
+        objects = [obj_or_collection]
+    else:
+        return
+    for obj in objects:
+        if obj.type != "MESH":
+            continue
+        for slot in obj.material_slots:
+            mat = slot.material
+            if mat is None:
+                continue
+            mat.use_nodes = True
+            nodes = mat.node_tree.nodes
+            principled = nodes.get("Principled BSDF")
+            if principled:
+                principled.inputs["Roughness"].default_value = 0.45
+                principled.inputs["Specular"].default_value = 0.25
+                principled.inputs["Emission Strength"].default_value = 0.03
+            name_lower = mat.name.lower()
+            if any(tag in name_lower for tag in ("eye", "iris", "pupil")) and principled:
+                principled.inputs["Roughness"].default_value = 0.2
+                principled.inputs["Specular"].default_value = 0.5
+                principled.inputs["Emission Strength"].default_value = 0.05
+    print("[MATERIALS] anime materials applied")
+
+
+def setup_anime_camera_motion(
+    camera: bpy.types.Object,
+    subject: bpy.types.Object | None,
+    mode: str,
+    duration_frames: int,
+    rng_seed: int,
+) -> None:
+    if subject:
+        constraint = camera.constraints.new(type="TRACK_TO")
+        constraint.target = subject
+        constraint.track_axis = "TRACK_NEGATIVE_Z"
+        constraint.up_axis = "UP_Y"
+    random.seed(rng_seed)
+    start = camera.location.copy()
+    end = camera.location.copy()
+    if mode == "push_in":
+        end.y += 0.4
+        end.z += 0.15
+    elif mode == "orbit":
+        end.x += 0.4
+        end.y += 0.2
+    elif mode == "handheld":
+        end.x += 0.1
+        end.y += 0.1
+        end.z += 0.05
+    camera.location = start
+    camera.keyframe_insert(data_path="location", frame=1)
+    camera.location = end
+    camera.keyframe_insert(data_path="location", frame=duration_frames)
+    for fcurve in camera.animation_data.action.fcurves:
+        for keyframe in fcurve.keyframe_points:
+            keyframe.interpolation = "BEZIER"
+            keyframe.handle_left_type = "AUTO_CLAMPED"
+            keyframe.handle_right_type = "AUTO_CLAMPED"
+    print(f"[CAMERA] mode={mode}")
+
+
+def apply_anime_animation_polish(
+    rig: bpy.types.Object | None,
+    duration_frames: int,
+    rng_seed: int,
+) -> None:
+    if rig is None:
+        return
+    random.seed(rng_seed)
+    amplitude = 0.02
+    for obj in (rig,):
+        obj.location.z += amplitude
+        obj.keyframe_insert(data_path="location", frame=1)
+        obj.location.z -= amplitude
+        obj.keyframe_insert(data_path="location", frame=duration_frames)
+        if obj.animation_data:
+            for fcurve in obj.animation_data.action.fcurves:
+                for keyframe in fcurve.keyframe_points:
+                    keyframe.interpolation = "BEZIER"
+                    keyframe.handle_left_type = "AUTO_CLAMPED"
+                    keyframe.handle_right_type = "AUTO_CLAMPED"
+    print("[ANIM] polish applied")
+
+
+def _setup_anime_compositor(scene: bpy.types.Scene, args: argparse.Namespace) -> None:
+    if args.postfx != "on":
+        return
+    scene.use_nodes = True
+    tree = scene.node_tree
+    tree.nodes.clear()
+    render_layers = tree.nodes.new(type="CompositorNodeRLayers")
+    color_balance = tree.nodes.new(type="CompositorNodeColorBalance")
+    glare = tree.nodes.new(type="CompositorNodeGlare")
+    glare.glare_type = "FOG_GLOW"
+    glare.threshold = 0.8
+    glare.quality = "LOW"
+    composite = tree.nodes.new(type="CompositorNodeComposite")
+    tree.links.new(render_layers.outputs["Image"], color_balance.inputs["Image"])
+    tree.links.new(color_balance.outputs["Image"], glare.inputs["Image"])
+    tree.links.new(glare.outputs["Image"], composite.inputs["Image"])
+    print("[ANIME3D_COMP] enabled=1")
+
+
+def _color_from_temperature(temp_k: float) -> tuple[float, float, float]:
+    temp = max(1000.0, min(temp_k, 12000.0)) / 100.0
+    if temp <= 66:
+        red = 1.0
+        green = max(0.0, min(1.0, 0.390081578769 * math.log(temp) - 0.631841443788))
+        blue = 0.0 if temp <= 19 else max(0.0, min(1.0, 0.54320678911 * math.log(temp - 10) - 1.19625408914))
+    else:
+        red = max(0.0, min(1.0, 1.29293618606 * ((temp - 60) ** -0.1332047592)))
+        green = max(0.0, min(1.0, 1.12989086089 * ((temp - 60) ** -0.0755148492)))
+        blue = 1.0
+    return red, green, blue
+
+
+def _discover_assets(assets_dir: Path) -> dict[str, list[Path]]:
+    envs = sorted((assets_dir / "envs").glob("*.blend"))
+    characters = sorted((assets_dir / "characters").glob("*.blend"))
+    anims = sorted((assets_dir / "anims").glob("*.fbx"))
+    vfx = sorted((assets_dir / "vfx").glob("*.*"))
+    return {
+        "envs": envs,
+        "characters": characters,
+        "anims": anims,
+        "vfx": vfx,
+    }
+
+
+def _required_assets(assets_dir: Path) -> dict[str, Path]:
+    return {
+        "characters/hero.blend": assets_dir / "characters" / "hero.blend",
+        "characters/enemy.blend": assets_dir / "characters" / "enemy.blend",
+        "envs/city.blend": assets_dir / "envs" / "city.blend",
+        "anims/idle.fbx": assets_dir / "anims" / "idle.fbx",
+        "anims/run.fbx": assets_dir / "anims" / "run.fbx",
+        "anims/punch.fbx": assets_dir / "anims" / "punch.fbx",
+        "vfx/explosion.png": assets_dir / "vfx" / "explosion.png",
+        "vfx/energy_arc.png": assets_dir / "vfx" / "energy_arc.png",
+        "vfx/smoke.png": assets_dir / "vfx" / "smoke.png",
+    }
+
+
+def _find_missing_assets(assets_dir: Path) -> list[str]:
+    return [key for key, path in _required_assets(assets_dir).items() if not path.exists()]
+
+
+def _create_procedural_humanoid(name: str, location: tuple[float, float, float]) -> tuple[bpy.types.Object, int]:
+    print(f"[ANIME3D_CHAR] source=generated name={name}")
+    bpy.ops.object.empty_add(type="PLAIN_AXES", location=location)
+    root = bpy.context.active_object
+    root.name = name
+    material = bpy.data.materials.new(name=f"{name}_ProceduralMaterial")
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    principled = nodes.get("Principled BSDF")
+    if principled:
+        principled.inputs["Base Color"].default_value = (0.78, 0.7, 0.66, 1.0)
+        principled.inputs["Roughness"].default_value = 0.25
+        principled.inputs["Emission"].default_value = (0.08, 0.06, 0.05, 1.0)
+        principled.inputs["Emission Strength"].default_value = 0.08
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.35, depth=1.1, location=(location[0], location[1], 0.95))
+    torso = bpy.context.active_object
+    torso.name = f"{name}_Torso"
+    torso.scale.x = 0.85
+    torso.scale.y = 0.6
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.25, location=(location[0], location[1], 1.7))
+    head = bpy.context.active_object
+    head.name = f"{name}_Head"
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.08, depth=0.7, location=(location[0] + 0.45, location[1], 1.2))
+    arm_r = bpy.context.active_object
+    arm_r.name = f"{name}_Arm_R"
+    arm_r.rotation_euler = (0.0, math.radians(90), 0.0)
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.08, depth=0.7, location=(location[0] - 0.45, location[1], 1.2))
+    arm_l = bpy.context.active_object
+    arm_l.name = f"{name}_Arm_L"
+    arm_l.rotation_euler = (0.0, math.radians(90), 0.0)
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.1, depth=0.8, location=(location[0] + 0.18, location[1], 0.35))
+    leg_r = bpy.context.active_object
+    leg_r.name = f"{name}_Leg_R"
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.1, depth=0.8, location=(location[0] - 0.18, location[1], 0.35))
+    leg_l = bpy.context.active_object
+    leg_l.name = f"{name}_Leg_L"
+    for obj in (torso, head, arm_r, arm_l, leg_r, leg_l):
+        obj.parent = root
+        if obj.data.materials:
+            obj.data.materials[0] = material
+        else:
+            obj.data.materials.append(material)
+    if name.lower() == "hero":
+        for obj in (torso, head, arm_r, arm_l, leg_r, leg_l):
+            obj["mo_role"] = "subject"
+    return root, 6
+
+
+def _animate_procedural_humanoid(root: bpy.types.Object, total_frames: int) -> None:
+    if total_frames <= 1:
+        return
+    start = 1
+    mid = max(2, total_frames // 2)
+    end = total_frames
+    root.location.y = root.location.y
+    root.keyframe_insert(data_path="location", frame=start)
+    root.location.y += 0.05
+    root.keyframe_insert(data_path="location", frame=mid)
+    root.location.y -= 0.05
+    root.keyframe_insert(data_path="location", frame=end)
+    for child in root.children:
+        if "Arm_" not in child.name:
+            continue
+        child.rotation_euler.z = 0.0
+        child.keyframe_insert(data_path="rotation_euler", frame=start)
+        child.rotation_euler.z = math.radians(4)
+        child.keyframe_insert(data_path="rotation_euler", frame=mid)
+        child.rotation_euler.z = math.radians(-4)
+        child.keyframe_insert(data_path="rotation_euler", frame=end)
+
+
+def _build_procedural_scene(
+    scene: bpy.types.Scene,
+    total_frames: int,
+    force_procedural_humanoid: bool,
+) -> bool:
+    bpy.ops.mesh.primitive_plane_add(size=10, location=(0, 0, 0))
+    floor = bpy.context.active_object
+    floor.name = "Floor"
+    bpy.ops.object.light_add(type="AREA", location=(0, -3, 4))
+    light = bpy.context.active_object
+    light.data.energy = 600
+    bpy.ops.object.camera_add(location=(0, -6, 2), rotation=(1.3, 0, 0))
+    camera = bpy.context.active_object
+    scene.camera = camera
+    scene.frame_start = 1
+    scene.frame_end = total_frames
+    procedural_humanoid = False
+    if force_procedural_humanoid:
+        procedural_humanoid = True
+        hero, hero_parts = _create_procedural_humanoid("Hero", (-1.5, 0, 0))
+        enemy, enemy_parts = _create_procedural_humanoid("Enemy", (1.5, 0, 0))
+        print(
+            "[ANIME3D_CHAR] "
+            f"procedural_humanoid=1 created=Hero parts={hero_parts} "
+            f"created=Enemy parts={enemy_parts}"
+        )
+    else:
+        bpy.ops.mesh.primitive_cube_add(size=1.0, location=(-1.5, 0, 0.5))
+        hero = bpy.context.active_object
+        hero.name = "Hero"
+        hero["mo_role"] = "subject"
+        bpy.ops.mesh.primitive_cube_add(size=1.0, location=(1.5, 0, 0.5))
+        enemy = bpy.context.active_object
+        enemy.name = "Enemy"
+    _animate_procedural_humanoid(hero, total_frames)
+    _animate_procedural_humanoid(enemy, total_frames)
+    hero.location = (-1.5, 0, 0)
+    hero.keyframe_insert(data_path="location", frame=1)
+    hero.location = (-0.4, 0.0, 0)
+    hero.keyframe_insert(data_path="location", frame=total_frames)
+    enemy.location = (1.5, 0, 0)
+    enemy.keyframe_insert(data_path="location", frame=1)
+    enemy.location = (0.4, 0.0, 0)
+    enemy.keyframe_insert(data_path="location", frame=total_frames)
+    camera.location = (0, -6, 2)
+    camera.keyframe_insert(data_path="location", frame=1)
+    camera.location = (0, -5, 2.5)
+    camera.keyframe_insert(data_path="location", frame=total_frames)
+    return procedural_humanoid
+
+
+def _find_character_asset(workdir: Path) -> Path | None:
+    search_dirs = [workdir, workdir / "assets", workdir / "characters"]
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        for ext in (".glb", ".gltf", ".fbx", ".vrm"):
+            matches = sorted(directory.glob(f"*{ext}"))
+            if matches:
+                return matches[0]
+    return None
+
+
+def _import_character_asset(asset_path: Path) -> tuple[bpy.types.Object | None, str]:
+    ext = asset_path.suffix.lower()
+    if ext in {".glb", ".gltf"}:
+        bpy.ops.import_scene.gltf(filepath=str(asset_path))
+    elif ext == ".fbx":
+        bpy.ops.import_scene.fbx(filepath=str(asset_path))
+    elif ext == ".vrm":
+        return None, "vrm_unsupported"
+    meshes = [obj for obj in bpy.context.selected_objects if obj.type == "MESH"]
+    if not meshes:
+        meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
+    subject = meshes[0] if meshes else None
+    return subject, ext.lstrip(".")
+
+
+def _ensure_character(
+    scene: bpy.types.Scene,
+    args: argparse.Namespace,
+    assets_dir: Path,
+    seed_value: int,
+) -> tuple[bpy.types.Object, str, str]:
+    existing_subject = _get_subject_object(scene)
+    if existing_subject:
+        return existing_subject, "generated", "procedural"
+    if args.character_asset:
+        asset_path = Path(args.character_asset)
+        if asset_path.exists():
+            subject, fmt = _import_character_asset(asset_path)
+            if subject:
+                print(f"[ANIME3D_CHAR] source=provided name={subject.name} format={fmt}")
+                return subject, "provided", fmt
+    asset_path = None
+    chars_dir = assets_dir / "characters"
+    if chars_dir.exists():
+        for ext in (".blend", ".fbx", ".glb", ".gltf"):
+            matches = sorted(chars_dir.glob(f"*{ext}"))
+            if matches:
+                asset_path = matches[0]
+                break
+    if asset_path and asset_path.suffix.lower() == ".blend":
+        with bpy.data.libraries.load(str(asset_path), link=False) as (data_from, data_to):
+            data_to.objects = list(data_from.objects)
+        for obj in data_to.objects:
+            if obj is None:
+                continue
+            scene.collection.objects.link(obj)
+        subject = next((obj for obj in data_to.objects if obj and obj.type == "MESH"), None)
+        if subject:
+            print(f"[ANIME3D_CHAR] source=asset_lib name={subject.name} format=blend")
+            return subject, "asset_lib", "blend"
+    if asset_path:
+        subject, fmt = _import_character_asset(asset_path)
+        if subject:
+            print(f"[ANIME3D_CHAR] source=asset_lib name={subject.name} format={fmt}")
+            return subject, "asset_lib", fmt
+    _create_procedural_humanoid("Hero", (0.0, 0.0, 0.0))
+    subject = _get_subject_object(scene)
+    if subject is None:
+        raise RuntimeError("Unable to generate procedural character")
+    return subject, "generated", "procedural"
+
+
+def _apply_outlines(scene: bpy.types.Scene, mode: str) -> None:
+    mode = mode.strip().lower()
+    if mode == "off":
+        scene.render.use_freestyle = False
+        return
+    if mode == "freestyle":
+        scene.render.use_freestyle = True
+        if hasattr(scene.render, "line_thickness"):
+            scene.render.line_thickness = 1.5
+        return
+    scene.render.use_freestyle = False
+
+
+def _apply_watermark(scene: bpy.types.Scene, label: str) -> None:
+    if scene.camera is None:
+        return
+    bpy.ops.object.text_add(location=(0, 0, 0))
+    text_obj = bpy.context.active_object
+    text_obj.data.body = label
+    text_obj.scale = (0.2, 0.2, 0.2)
+    text_obj.location = scene.camera.location + Vector((1.2, 1.2, -0.6))
+    print("[ANIME3D_STYLE] key_art_v1 applied")
 
 
 def _safe_set(obj: object, attr: str, value: object) -> bool:
@@ -252,7 +798,13 @@ def _find_mouth_shapekey(mesh_objects: list[bpy.types.Object]) -> tuple[bpy.type
     return None
 
 
-def _create_scene(assets_dir: Path, asset_mode: str) -> dict[str, bpy.types.Object | None]:
+def _create_scene(
+    assets_dir: Path,
+    asset_mode: str,
+    env_blend: Path | None,
+    hero_asset: Path | None,
+    enemy_asset: Path | None,
+) -> dict[str, bpy.types.Object | None]:
     scene = bpy.context.scene
     outline_material = _create_outline_material()
 
@@ -261,9 +813,12 @@ def _create_scene(assets_dir: Path, asset_mode: str) -> dict[str, bpy.types.Obje
     hero_jaw = None
     hero_body = None
     if asset_mode == "local":
-        env_collections = _append_collections(assets_dir / "envs" / "city.blend")
-        hero_collections = _append_collections(assets_dir / "characters" / "hero.blend")
-        enemy_collections = _append_collections(assets_dir / "characters" / "enemy.blend")
+        env_path = env_blend or (assets_dir / "envs" / "city.blend")
+        hero_path = hero_asset or (assets_dir / "characters" / "hero.blend")
+        enemy_path = enemy_asset or (assets_dir / "characters" / "enemy.blend")
+        env_collections = _append_collections(env_path)
+        hero_collections = _append_collections(hero_path)
+        enemy_collections = _append_collections(enemy_path)
 
         hero_armature = _find_armature(hero_collections)
         enemy_armature = _find_armature(enemy_collections)
@@ -303,7 +858,7 @@ def _create_scene(assets_dir: Path, asset_mode: str) -> dict[str, bpy.types.Obje
     }
 
 
-def _ensure_world_light(scene: bpy.types.Scene) -> float:
+def _ensure_world_light(scene: bpy.types.Scene, rng: random.Random) -> tuple[float, float]:
     if scene.world is None:
         scene.world = bpy.data.worlds.new("World")
     world = scene.world
@@ -315,10 +870,11 @@ def _ensure_world_light(scene: bpy.types.Scene) -> float:
     background = nodes.new(type="ShaderNodeBackground")
     strength = 1.7
     background.inputs["Strength"].default_value = strength
+    hue_variant = rng.uniform(-0.06, 0.06)
     gradient = nodes.new(type="ShaderNodeTexGradient")
     ramp = nodes.new(type="ShaderNodeValToRGB")
-    ramp.color_ramp.elements[0].color = (0.55, 0.62, 0.7, 1.0)
-    ramp.color_ramp.elements[1].color = (0.15, 0.18, 0.22, 1.0)
+    ramp.color_ramp.elements[0].color = (0.55 + hue_variant, 0.62, 0.7, 1.0)
+    ramp.color_ramp.elements[1].color = (0.15, 0.18 + hue_variant, 0.22, 1.0)
     mapping = nodes.new(type="ShaderNodeMapping")
     tex_coord = nodes.new(type="ShaderNodeTexCoord")
     links.new(tex_coord.outputs.get("Generated"), mapping.inputs.get("Vector"))
@@ -326,7 +882,7 @@ def _ensure_world_light(scene: bpy.types.Scene) -> float:
     links.new(gradient.outputs.get("Fac"), ramp.inputs.get("Fac"))
     links.new(ramp.outputs.get("Color"), background.inputs.get("Color"))
     links.new(background.outputs.get("Background"), output.inputs.get("Surface"))
-    return strength
+    return strength, hue_variant
 
 
 def _ensure_ground_plane() -> bpy.types.Object:
@@ -356,7 +912,7 @@ def _ensure_ground_plane() -> bpy.types.Object:
     return plane
 
 
-def _ensure_light_rig() -> list[bpy.types.Object]:
+def _ensure_light_rig(rng: random.Random | None = None) -> tuple[list[bpy.types.Object], dict[str, object], str]:
     lights: list[bpy.types.Object] = []
     bpy.ops.object.light_add(type="AREA", location=(4.0, -3.5, 4.5))
     key = bpy.context.active_object
@@ -376,7 +932,27 @@ def _ensure_light_rig() -> list[bpy.types.Object]:
     rim.data.spot_size = math.radians(55)
     _safe_set(rim.data, "use_shadow", False)
     lights.append(rim)
-    return lights
+    key_params = {
+        "energy": key.data.energy,
+        "color": list(getattr(key.data, "color", (1.0, 1.0, 1.0))),
+        "rotation": [key.rotation_euler.x, key.rotation_euler.y, key.rotation_euler.z],
+    }
+    light_variant = "base"
+    if rng:
+        jitter = rng.uniform(-0.3, 0.3)
+        key.rotation_euler.z += jitter
+        key.rotation_euler.x += rng.uniform(-0.1, 0.1)
+        key.data.energy *= rng.uniform(0.85, 1.15)
+        temp = rng.uniform(3600.0, 6800.0)
+        key.data.color = _color_from_temperature(temp)
+        key_params = {
+            "energy": key.data.energy,
+            "color": list(getattr(key.data, "color", (1.0, 1.0, 1.0))),
+            "rotation": [key.rotation_euler.x, key.rotation_euler.y, key.rotation_euler.z],
+            "temperature": temp,
+        }
+        light_variant = "jittered"
+    return lights, key_params, light_variant
 
 
 def _ensure_visual_density(scene: bpy.types.Scene, duration_s: float, fps: int) -> None:
@@ -517,16 +1093,71 @@ def _frame_camera(camera: bpy.types.Object) -> dict[str, object] | None:
     return {"subject_bbox": subject_bbox, "camera_params": camera_params}
 
 
-def _setup_visibility_scene(scene: bpy.types.Scene, camera: bpy.types.Object | None) -> dict[str, object]:
-    world_strength = _ensure_world_light(scene)
+def _camera_presets() -> list[dict[str, object]]:
+    return [
+        {"name": "wide_low", "lens": 28, "offset": Vector((0.0, -1.2, 0.2)), "dof": 4.0},
+        {"name": "medium_eye", "lens": 40, "offset": Vector((0.0, -1.0, 0.0)), "dof": 3.0},
+        {"name": "close_high", "lens": 55, "offset": Vector((0.0, -0.8, 0.25)), "dof": 2.5},
+    ]
+
+
+def _apply_camera_preset(
+    camera: bpy.types.Object,
+    preset: dict[str, object],
+    rng: random.Random,
+) -> dict[str, object]:
+    if camera.data is None:
+        return {}
+    lens = float(preset.get("lens", 40))
+    camera.data.lens = lens + rng.uniform(-2.0, 2.0)
+    if camera.data.dof:
+        camera.data.dof.focus_distance = float(preset.get("dof", 3.0)) + rng.uniform(-0.3, 0.3)
+    offset = preset.get("offset", Vector((0.0, 0.0, 0.0)))
+    if isinstance(offset, Vector):
+        camera.location += Vector(
+            (
+                offset.x + rng.uniform(-0.15, 0.15),
+                offset.y + rng.uniform(-0.2, 0.2),
+                offset.z + rng.uniform(-0.1, 0.1),
+            )
+        )
+    camera_params = {
+        "preset": preset.get("name"),
+        "lens": camera.data.lens,
+        "location": [camera.location.x, camera.location.y, camera.location.z],
+        "rotation": [camera.rotation_euler.x, camera.rotation_euler.y, camera.rotation_euler.z],
+        "focus_distance": camera.data.dof.focus_distance if camera.data.dof else None,
+    }
+    return camera_params
+
+
+def _setup_visibility_scene(
+    scene: bpy.types.Scene,
+    camera: bpy.types.Object | None,
+    rng: random.Random,
+) -> dict[str, object]:
+    world_strength, hue_variant = _ensure_world_light(scene, rng)
     _ensure_ground_plane()
-    _ensure_light_rig()
-    _safe_set(scene.view_settings, "exposure", 0.8)
+    _, key_light_params, light_variant = _ensure_light_rig(rng)
+    _safe_set(scene.view_settings, "exposure", 0.8 + rng.uniform(-0.15, 0.15))
     framing = _frame_camera(camera) if camera else None
+    camera_params = framing["camera_params"] if framing else None
+    camera_preset_name = None
+    camera_variant = None
+    if camera:
+        preset = rng.choice(_camera_presets())
+        camera_preset_name = preset.get("name")
+        camera_params = _apply_camera_preset(camera, preset, rng)
+        camera_variant = camera_preset_name
     return {
         "world_strength": world_strength,
         "subject_bbox": framing["subject_bbox"] if framing else None,
-        "camera_params": framing["camera_params"] if framing else None,
+        "camera_params": camera_params,
+        "camera_preset": camera_preset_name,
+        "key_light_params": key_light_params,
+        "camera_variant": camera_variant,
+        "light_variant": light_variant,
+        "hue_variant": hue_variant,
     }
 
 
@@ -962,17 +1593,23 @@ def _configure_phase15_cycles(scene: bpy.types.Scene, args: argparse.Namespace) 
         prefs.get_devices()
     except Exception:  # noqa: BLE001
         pass
-    device_type = None
+    backend = None
     for candidate in ("OPTIX", "CUDA"):
         if any(device.type == candidate for device in prefs.devices):
-            device_type = candidate
+            backend = candidate
             break
-    if device_type is None:
+    if backend is None:
         raise RuntimeError("No GPU devices available")
-    prefs.compute_device_type = device_type
+    prefs.compute_device_type = backend
+    enabled_devices: list[str] = []
     for device in prefs.devices:
-        device.use = device.type == device_type
-    if not any(device.use for device in prefs.devices):
+        if device.type == "CPU":
+            device.use = False
+        else:
+            device.use = True
+        if device.use:
+            enabled_devices.append(f"{device.name}:{device.type}")
+    if not enabled_devices:
         raise RuntimeError("No GPU devices available")
     scene.cycles.device = "GPU"
     _safe_set(scene.cycles, "samples", args.phase15_samples)
@@ -982,19 +1619,32 @@ def _configure_phase15_cycles(scene: bpy.types.Scene, args: argparse.Namespace) 
     _safe_set(scene.cycles, "caustics_reflective", False)
     _safe_set(scene.cycles, "caustics_refractive", False)
     _safe_set(scene.cycles, "use_denoising", True)
-    _safe_set(scene.cycles, "denoiser", "OPTIX")
+    denoise_enabled = False
+    if backend == "OPTIX":
+        denoise_enabled = _safe_set(scene.cycles, "denoiser", "OPTIX")
+    if not denoise_enabled:
+        _safe_set(scene.cycles, "denoiser", "OPENIMAGEDENOISE")
     _safe_set(scene.render, "use_persistent_data", True)
     _safe_set(scene.render, "use_motion_blur", False)
     _safe_set(scene.view_settings, "exposure", 0.9)
     _safe_set(scene.view_settings, "gamma", 1.0)
     if hasattr(scene.cycles, "tile_size"):
         _safe_set(scene.cycles, "tile_size", args.phase15_tile)
+    print(
+        "[ANIME3D_RENDER] "
+        f"engine=CYCLES backend={backend} enabled_devices={enabled_devices}"
+    )
     return {
-        "device": device_type.lower(),
+        "device_backend": backend.lower(),
+        "enabled_devices": enabled_devices,
         "samples": args.phase15_samples,
         "bounces": args.phase15_bounces,
         "denoise": True,
     }
+
+
+def _write_report(report_path: Path, payload: dict[str, object]) -> None:
+    report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def main() -> None:
@@ -1006,19 +1656,57 @@ def main() -> None:
     assets_dir = Path(args.assets_dir)
     _ensure_parent(output_path)
     _ensure_parent(report_path)
-    report_path.write_text(
-        json.dumps({"parsed_args": vars(args)}, indent=2),
-        encoding="utf-8",
+    seed_value = _derive_seed(output_path, args.seed)
+    _seed_randomness(seed_value)
+    rng = random.Random(seed_value)
+    fingerprint = args.fingerprint.strip() or str(seed_value)
+    missing_assets = _find_missing_assets(assets_dir)
+    strict_assets = int(args.strict_assets) == 1
+    procedural_fallback = False
+    used_assets: list[str] = []
+
+    if missing_assets and strict_assets:
+        error = f"missing assets: {', '.join(missing_assets)}"
+        _write_report(
+            report_path,
+            {
+                "status": "error",
+                "error": error,
+                "seed": seed_value,
+                "fingerprint": fingerprint,
+                "assets_dir": str(assets_dir),
+                "missing_assets": missing_assets,
+                "used_assets": used_assets,
+                "procedural_fallback": False,
+            },
+        )
+        print(f"[ASSETS] {error}", file=sys.stderr)
+        raise SystemExit(2)
+    if missing_assets and not strict_assets:
+        procedural_fallback = True
+    assets_inventory = _discover_assets(assets_dir) if args.asset_mode == "local" else {}
+
+    env_candidates = assets_inventory.get("envs", [])
+    char_candidates = assets_inventory.get("characters", [])
+    selected_env = rng.choice(env_candidates).stem if env_candidates else args.environment
+    env_blend = rng.choice(env_candidates) if env_candidates else None
+    hero_asset = rng.choice(char_candidates) if char_candidates else None
+    enemy_asset = rng.choice(char_candidates) if char_candidates else None
+    if hero_asset and enemy_asset and hero_asset == enemy_asset and len(char_candidates) > 1:
+        enemy_asset = rng.choice([path for path in char_candidates if path != hero_asset])
+    used_assets = [
+        str(asset)
+        for asset in (env_blend, hero_asset, enemy_asset)
+        if asset is not None
+    ]
+
+    assets_log = (
+        f"[ASSETS] assets_dir={assets_dir} "
+        f"found_env={len(env_candidates)} found_chars={len(char_candidates)} "
+        f"found_anims={len(assets_inventory.get('anims', []))} "
+        f"found_vfx={len(assets_inventory.get('vfx', []))}"
     )
-    if args.asset_mode == "local":
-        required = [
-            assets_dir / "characters" / "hero.blend",
-            assets_dir / "envs" / "city.blend",
-            assets_dir / "anims" / "run.fbx",
-        ]
-        missing = [str(path) for path in required if not path.exists()]
-        if missing:
-            raise RuntimeError(f"Missing assets (assets_root={assets_dir}):\n" + "\n".join(missing))
+    print(assets_log)
 
     _clear_scene()
     scene = bpy.context.scene
@@ -1026,43 +1714,57 @@ def main() -> None:
     preset = args.render_preset
     phase15 = preset == "phase15_quality"
     phase15_info: dict[str, object] | None = None
+    quality_enabled = os.getenv("MONEYOS_ANIME3D_QUALITY", "1") != "0"
+    force_gpu = os.getenv("MONEYOS_ANIME3D_FORCE_GPU", "1") != "0"
+    light_preset = os.getenv("MONEYOS_ANIME3D_LIGHT_PRESET", "default").strip().lower()
+    outlines_mode = os.getenv("MONEYOS_ANIME3D_OUTLINES", "freestyle")
+    compositor_enabled = os.getenv("MONEYOS_ANIME3D_COMPOSITOR", "1") != "0"
+    watermark_enabled = os.getenv("MONEYOS_ANIME3D_WATERMARK", "1") != "0"
+    try:
+        samples = int(os.getenv("MONEYOS_ANIME3D_SAMPLES", "96"))
+    except ValueError:
+        samples = 96
+    tmp_dir = output_path.parent / "tmp" / f"seed_{seed_value}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        bpy.context.preferences.filepaths.temporary_directory = str(tmp_dir)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        bpy.app.tempdir = str(tmp_dir)
+    except Exception:  # noqa: BLE001
+        pass
+
+    gpu_info = {
+        "requested": False,
+        "compute_device_type": "NONE",
+        "devices": [],
+        "scene_device": "CPU",
+    }
     if args.fast_proof:
         engine = "BLENDER_EEVEE_NEXT"
         try:
             scene.render.engine = engine
         except Exception:  # noqa: BLE001
             scene.render.engine = "BLENDER_EEVEE"
-        scene.render.resolution_x = 1280
-        scene.render.resolution_y = 720
-        scene.render.resolution_percentage = 100
         scene.render.fps = 30
     else:
         scene.render.engine = "BLENDER_EEVEE" if args.engine == "eevee" else "CYCLES"
         scene.render.fps = args.fps
+    if (args.engine or "").lower() == "cycles" and str(args.gpu) == "1":
+        gpu_info = _configure_cycles_gpu_optix(scene, args)
     if args.duration is None or args.duration <= 0:
         raise RuntimeError("Duration must be provided and > 0.")
-    total_frames = int(math.ceil(args.duration * args.fps))
+    total_frames = max(1, int(round(args.duration * args.fps)))
     scene.frame_start = 1
     scene.frame_end = total_frames
-    if not args.fast_proof:
-        try:
-            width_str, height_str = args.res.lower().split("x", 1)
-            scene.render.resolution_x = int(width_str)
-            scene.render.resolution_y = int(height_str)
-        except ValueError:
-            scene.render.resolution_x = 1280
-            scene.render.resolution_y = 720
-        scene.render.image_settings.file_format = "PNG"
-        scene.render.use_file_extension = True
-        frames_dir = output_path.parent / "frames"
-        frames_dir.mkdir(parents=True, exist_ok=True)
-        scene.render.filepath = str(frames_dir / "frame_####")
-    else:
-        scene.render.image_settings.file_format = "PNG"
-        scene.render.use_file_extension = True
-        frames_dir = output_path.parent / "frames"
-        frames_dir.mkdir(parents=True, exist_ok=True)
-        scene.render.filepath = str(frames_dir / "frame_####")
+    scene.frame_set(0)
+    _apply_resolution(scene, args)
+    scene.render.image_settings.file_format = "PNG"
+    scene.render.use_file_extension = True
+    frames_dir = output_path.parent / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    scene.render.filepath = str(frames_dir / "frame_####")
 
     scene.render.use_freestyle = args.outline_mode == "freestyle"
     if hasattr(scene.render, "line_thickness"):
@@ -1071,7 +1773,7 @@ def main() -> None:
         phase15_info = _configure_phase15_cycles(scene, args)
         print(
             "[PHASE15] engine=cycles "
-            f"device={phase15_info['device']} "
+            f"device={phase15_info['device_backend']} "
             f"samples={phase15_info['samples']} "
             f"res={scene.render.resolution_x}x{scene.render.resolution_y} "
             f"fps={scene.render.fps} duration={args.duration:.2f}"
@@ -1079,15 +1781,85 @@ def main() -> None:
     elif hasattr(scene, "eevee"):
         _configure_eevee(scene, args.quality)
 
-    print(f"[PHASE2] env={args.environment} character={args.character_asset or 'none'} preset={preset}")
-    _build_environment_template(args.environment)
-    objects = _create_scene(assets_dir, args.asset_mode)
+    procedural_humanoid = False
+    if procedural_fallback:
+        print("[ASSETS] missing assets detected. Using procedural fallback.")
+        procedural_humanoid = _build_procedural_scene(
+            scene,
+            total_frames,
+            force_procedural_humanoid=bool(args.force_procedural_humanoid),
+        )
+        subject_obj, char_source, char_fmt = _ensure_character(scene, args, assets_dir, seed_value)
+        _apply_outlines(scene, outlines_mode)
+        if quality_enabled:
+            _setup_anime_lighting(scene, subject_obj)
+            setup_anime_materials(scene.collection, preset=light_preset)
+            if compositor_enabled:
+                _setup_anime_compositor(scene, args)
+            if scene.camera:
+                camera_modes = ["push_in", "orbit", "handheld", "static"]
+                camera_mode = camera_modes[seed_value % len(camera_modes)]
+                setup_anime_camera_motion(scene.camera, subject_obj, camera_mode, total_frames, seed_value)
+        if watermark_enabled:
+            _apply_watermark(
+                scene,
+                f"key_art_v1 | 1080p | S{samples} | CHAR:{char_fmt} | SRC:{char_source}",
+            )
+        _write_report(
+            report_path,
+            {
+                "status": "started",
+                "fingerprint": fingerprint,
+                "seed": seed_value,
+                "missing_assets": missing_assets,
+                "used_assets": used_assets,
+                "procedural_fallback": True,
+                "parsed_args": vars(args),
+            },
+        )
+        bpy.ops.render.render(animation=True, write_still=False)
+        rendered_report = {
+            "status": "rendered",
+            "frame_count": scene.frame_end,
+            "frames_dir": str(frames_dir),
+            "seed": seed_value,
+            "fingerprint": fingerprint,
+        }
+        report_path.write_text(json.dumps(rendered_report, indent=2), encoding="utf-8")
+        render_report = {
+            "status": "complete",
+            "fingerprint": fingerprint,
+            "seed": seed_value,
+            "frame_end": scene.frame_end,
+            "fps": scene.render.fps,
+            "res": f"{scene.render.resolution_x}x{scene.render.resolution_y}",
+            "duration": args.duration,
+            "warnings": warnings,
+            "parsed_args": vars(args),
+            "gpu": gpu_info,
+            "procedural_humanoid": procedural_humanoid,
+            "missing_assets": missing_assets,
+            "used_assets": used_assets,
+            "procedural_fallback": True,
+        }
+        report_path.write_text(json.dumps(render_report, indent=2), encoding="utf-8")
+        return
+
+    if args.asset_mode != "local":
+        template_options = ["room", "street", "studio"]
+        if args.environment and args.environment not in template_options:
+            template_options.append(args.environment)
+        selected_env = rng.choice(template_options)
+    print(f"[PHASE2] env={selected_env} character={args.character_asset or 'none'} preset={preset}")
+    if args.asset_mode != "local":
+        _build_environment_template(selected_env)
+    objects = _create_scene(assets_dir, args.asset_mode, env_blend, hero_asset, enemy_asset)
     _ensure_visual_density(scene, args.duration, args.fps)
     character_meshes = _load_character_asset(assets_dir, args.character_asset, warnings)
     if character_meshes:
         for obj in character_meshes:
             obj["mo_role"] = "subject"
-    visibility_info = _setup_visibility_scene(scene, objects.get("camera"))
+    visibility_info = _setup_visibility_scene(scene, objects.get("camera"), rng)
     _add_vfx(
         assets_dir,
         scene,
@@ -1118,10 +1890,78 @@ def main() -> None:
         fast_proof_like,
         args.mode,
     )
+    if quality_enabled:
+        subject_obj, char_source, char_fmt = _ensure_character(scene, args, assets_dir, seed_value)
+        _setup_anime_lighting(scene, subject_obj)
+        setup_anime_materials(scene.collection, preset=light_preset)
+        if compositor_enabled:
+            _setup_anime_compositor(scene, args)
+        camera_modes = ["push_in", "orbit", "handheld", "static"]
+        camera_mode = camera_modes[seed_value % len(camera_modes)]
+        camera_obj = objects.get("camera") if isinstance(objects, dict) else scene.camera
+        if camera_obj:
+            setup_anime_camera_motion(camera_obj, subject_obj, camera_mode, total_frames, seed_value)
+        rig_obj = objects.get("rig") if isinstance(objects, dict) else None
+        apply_anime_animation_polish(rig_obj, total_frames, seed_value)
+        _apply_outlines(scene, outlines_mode)
+        if watermark_enabled:
+            _apply_watermark(
+                scene,
+                f"key_art_v1 | 1080p | S{samples} | CHAR:{char_fmt} | SRC:{char_source}",
+            )
+
+    selection = {
+        "seed": seed_value,
+        "assets_dir": str(assets_dir),
+        "selected_environment": selected_env,
+        "selected_environment_blend": str(env_blend) if env_blend else None,
+        "selected_characters": [
+            str(hero_asset) if hero_asset else None,
+            str(enemy_asset) if enemy_asset else None,
+        ],
+        "camera_preset": visibility_info.get("camera_preset"),
+        "camera_params": visibility_info.get("camera_params"),
+        "key_light_params": visibility_info.get("key_light_params"),
+        "mode": args.mode,
+        "style_preset": args.style_preset,
+    }
+    chosen_variation = {
+        "camera_variant": visibility_info.get("camera_variant"),
+        "light_variant": visibility_info.get("light_variant"),
+        "hue_variant": visibility_info.get("hue_variant"),
+    }
+    print(
+        "[FINGERPRINT] "
+        f"seed={seed_value} fp={fingerprint} env={selected_env} "
+        f"mode={args.mode} assets={assets_dir}"
+    )
+    _write_report(
+        report_path,
+        {
+            "status": "started",
+            "fingerprint": fingerprint,
+            "parsed_args": vars(args),
+            "chosen_variation": chosen_variation,
+            "missing_assets": missing_assets,
+            "used_assets": used_assets,
+            "procedural_fallback": False,
+            **selection,
+        },
+    )
 
     bpy.ops.render.render(animation=True, write_still=False)
+    rendered_report = {
+        "status": "rendered",
+        "frame_count": scene.frame_end,
+        "frames_dir": str(frames_dir),
+        "seed": seed_value,
+        "fingerprint": fingerprint,
+    }
+    report_path.write_text(json.dumps(rendered_report, indent=2), encoding="utf-8")
 
     render_report = {
+        "status": "complete",
+        "fingerprint": fingerprint,
         "mouth_keyframes": mouth_keyframes,
         "frame_end": scene.frame_end,
         "fps": scene.render.fps,
@@ -1132,17 +1972,33 @@ def main() -> None:
         "parsed_args": vars(args),
         "preset": preset,
         "engine": scene.render.engine,
-        "device": phase15_info["device"] if phase15_info else None,
+        "device": phase15_info["device_backend"] if phase15_info else None,
         "samples": phase15_info["samples"] if phase15_info else None,
         "bounces": phase15_info["bounces"] if phase15_info else None,
         "denoise": phase15_info["denoise"] if phase15_info else None,
         "res": f"{scene.render.resolution_x}x{scene.render.resolution_y}",
         "duration": args.duration,
-        "environment": args.environment,
+        "environment": selected_env,
         "character_asset": args.character_asset or None,
         "subject_bbox": visibility_info.get("subject_bbox"),
         "camera_params": visibility_info.get("camera_params"),
         "world_strength": visibility_info.get("world_strength"),
+        "chosen_variation": chosen_variation,
+        "seed": seed_value,
+        "assets_dir": str(assets_dir),
+        "selected_environment": selected_env,
+        "selected_environment_blend": str(env_blend) if env_blend else None,
+        "selected_characters": selection["selected_characters"],
+        "camera_preset_name": visibility_info.get("camera_preset"),
+        "key_light_params": visibility_info.get("key_light_params"),
+        "mode_used": args.mode,
+        "mode": args.mode,
+        "style_preset": args.style_preset,
+        "gpu": gpu_info,
+        "procedural_humanoid": procedural_humanoid,
+        "missing_assets": missing_assets,
+        "used_assets": used_assets,
+        "procedural_fallback": False,
     }
     report_path.write_text(json.dumps(render_report, indent=2), encoding="utf-8")
 

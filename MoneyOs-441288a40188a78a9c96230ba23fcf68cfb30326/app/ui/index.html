@@ -90,8 +90,9 @@
 <body>
   <div class="panel">
     <h1>MoneyOS – Video Generator</h1>
-    <button id="generateButton">Generate Video</button>
+    <button id="generateButton">Start anime_3d 60s</button>
     <div class="status">
+      <div><span class="label">Endpoint:</span> <span id="endpointText">POST /jobs/anime-episode-60s-3d</span></div>
       <div><span class="label">Stage:</span> <span id="stageText">Idle</span></div>
       <div><span class="label">Status:</span> <span id="statusText">Idle</span></div>
       <div><span class="label">Progress:</span> <span id="progressText">0%</span></div>
@@ -109,6 +110,11 @@
       <div><span class="label">GPU:</span> <span id="gpuSpec">-</span></div>
       <div><span class="label">Caps:</span> <span id="capSpec">-</span></div>
     </div>
+    <div class="status">
+      <div><span class="label">Backend:</span> <span id="backendStatus">-</span></div>
+      <div><span class="label">Blender:</span> <span id="blenderStatus">-</span></div>
+      <div><span class="label">GPU Flags:</span> <span id="gpuFlags">-</span></div>
+    </div>
   </div>
 
   <script>
@@ -123,10 +129,14 @@
     const downloadLink = document.getElementById('downloadLink');
     const finalStatus = document.getElementById('finalStatus');
     const logTail = document.getElementById('logTail');
+    const endpointText = document.getElementById('endpointText');
     const cpuSpec = document.getElementById('cpuSpec');
     const ramSpec = document.getElementById('ramSpec');
     const gpuSpec = document.getElementById('gpuSpec');
     const capSpec = document.getElementById('capSpec');
+    const backendStatus = document.getElementById('backendStatus');
+    const blenderStatus = document.getElementById('blenderStatus');
+    const gpuFlags = document.getElementById('gpuFlags');
     let polling = null;
     let eventSource = null;
 
@@ -198,6 +208,32 @@
       }
     }
 
+    async function loadDoctorStatus() {
+      try {
+        const healthResponse = await fetch('/health');
+        const health = await healthResponse.json();
+        backendStatus.textContent = healthResponse.ok ? `OK (${health.version})` : 'Unavailable';
+        const envFlags = health.env_flags || {};
+        gpuFlags.textContent = `USE_GPU=${envFlags.MONEYOS_USE_GPU || 'auto'} FORCE_GPU=${envFlags.MONEYOS_ANIME3D_FORCE_GPU || '1'}`;
+      } catch (error) {
+        backendStatus.textContent = 'Unavailable';
+        gpuFlags.textContent = '-';
+      }
+      try {
+        const debugResponse = await fetch('/debug/status');
+        const debug = await debugResponse.json();
+        if (debug.blender && debug.blender.found) {
+          blenderStatus.textContent = `${debug.blender.version || 'found'} @ ${debug.blender.path || 'unknown'}`;
+        } else if (debug.blender && debug.blender.error) {
+          blenderStatus.textContent = `Unavailable (${debug.blender.error})`;
+        } else {
+          blenderStatus.textContent = 'Unavailable';
+        }
+      } catch (error) {
+        blenderStatus.textContent = 'Unavailable';
+      }
+    }
+
     async function pollStatus(jobId) {
       try {
         const response = await fetch(`/status/${jobId}`);
@@ -244,7 +280,7 @@
       finalStatus.textContent = 'In Progress';
       logTail.innerHTML = '';
 
-      const response = await fetch('/jobs/anime-episode-10m-hybrid', { method: 'POST' });
+      const response = await fetch('/jobs/anime-episode-60s-3d', { method: 'POST' });
       const data = await response.json();
       const jobId = data.job_id;
 
@@ -253,6 +289,7 @@
     });
 
     loadSystemSpecs();
+    loadDoctorStatus();
   </script>
 </body>
 </html>

@@ -102,6 +102,7 @@ class AnimeEpisodeRequest(BaseModel):
 
 class Anime3DRequest(BaseModel):
     duration_seconds: Optional[float] = None
+    duration_s: Optional[float] = None
     fps: Optional[int] = None
     res: Optional[str] = None
     quality: Optional[str] = None
@@ -116,6 +117,12 @@ class Anime3DRequest(BaseModel):
     character_asset: Optional[str] = None
     disable_overlays: Optional[bool] = None
     mode: Optional[str] = None
+    strict_assets: Optional[bool] = None
+
+
+class AiVideoRequest(BaseModel):
+    script: str
+    audio_path: str
 
 
 @app.on_event("startup")
@@ -145,6 +152,15 @@ def bootstrap_dependencies() -> None:
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[GPU] status unavailable: {exc}")
+    web_url = os.getenv("MONEYOS_WEB_URL")
+    if not web_url:
+        host = os.getenv("MONEYOS_WEB_HOST", "127.0.0.1")
+        port = os.getenv("MONEYOS_WEB_PORT") or os.getenv("UVICORN_PORT") or os.getenv("PORT")
+        if port:
+            web_url = f"http://{host}:{port}"
+        else:
+            web_url = "http://127.0.0.1:8000"
+    print(f"[WEB] MoneyOS web running on {web_url}")
 
 
 def _format_mmss(seconds: float) -> str:
@@ -334,10 +350,24 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
 
     try:
         _set_status(job_id, "Generating audio", stage_key="audio", progress_pct=5)
+        overrides = req.dict(exclude_none=True)
+        overrides.setdefault("render_preset", "phase15_quality")
+        overrides.setdefault("quality", "max")
+        overrides.setdefault("postfx", True)
+        overrides.setdefault("res", "1920x1080")
+        overrides.setdefault("outline_mode", "off")
+        overrides.setdefault("style_preset", "key_art")
+        overrides.setdefault("disable_overlays", False)
+        if req.duration_s is not None:
+            overrides["duration_s"] = float(req.duration_s)
+        if req.fps is not None:
+            overrides["fps"] = int(req.fps)
+        if "duration_seconds" not in overrides and "duration_s" in overrides:
+            overrides["duration_seconds"] = overrides["duration_s"]
         result = render_anime_3d_60s(
             job_id,
             status_callback=_update,
-            overrides=req.dict(exclude_none=True),
+            overrides=overrides,
         )
         phase = normalize_phase(os.getenv("MONEYOS_PHASE"))
         strict_vfx = os.getenv("MONEYOS_STRICT_VFX", "0") == "1"
@@ -404,7 +434,18 @@ async def system_specs() -> JSONResponse:
 
 @app.get("/health")
 async def health() -> JSONResponse:
-    return JSONResponse({"status": "ok"})
+    return JSONResponse(
+        {
+            "status": "ok",
+            "version": os.getenv("MONEYOS_VERSION", "dev"),
+            "visual_mode": VISUAL_MODE,
+            "env_flags": {
+                "MONEYOS_USE_GPU": os.getenv("MONEYOS_USE_GPU", "auto"),
+                "MONEYOS_ANIME3D_FORCE_GPU": os.getenv("MONEYOS_ANIME3D_FORCE_GPU", "1"),
+                "MONEYOS_ANIME3D_QUALITY": os.getenv("MONEYOS_ANIME3D_QUALITY", "1"),
+            },
+        }
+    )
 
 
 @app.get("/debug/status")
@@ -416,7 +457,12 @@ async def debug_status() -> JSONResponse:
 
         caps = capabilities_snapshot(get_short_workdir() / "p2" / "cache" / "capabilities.json")
     except Exception as exc:  # noqa: BLE001
-        caps = {"error": str(exc)}
+        caps = {
+            "ffmpeg": {"available": False, "error": str(exc)},
+            "blender": {"available": False, "error": str(exc)},
+            "cuda": {"available": False, "error": str(exc)},
+            "ai_video": {"available": False, "error": str(exc)},
+        }
     assets_root = get_assets_root()
     required_assets = {
         "characters/hero.blend": (assets_root / "characters" / "hero.blend"),
@@ -529,8 +575,10 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
         phase_env, resolved_target, raw_phase = _resolve_phase_target_seconds()
         target_seconds = target_seconds or resolved_target
         clips: list[Path] = []
-        accepted: list[dict[str, str]] = []
+        accepted: list[dict[str, object]] = []
         seen_md5: set[str] = set()
+        diversity_threshold = 0.35
+        max_attempts_per_shot = 8
         base_seed_env = os.getenv("MONEYOS_BASE_SEED")
         if base_seed_env and base_seed_env.strip().isdigit():
             base_seed = int(base_seed_env.strip())
@@ -544,6 +592,21 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
         ensure_dir(tmp_root)
         if phase_env in {"phase25", "production"}:
             plan = _build_phase25_shot_plan(target_seconds)
+            from src.phase2.clips.ai_similarity_validator import (  # noqa: WPS433
+                compare_against_accepted,
+                embed_frames_with_clip,
+                extract_frames_ffmpeg,
+                format_similarity_log,
+            )
+            from src.phase2.clips.diversity_scorer import score_diversity  # noqa: WPS433
+            from src.phase2.clips.similarity_memory import SimilarityMemory  # noqa: WPS433
+            from src.phase2.director.ai_director import AiDirector  # noqa: WPS433
+
+            similarity_memory = SimilarityMemory(output_root / "p2" / "similarity_memory.json")
+            similarity_memory.load()
+            director = AiDirector()
+            recent_meta: list[dict[str, str]] = []
+            accepted_embeddings = similarity_memory.get_accepted_embeddings()
         else:
             plan = plan_episode(target_seconds)
         clips_expected = len(plan)
@@ -604,9 +667,28 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
             mode = beat["shot"]
             duration_s = float(beat["duration"])
             seed_value = base_seed + index * 10007
-            while attempts < 8:
+            last_plan: dict[str, str] | None = None
+            drop_used = False
+            while attempts < max_attempts_per_shot:
+                shot_plan = director.next_shot_plan(index, recent_meta)
+                if attempts > 0 and last_plan is not None:
+                    force_extreme = attempts >= max_attempts_per_shot - 2
+                    shot_plan = director.mutate_plan(
+                        last_plan,
+                        min_mutations=2,
+                        force_extreme=force_extreme,
+                    )
+                    print(f"[DIRECTOR] shot={index} forcing camera+action mutation")
+                elif attempts > 0:
+                    shot_plan = director.mutate_plan(shot_plan, min_mutations=2)
+                last_plan = dict(shot_plan)
+                mode = shot_plan.get("shot_type", mode)
                 prompt_base = beat.get("prompt") or beat.get("text") or f"{environment}:{mode}"
-                prompt = f"{prompt_base} | camera angle {index} | cinematic variation {seed_value % 7}"
+                prompt = (
+                    f"{prompt_base} | camera {shot_plan['camera']} | shot {shot_plan['shot_type']}"
+                    f" | action {shot_plan['action_bias']} | environment {shot_plan['environment_bias']}"
+                    f" | cinematic variation {seed_value % 7}"
+                )
                 cache_payload = {
                     "phase": "phase25",
                     "episode_id": job_id,
@@ -666,6 +748,58 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                     )
                     continue
                 seen_md5.add(clip_md5)
+                frames = extract_frames_ffmpeg(clip_path, num_frames=6)
+                embeddings = embed_frames_with_clip(frames)
+                is_duplicate, similarity_stats = compare_against_accepted(
+                    embeddings,
+                    accepted_embeddings,
+                    thresholds=similarity_memory.get_thresholds(),
+                )
+                similarity_log = format_similarity_log(similarity_stats)
+                if is_duplicate:
+                    print(f"[AI_SIMILARITY] shot={index} {similarity_log} → DUPLICATE")
+                    similarity_memory.record_reject(similarity_stats, reason="duplicate")
+                    adjustment = similarity_memory.adjust_thresholds()
+                    if adjustment:
+                        print(
+                            f"[LEARNING] {adjustment} mean_threshold → "
+                            f"{similarity_memory.thresholds.mean:.3f}"
+                        )
+                    similarity_memory.save()
+                    attempts += 1
+                    seed_value += 123457
+                    continue
+                print(f"[AI_SIMILARITY] shot={index} {similarity_log} → PASS")
+                diversity = score_diversity(embeddings, frames)
+                diversity_score = diversity.get("diversity_score", 0.0)
+                if diversity_score < diversity_threshold:
+                    print(f"[DIVERSITY] shot={index} score={diversity_score:.2f} → REJECTED")
+                    attempts += 1
+                    seed_value += 123457
+                    if attempts >= max_attempts_per_shot and not drop_used and accepted:
+                        drop_used = True
+                        lowest = min(accepted, key=lambda item: item.get("diversity_score", 1.0))
+                        print(
+                            "[DIVERSITY] "
+                            f"dropping lowest-diversity clip={lowest.get('clip_id')}"
+                        )
+                        accepted.remove(lowest)
+                        clips.remove(Path(lowest["clip_path"]))
+                        accepted_embeddings[:] = [
+                            item for item in accepted_embeddings if item.get("clip_id") != lowest.get("clip_id")
+                        ]
+                        recent_meta[:] = [
+                            item for item in recent_meta if item.get("clip_id") != lowest.get("clip_id")
+                        ]
+                        similarity_memory.accepted = [
+                            item
+                            for item in similarity_memory.accepted
+                            if item.get("clip_id") != lowest.get("clip_id")
+                        ]
+                        similarity_memory.save()
+                        attempts = max_attempts_per_shot - 2
+                    continue
+                print(f"[DIVERSITY] shot={index} score={diversity_score:.2f} → PASS")
                 meta = {
                     "phase": "phase25",
                     "clip_id": clip_id,
@@ -673,14 +807,34 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                     "seed": seed_value,
                     "duration_s": float(beat.get("seconds", 0) or duration_s),
                     "prompt": prompt,
+                    "shot_plan": shot_plan,
                     "clip_md5": clip_md5,
                     "source_final_path": str(final_mp4_path),
                     "cache_payload": cache_payload,
+                    "diversity_score": diversity_score,
+                    "motion_score": diversity.get("motion_score"),
+                    "scene_score": diversity.get("scene_score"),
                 }
                 meta_path = clip_dir / "meta.json"
                 meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
                 print(f"[PHASE25_CLIP] clip={clip_path} meta={meta_path} md5={clip_md5}")
-                accepted.append({"clip_id": clip_id, "clip_path": str(clip_path)})
+                accepted.append(
+                    {
+                        "clip_id": clip_id,
+                        "clip_path": str(clip_path),
+                        "diversity_score": diversity_score,
+                    }
+                )
+                recent_meta.append({"clip_id": clip_id, "shot_plan": shot_plan})
+                accepted_embeddings.append({"clip_id": clip_id, "embeddings": embeddings})
+                similarity_memory.record_accept(clip_id, embeddings, similarity_stats, diversity)
+                adjustment = similarity_memory.adjust_thresholds()
+                if adjustment:
+                    print(
+                        f"[LEARNING] {adjustment} mean_threshold → "
+                        f"{similarity_memory.thresholds.mean:.3f}"
+                    )
+                similarity_memory.save()
                 clips.append(clip_path)
                 print(
                     "[SHOT_UNIQUENESS] "
@@ -705,7 +859,7 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                 break
             else:
                 raise RuntimeError(
-                    "Duplicate clip content detected after retries: "
+                    "Clip rejected after retries: "
                     f"shot_index={index} hashes={sorted(seen_md5)}"
                 )
         if phase_env in {"phase25", "production"}:
@@ -859,7 +1013,24 @@ async def generate_anime_episode_3d_60s(
     from app.core.visuals.anime_3d.render_pipeline import _ensure_assets  # noqa: WPS433
 
     try:
-        _ensure_assets()
+        assets_root = get_assets_root()
+        required_assets = {
+            "characters/hero.blend": (assets_root / "characters" / "hero.blend"),
+            "characters/enemy.blend": (assets_root / "characters" / "enemy.blend"),
+            "envs/city.blend": (assets_root / "envs" / "city.blend"),
+            "anims/idle.fbx": (assets_root / "anims" / "idle.fbx"),
+            "anims/run.fbx": (assets_root / "anims" / "run.fbx"),
+            "anims/punch.fbx": (assets_root / "anims" / "punch.fbx"),
+            "vfx/explosion.png": (assets_root / "vfx" / "explosion.png"),
+            "vfx/energy_arc.png": (assets_root / "vfx" / "energy_arc.png"),
+            "vfx/smoke.png": (assets_root / "vfx" / "smoke.png"),
+        }
+        missing = [key for key, path in required_assets.items() if not path.exists()]
+        strict_env = os.getenv("MONEYOS_STRICT_ASSETS") == "1"
+        strict_req = bool(req.strict_assets) if req.strict_assets is not None else False
+        explicit_strict = strict_env or strict_req
+        strict_assets = 1 if explicit_strict else 0
+        _ensure_assets(missing, strict_assets)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     job_id = uuid.uuid4().hex
@@ -897,6 +1068,44 @@ async def finalize_anime_episode_3d(job_id: str = Body(..., embed=True)) -> JSON
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _set_status(job_id, "Complete", anime_3d_result=result, stage_key="done", progress_pct=100)
     return JSONResponse({"status": "ok", "job_id": job_id})
+
+
+@app.post("/jobs/ai-video-60s")
+async def generate_ai_video_60s(req: AiVideoRequest = Body(...)) -> JSONResponse:
+    from app.core.visuals.ai_video.pipeline import run_ai_video_job  # noqa: WPS433
+    from app.core.visuals.ai_video.generator import backend_availability_table, BackendUnavailable  # noqa: WPS433
+
+    job_id = uuid.uuid4().hex
+    _set_status(job_id, "Queued AI video", stage_key="ai_video", progress_pct=1)
+
+    def _status_update(message: str) -> None:
+        _set_status(job_id, message, stage_key="ai_video", progress_pct=50)
+
+    try:
+        result = run_ai_video_job(job_id, req.script, Path(req.audio_path), status_callback=_status_update)
+    except BackendUnavailable as exc:
+        availability = backend_availability_table()
+        payload = {
+            "error": str(exc),
+            "selected_backend": os.getenv("MONEYOS_AI_VIDEO_BACKEND", "AUTO"),
+            "env": {
+                "MONEYOS_AI_VIDEO_BACKEND": os.getenv("MONEYOS_AI_VIDEO_BACKEND"),
+                "MONEYOS_COGVIDEOX_MODEL_ID": os.getenv("MONEYOS_COGVIDEOX_MODEL_ID"),
+                "MONEYOS_AI_VIDEO_MODEL_ID": os.getenv("MONEYOS_AI_VIDEO_MODEL_ID"),
+                "MONEYOS_USE_GPU": os.getenv("MONEYOS_USE_GPU"),
+            },
+            "availability": availability,
+        }
+        _set_error(job_id, f"Error: {exc}", extra=payload)
+        return JSONResponse(payload, status_code=500)
+    _set_status(job_id, "Complete", stage_key="done", progress_pct=100)
+    return JSONResponse(
+        {
+            "status": "complete",
+            "output_video": str(result.final_video),
+            "report": str(result.report_path),
+        }
+    )
 
 
 @app.get("/status/{job_id}")

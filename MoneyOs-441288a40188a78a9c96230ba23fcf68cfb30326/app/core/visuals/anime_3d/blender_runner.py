@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -60,7 +61,7 @@ def build_blender_command(
     engine = BLENDER_ENGINE
     gpu_flag = "1" if BLENDER_GPU else "0"
     if flags_requiring_value is None:
-        flags_requiring_value = {"--character-asset"}
+        flags_requiring_value = {"--character-asset", "--seed", "--fingerprint"}
     validate_no_empty_value_flags(args, flags_requiring_value)
     return [
         str(blender_path),
@@ -77,24 +78,56 @@ def build_blender_command(
     ]
 
 
-def run_blender(command: BlenderCommand) -> subprocess.CompletedProcess[str]:
+def _extract_arg_value(args: Iterable[str], flag: str) -> str | None:
+    args_list = list(args)
+    for index, value in enumerate(args_list):
+        if value == flag and index + 1 < len(args_list):
+            return args_list[index + 1]
+    return None
+
+
+def _resolve_output_dir(args: Iterable[str]) -> Path:
+    output_value = _extract_arg_value(args, "--output") or _extract_arg_value(args, "--report")
+    if output_value:
+        return Path(output_value).expanduser().resolve().parent
+    return Path.cwd()
+
+
+def _write_spawn_error(output_dir: Path, command: list[str], error: Exception) -> None:
+    payload = {"stage": "spawn", "error": str(error), "cmd": command, "cwd": str(Path.cwd())}
+    (output_dir / "blender_error.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _run_blender(command: BlenderCommand) -> subprocess.CompletedProcess[str]:
     full_command = build_blender_command(command.script_path, command.args)
-    return subprocess.run(
-        full_command,
-        check=True,
-        text=True,
-        capture_output=True,
-    )
+    output_dir = _resolve_output_dir(command.args)
+    stdout_path = output_dir / "blender_stdout.txt"
+    stderr_path = output_dir / "blender_stderr.txt"
+    try:
+        result = subprocess.run(
+            full_command,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _write_spawn_error(output_dir, full_command, exc)
+        raise
+    stdout_path.write_text(result.stdout or "", encoding="utf-8")
+    stderr_path.write_text(result.stderr or "", encoding="utf-8")
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Blender failed with code {result.returncode}. See {stderr_path} for details."
+        )
+    return result
+
+
+def run_blender(command: BlenderCommand) -> subprocess.CompletedProcess[str]:
+    return _run_blender(command)
 
 
 def run_blender_capture(command: BlenderCommand) -> subprocess.CompletedProcess[str]:
-    full_command = build_blender_command(command.script_path, command.args)
-    return subprocess.run(
-        full_command,
-        check=False,
-        text=True,
-        capture_output=True,
-    )
+    return _run_blender(command)
 
 
 def detect_blender() -> BlenderDetection:

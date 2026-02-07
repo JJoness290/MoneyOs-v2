@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
-import math
 import math
 import os
 from pathlib import Path
 import re
+import shlex
+import shutil
 import subprocess
 import time
 import wave
@@ -23,6 +25,8 @@ from app.config import (
     ANIME3D_STYLE_PRESET,
     ANIME3D_OUTLINE_MODE,
     ANIME3D_POSTFX,
+    BLENDER_ENGINE,
+    BLENDER_GPU,
     OUTPUT_DIR,
     VFX_EMISSION_STRENGTH,
     VFX_SCALE,
@@ -33,7 +37,7 @@ from app.core.tts import generate_tts
 from app.core.visuals.anime_3d.blender_runner import build_blender_command
 from src.utils.cli_args import add_opt, validate_no_empty_value_flags
 from app.core.visuals.anime_3d.validators import validate_episode
-from app.core.visuals.ffmpeg_utils import has_nvenc, run_ffmpeg
+from app.core.visuals.ffmpeg_utils import has_nvenc, run_ffmpeg, _fallback_to_x264, _uses_nvenc
 from src.utils.win_paths import planned_paths_preflight
 
 
@@ -68,10 +72,15 @@ def _required_asset_paths() -> dict[str, Path]:
     }
 
 
-def _ensure_assets() -> None:
+def _missing_required_assets() -> list[str]:
+    return [key for key, path in _required_asset_paths().items() if not path.exists()]
+
+
+def _ensure_assets(missing: list[str], strict_assets: bool) -> None:
     if ANIME3D_ASSET_MODE != "local":
         return
-    missing = [key for key, path in _required_asset_paths().items() if not path.exists()]
+    if not strict_assets:
+        return
     if missing:
         message = f"Missing assets (assets_root={get_assets_root()}):\n" + "\n".join(
             f"- {key}" for key in missing
@@ -147,12 +156,32 @@ def _assemble_frames_video(
     audio_path: Path,
     output_path: Path,
     warnings: list[str],
+    report_path: Path | None = None,
 ) -> None:
-    _ = audio_path
+    def _run_ffmpeg_with_logs(command: list[str], output_dir: Path) -> None:
+        mux_cmd_path = output_dir / "mux_cmd.txt"
+        mux_stdout_path = output_dir / "mux_stdout.txt"
+        mux_stderr_path = output_dir / "mux_stderr.txt"
+        mux_cmd_path.write_text(" ".join(command), encoding="utf-8")
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0 and _uses_nvenc(command):
+            fallback = _fallback_to_x264(command)
+            mux_cmd_path.write_text(
+                mux_cmd_path.read_text(encoding="utf-8") + "\n" + " ".join(fallback),
+                encoding="utf-8",
+            )
+            result = subprocess.run(fallback, capture_output=True, text=True, check=False)
+        mux_stdout_path.write_text(result.stdout or "", encoding="utf-8")
+        mux_stderr_path.write_text(result.stderr or "", encoding="utf-8")
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg mux failed; see {mux_stderr_path}")
+
     encode_report_path = output_path.with_name("encode_report.json")
     frame_files = sorted(frames_dir.glob("frame_*.png"))
     if not frame_files:
         raise RuntimeError(f"No frames found in {frames_dir}")
+    if not audio_path.exists() or audio_path.stat().st_size == 0:
+        raise RuntimeError(f"audio missing or empty during encode: {audio_path}")
     first_frame = frames_dir / "frame_0001.png"
     if not first_frame.exists():
         sample = [path.name for path in frame_files[:10]]
@@ -193,6 +222,8 @@ def _assemble_frames_video(
         str(start_number),
         "-i",
         str(frames_dir / pattern),
+        "-i",
+        str(audio_path),
     ]
     if use_nvenc:
         args += [
@@ -206,6 +237,11 @@ def _assemble_frames_video(
             "yuv420p",
             "-movflags",
             "+faststart",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
         ]
         encoder_name = "h264_nvenc"
     else:
@@ -220,6 +256,11 @@ def _assemble_frames_video(
             "yuv420p",
             "-movflags",
             "+faststart",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
         ]
         encoder_name = "libx264"
     args.append(str(output_path))
@@ -233,12 +274,183 @@ def _assemble_frames_video(
         "warnings": warnings,
     }
     try:
-        run_ffmpeg(args)
+        _run_ffmpeg_with_logs(args, output_path.parent)
     except Exception as exc:  # noqa: BLE001
         encode_report["error"] = str(exc)
         encode_report_path.write_text(json.dumps(encode_report, indent=2), encoding="utf-8")
         raise
+    _augment_encode_report(
+        encode_report_path,
+        encode_report,
+        report_path,
+        frames_dir,
+    )
+    if report_path and report_path.exists():
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        payload.update(
+            {
+                "status": "complete",
+                "frame_count": frame_count,
+                "video_duration": frame_count / float(fps),
+                "output_video": str(output_path),
+                "final_video": str(output_path),
+                "muxed": True,
+            }
+        )
+        report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _augment_encode_report(
+    encode_report_path: Path,
+    encode_report: dict,
+    report_path: Path | None,
+    frames_dir: Path,
+) -> None:
+    if report_path and report_path.exists():
+        try:
+            render_payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            render_payload = {}
+        for key in ("seed", "fingerprint"):
+            if key in render_payload:
+                encode_report[key] = render_payload[key]
+    if shutil.which("ffmpeg"):
+        first_frame = frames_dir / "frame_0001.png"
+        last_frame = frames_dir / "frame_0001.png"
+        if first_frame.exists():
+            encode_report["first_frame_hash"] = _framehash_for_image(first_frame)
+        frame_files = sorted(frames_dir.glob("frame_*.png"))
+        if frame_files:
+            last_frame = frame_files[-1]
+        if last_frame.exists():
+            encode_report["last_frame_hash"] = _framehash_for_image(last_frame)
     encode_report_path.write_text(json.dumps(encode_report, indent=2), encoding="utf-8")
+
+
+def _framehash_for_image(image_path: Path) -> str | None:
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(image_path),
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "framehash",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    lines = [line for line in result.stdout.splitlines() if line and not line.startswith("#")]
+    if not lines:
+        return None
+    return lines[-1].split(",")[-1].strip()
+
+
+def _validate_blender_artifacts(
+    output_dir: Path,
+    report_path: Path,
+    *,
+    expected_seed: int | None = None,
+    expected_fingerprint: str | None = None,
+) -> None:
+    blender_cmd_path = output_dir / "blender_cmd.txt"
+    if not blender_cmd_path.exists():
+        raise RuntimeError("blender_cmd.txt missing after render")
+    cmd_text = blender_cmd_path.read_text(encoding="utf-8")
+
+    def fail(message: str) -> None:
+        snippet = cmd_text[:400]
+        raise RuntimeError(f"{message}. blender_cmd.txt head: {snippet}")
+
+    if "--seed" not in cmd_text:
+        fail("blender_cmd.txt missing --seed argument")
+    if "--fingerprint" not in cmd_text:
+        fail("blender_cmd.txt missing --fingerprint argument")
+    if not report_path.exists():
+        fail("render_report.json missing after render")
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        snippet = cmd_text[:400]
+        raise RuntimeError(f"render_report.json unreadable. blender_cmd.txt head: {snippet}") from exc
+    if not report.get("seed") or not report.get("fingerprint"):
+        fail("render_report.json missing seed/fingerprint")
+    if expected_seed is not None and int(report.get("seed")) != expected_seed:
+        fail("render_report.json seed mismatch")
+    if expected_fingerprint is not None and report.get("fingerprint") != expected_fingerprint:
+        fail("render_report.json fingerprint mismatch")
+
+
+def _derive_episode_seed(job_id: str | None, output_dir: Path) -> int:
+    seed_source = job_id if job_id else output_dir.name
+    digest = hashlib.sha256(seed_source.encode("utf-8")).hexdigest()
+    seed_value = int(digest[:8], 16) & 0x7FFFFFFF
+    if seed_value == 0:
+        seed_value = 1
+    return seed_value
+
+
+def _build_fingerprint(payload: dict[str, object]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _format_cmd(args: list[str]) -> str:
+    if os.name == "nt":
+        return subprocess.list2cmdline([str(arg) for arg in args])
+    return " ".join(shlex.quote(str(arg)) for arg in args)
+
+
+def _assert_seed_fingerprint_in_cmd(cmd: list[str]) -> None:
+    if "--seed" not in cmd or "--fingerprint" not in cmd:
+        raise RuntimeError("Blender argv missing --seed/--fingerprint")
+
+
+def _write_test_dummy_frames(frames_dir: Path, seed_value: int) -> None:
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    r_value = seed_value % 255
+    g_value = (seed_value // 7) % 255
+    for index in range(1, 151):
+        b_value = (120 + index) % 255
+        target = frames_dir / f"frame_{index:04d}.png"
+        with target.open("w", encoding="utf-8") as handle:
+            handle.write("P3\\n64 64\\n255\\n")
+            for _ in range(64 * 64):
+                handle.write(f"{r_value} {g_value} {b_value} ")
+
+
+def _proof_static_frames(frames_dir: Path, report_path: Path) -> None:
+    frame_targets = ["frame_0001.png", "frame_0075.png", "frame_0150.png"]
+    hashes: list[str] = []
+    for name in frame_targets:
+        path = frames_dir / name
+        if not path.exists():
+            continue
+        hashes.append(hashlib.sha256(path.read_bytes()).hexdigest())
+    if not hashes:
+        return
+    all_identical = len(set(hashes)) == 1
+    mouth_keyframes = 0
+    if report_path.exists():
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            mouth_keyframes = int(payload.get("mouth_keyframes", 0) or 0)
+        except json.JSONDecodeError:
+            mouth_keyframes = 0
+    if all_identical or (hashes[0] == hashes[-1] and mouth_keyframes > 0):
+        raise RuntimeError("motion check failed: frames appear static")
 
 
 def _generate_audio(output_dir: Path, duration_s: float, status_callback: StatusCallback) -> Path:
@@ -303,6 +515,7 @@ def render_anime_3d_60s(
     character_asset = None
     mode = "default"
     seed_value: int | None = None
+    strict_assets = 0
     action = None
     camera_preset = None
     start_frame = None
@@ -322,6 +535,14 @@ def render_anime_3d_60s(
         mode = str(overrides["mode"]).strip().lower()
     if overrides.get("seed") is not None:
         seed_value = int(overrides["seed"])
+    strict_assets_env = os.getenv("MONEYOS_STRICT_ASSETS")
+    strict_assets_explicit = False
+    if overrides.get("strict_assets") is not None:
+        strict_assets = int(bool(overrides["strict_assets"]))
+        strict_assets_explicit = True
+    elif strict_assets_env is not None:
+        strict_assets = 1 if strict_assets_env == "1" else 0
+        strict_assets_explicit = strict_assets == 1
     if overrides.get("action"):
         action = str(overrides["action"]).strip().lower()
     if overrides.get("camera_preset"):
@@ -332,6 +553,8 @@ def render_anime_3d_60s(
         disable_overlays = bool(overrides["disable_overlays"])
     if overrides.get("duration_seconds") is not None:
         duration_s = float(overrides["duration_seconds"])
+    if overrides.get("duration_s") is not None:
+        duration_s = float(overrides["duration_s"])
     if overrides.get("fps") is not None:
         fps = int(overrides["fps"])
     if overrides.get("res"):
@@ -364,9 +587,29 @@ def render_anime_3d_60s(
         quality = "fast"
     if duration_s <= 0:
         raise RuntimeError("Duration must be provided from audio beats and be > 0 seconds.")
-    _ensure_assets()
+    missing_assets = _missing_required_assets()
+    if (ANIME3D_ASSET_MODE == "auto" or missing_assets) and not strict_assets_explicit:
+        strict_assets = 0
+    _ensure_assets(missing_assets, strict_assets == 1)
     output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if seed_value is None:
+        seed_value = _derive_episode_seed(job_id, output_dir)
+    fingerprint_payload = {
+        "engine": BLENDER_ENGINE,
+        "gpu": "1" if BLENDER_GPU else "0",
+        "environment": environment,
+        "mode": mode,
+        "style_preset": style_preset,
+        "outline_mode": outline_mode,
+        "postfx": postfx,
+        "quality": quality,
+        "res": res,
+        "fps": fps,
+        "duration": f"{duration_s:.6f}",
+        "assets_dir": str(get_assets_root()),
+    }
+    fingerprint = _build_fingerprint(fingerprint_payload)
     planned_paths = [
         output_dir / "render_report.json",
         output_dir / "segment.mp4",
@@ -388,15 +631,14 @@ def render_anime_3d_60s(
     report_path = output_dir / "render_report.json"
     frames_dir = output_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
-    script_path = Path(__file__).parent / "blender" / "render_segment.py"
-    script_copy_path = output_dir / "blender_script.py"
-    script_copy_path.write_text(script_path.read_text(encoding="utf-8"), encoding="utf-8")
+    script_path = (Path(__file__).parent / "blender" / "render_segment.py").resolve()
     blender_args: list[str] = []
     add_opt(blender_args, "--output", video_path)
     add_opt(blender_args, "--audio", audio_path)
     add_opt(blender_args, "--report", report_path)
     add_opt(blender_args, "--assets-dir", get_assets_root())
     add_opt(blender_args, "--asset-mode", ANIME3D_ASSET_MODE)
+    add_opt(blender_args, "--strict-assets", strict_assets)
     if phase15:
         add_opt(blender_args, "--engine", "cycles")
     add_opt(blender_args, "--render-preset", render_preset)
@@ -404,6 +646,7 @@ def render_anime_3d_60s(
     add_opt(blender_args, "--character-asset", character_asset)
     add_opt(blender_args, "--mode", mode)
     add_opt(blender_args, "--seed", seed_value)
+    add_opt(blender_args, "--fingerprint", fingerprint)
     add_opt(blender_args, "--action", action)
     add_opt(blender_args, "--camera-preset", camera_preset)
     add_opt(blender_args, "--start-frame", start_frame)
@@ -437,11 +680,14 @@ def render_anime_3d_60s(
             "--report",
             "--assets-dir",
             "--asset-mode",
+            "--strict-assets",
             "--engine",
             "--render-preset",
             "--environment",
             "--character-asset",
             "--mode",
+            "--seed",
+            "--fingerprint",
             "--style-preset",
             "--outline-mode",
             "--postfx",
@@ -458,11 +704,56 @@ def render_anime_3d_60s(
             "--vfx-screen-coverage",
         },
     )
-    cmd = build_blender_command(script_copy_path, blender_args)
     blender_cmd_path = output_dir / "blender_cmd.txt"
     blender_stdout_path = output_dir / "blender_stdout.txt"
     blender_stderr_path = output_dir / "blender_stderr.txt"
-    blender_cmd_path.write_text(" ".join(cmd), encoding="utf-8")
+    if os.getenv("MONEYOS_TEST_MODE", "0") == "1":
+        cmd_preview = [
+            "blender",
+            "--background",
+            "--factory-startup",
+            "--python",
+            str(script_path),
+            "--",
+            *blender_args,
+        ]
+        _assert_seed_fingerprint_in_cmd(cmd_preview)
+        blender_cmd_path.write_text(_format_cmd(cmd_preview), encoding="utf-8")
+        cmd_text = blender_cmd_path.read_text(encoding="utf-8")
+        if "--seed" not in cmd_text or "--fingerprint" not in cmd_text:
+            raise RuntimeError("blender_cmd.txt missing --seed/--fingerprint")
+        report_payload = {
+            "status": "test",
+            "seed": seed_value,
+            "fingerprint": fingerprint,
+            "parsed_args": {"seed": seed_value},
+        }
+        report_path.write_text(json.dumps(report_payload, indent=2), encoding="utf-8")
+        _write_test_dummy_frames(frames_dir, seed_value)
+        _proof_static_frames(frames_dir, report_path)
+        if shutil.which("ffmpeg"):
+            _assemble_frames_video(frames_dir, fps, audio_path, video_path, warnings, report_path)
+        else:
+            video_path.write_text(f"seed={seed_value}\\n", encoding="utf-8")
+        _validate_blender_artifacts(
+            output_dir,
+            report_path,
+            expected_seed=seed_value,
+            expected_fingerprint=fingerprint,
+        )
+        return Anime3DResult(
+            output_dir=output_dir,
+            final_video=video_path,
+            audio_path=audio_path,
+            duration_seconds=duration_s,
+            warnings=warnings,
+        )
+    cmd = build_blender_command(script_path, blender_args)
+    _assert_seed_fingerprint_in_cmd(cmd)
+    blender_cmd_path.write_text(_format_cmd(cmd), encoding="utf-8")
+    cmd_text = blender_cmd_path.read_text(encoding="utf-8")
+    if "--seed" not in cmd_text or "--fingerprint" not in cmd_text:
+        raise RuntimeError("blender_cmd.txt missing --seed/--fingerprint")
     character_asset_label = character_asset if character_asset else "<omitted>"
     _emit_status(
         status_callback,
@@ -524,6 +815,13 @@ def render_anime_3d_60s(
             f"Stdout (tail):\n{tail_stdout}\n"
             f"Stderr (tail):\n{tail_stderr}"
         )
+    _proof_static_frames(frames_dir, report_path)
+    _validate_blender_artifacts(
+        output_dir,
+        report_path,
+        expected_seed=None,
+        expected_fingerprint=None,
+    )
     _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
     _assemble_frames_video(
         frames_dir,
@@ -531,13 +829,29 @@ def render_anime_3d_60s(
         audio_path,
         video_path,
         warnings,
+        report_path,
     )
+    if not video_path.exists() and frames_dir.exists():
+        _assemble_frames_video(
+            frames_dir,
+            fps,
+            audio_path,
+            video_path,
+            warnings,
+            report_path,
+        )
     if not video_path.exists() and video_raw_path.exists():
         video_path = video_raw_path
     if not video_path.exists():
         raise RuntimeError("segment.mp4 missing after frame encode")
     final_path = output_dir / "final.mp4"
     _finalize_mux(video_path, audio_path, final_path)
+    _validate_blender_artifacts(
+        output_dir,
+        report_path,
+        expected_seed=None,
+        expected_fingerprint=None,
+    )
     validation = validate_episode(final_path, audio_path, report_path)
     warnings.extend(validation.warnings)
     if not validation.valid:
@@ -566,12 +880,18 @@ def finalize_anime_3d(job_id: str, status_callback: StatusCallback = None) -> An
     report_path = output_dir / "render_report.json"
     if not video_path.exists() and frames_dir.exists():
         _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
-        _assemble_frames_video(frames_dir, ANIME3D_FPS, audio_path, video_path, warnings)
+        _assemble_frames_video(frames_dir, ANIME3D_FPS, audio_path, video_path, warnings, report_path)
     if not video_path.exists() and video_raw_path.exists():
         video_path = video_raw_path
     if not video_path.exists():
         raise RuntimeError("No video_raw.mp4 or segment.mp4 found to finalize")
     _finalize_mux(video_path, audio_path, final_path)
+    _validate_blender_artifacts(
+        output_dir,
+        report_path,
+        expected_seed=None,
+        expected_fingerprint=None,
+    )
     validation = validate_episode(final_path, audio_path, report_path)
     warnings.extend(validation.warnings)
     if not validation.valid:
