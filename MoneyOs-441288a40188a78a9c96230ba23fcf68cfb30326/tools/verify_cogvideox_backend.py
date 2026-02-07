@@ -1,5 +1,6 @@
-from __future__ import annotations
+import tools.bootstrap_repo
 
+import inspect
 import sys
 
 from app.core.visuals.ai_video.backends.cogvideox import CogVideoXBackend
@@ -16,6 +17,9 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"torch_error={exc}")
     backend = CogVideoXBackend()
+    backend_path = inspect.getfile(backend.__class__)
+    print(f"backend_file={backend_path}")
+    print(f"backend_name={backend.name}")
     available = backend.is_available()
     print(f"backend_is_available={available}")
     print(f"model_id={backend.model_id}")

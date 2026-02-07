@@ -18,14 +18,14 @@ class CogVideoXBackend(AiVideoBackend):
         self._device = "cpu"
         self._dtype = "float32"
 
-    @staticmethod
-    def is_available() -> bool:
+    def is_available(self) -> bool:
         try:
             from diffusers import CogVideoXPipeline  # noqa: F401
-        except Exception as exc:  # noqa: BLE001
-            print(f"[AI-VIDEO] backend=COGVIDEOX import_failed={exc}")
+            import torch
+            return torch.cuda.is_available()
+        except Exception as e:  # noqa: BLE001
+            print(f"[CogVideoXBackend] is_available failed: {e}")
             return False
-        return True
 
     def load(self) -> None:
         if self._pipe is not None:
