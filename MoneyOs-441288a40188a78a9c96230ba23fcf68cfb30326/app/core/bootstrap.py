@@ -17,6 +17,8 @@ _REQUIRED_PACKAGES = {
     "safetensors": "0.4.4",
     "pillow": "10.4.0",
     "numpy": "2.0.1",
+    "tiktoken": "0.7.0",
+    "protobuf": "5.27.3",
 }
 
 
