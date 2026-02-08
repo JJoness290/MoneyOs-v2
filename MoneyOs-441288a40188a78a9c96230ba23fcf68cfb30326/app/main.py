@@ -104,6 +104,8 @@ class Anime3DRequest(BaseModel):
     duration_seconds: Optional[float] = None
     duration_s: Optional[float] = None
     fps: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
     res: Optional[str] = None
     quality: Optional[str] = None
     style_preset: Optional[str] = None
@@ -117,6 +119,10 @@ class Anime3DRequest(BaseModel):
     character_asset: Optional[str] = None
     disable_overlays: Optional[bool] = None
     mode: Optional[str] = None
+    seed: Optional[int] = None
+    enable_sfx: Optional[bool] = None
+    enable_lipsync: Optional[bool] = None
+    enable_music: Optional[bool] = None
     strict_assets: Optional[bool] = None
 
 
@@ -353,17 +359,25 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
     try:
         _set_status(job_id, "Generating audio", stage_key="audio", progress_pct=5)
         overrides = req.dict(exclude_none=True)
+        overrides.setdefault("mode", "anime_auto_pro_3d")
         overrides.setdefault("render_preset", "phase15_quality")
         overrides.setdefault("quality", "max")
         overrides.setdefault("postfx", True)
         overrides.setdefault("res", "1920x1080")
-        overrides.setdefault("outline_mode", "off")
-        overrides.setdefault("style_preset", "key_art")
+        overrides.setdefault("outline_mode", "freestyle")
+        overrides.setdefault("style_preset", "default")
         overrides.setdefault("disable_overlays", False)
+        overrides.setdefault("enable_sfx", True)
+        overrides.setdefault("enable_lipsync", True)
+        overrides.setdefault("enable_music", True)
+        overrides.setdefault("duration_seconds", 60.0)
+        overrides.setdefault("fps", 24)
         if req.duration_s is not None:
             overrides["duration_s"] = float(req.duration_s)
         if req.fps is not None:
             overrides["fps"] = int(req.fps)
+        if req.width is not None and req.height is not None:
+            overrides["res"] = f"{int(req.width)}x{int(req.height)}"
         if "duration_seconds" not in overrides and "duration_s" in overrides:
             overrides["duration_seconds"] = overrides["duration_s"]
         result = render_anime_3d_60s(

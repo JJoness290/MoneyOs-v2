@@ -280,9 +280,31 @@
       finalStatus.textContent = 'In Progress';
       logTail.innerHTML = '';
 
-      const response = await fetch('/jobs/anime-episode-60s', { method: 'POST' });
+      const payload = {
+        mode: 'anime_auto_pro_3d',
+        duration_seconds: 60,
+        fps: 24,
+        width: 1920,
+        height: 1080,
+        seed: null,
+        enable_sfx: true,
+        enable_lipsync: true,
+        enable_music: true,
+        quality: 'max',
+      };
+      const response = await fetch('/jobs/anime-episode-60s', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
       const data = await response.json();
       const jobId = data.job_id;
+      if (!jobId) {
+        finalStatus.textContent = 'FAILED';
+        generateButton.disabled = false;
+        appendLog('Job id missing from response.');
+        return;
+      }
 
       subscribeEvents(jobId);
       polling = setInterval(() => pollStatus(jobId), 2000);

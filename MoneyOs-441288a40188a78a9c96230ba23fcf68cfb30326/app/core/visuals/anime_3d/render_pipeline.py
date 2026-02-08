@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 import json
 import math
@@ -13,6 +14,7 @@ import subprocess
 import time
 import wave
 from typing import Callable
+import random
 
 from moviepy.editor import AudioFileClip, CompositeAudioClip
 
@@ -34,7 +36,14 @@ from app.config import (
 )
 from app.core.paths import get_assets_root
 from app.core.tts import generate_tts
+from app.core.visuals.anime_3d.blender_installer import ensure_blender_path
 from app.core.visuals.anime_3d.blender_runner import build_blender_command
+from app.core.visuals.anime_3d.storage import (
+    compute_required_bytes,
+    default_output_estimate_bytes,
+    default_render_budget_bytes,
+    ensure_storage_budget,
+)
 from src.utils.cli_args import add_opt, validate_no_empty_value_flags
 from app.core.visuals.anime_3d.validators import validate_episode
 from app.core.visuals.ffmpeg_utils import has_nvenc, run_ffmpeg, _fallback_to_x264, _uses_nvenc
@@ -100,6 +109,104 @@ def _generate_base_tone(path: Path, duration_s: float, sample_rate: int = 44100)
             mod = 0.5 + 0.5 * math.sin(2 * math.pi * 0.5 * t)
             sample = int(12000 * mod * math.sin(2 * math.pi * 220 * t))
             handle.writeframes(sample.to_bytes(2, byteorder="little", signed=True))
+
+
+def _generate_script_and_plan(duration_s: float, seed: int) -> tuple[str, list[dict[str, object]]]:
+    rng = random.Random(seed)
+    acts = [
+        {
+            "label": "beginning",
+            "environment": rng.choice(["studio", "street", "room"]),
+            "action": "Hero arrives, senses danger, vows to protect the city.",
+            "dialogue": "We keep the light alive. No matter the cost.",
+            "camera": {"shot_type": "wide", "lens": 24, "motion": "slow_dolly"},
+            "vfx": ["glow_pulse"],
+            "sfx": ["whoosh"],
+            "ambience": ["city_night"],
+            "music_cue": "rise",
+        },
+        {
+            "label": "escalation",
+            "environment": rng.choice(["street", "studio", "room"]),
+            "action": "Enemy strikes, energy surges, clash in motion.",
+            "dialogue": "You chose the wrong night to take this world.",
+            "camera": {"shot_type": "tracking", "lens": 35, "motion": "handheld"},
+            "vfx": ["impact_burst", "energy_arc"],
+            "sfx": ["impact", "explosion"],
+            "ambience": ["tension"],
+            "music_cue": "drive",
+        },
+        {
+            "label": "payoff",
+            "environment": rng.choice(["room", "street", "studio"]),
+            "action": "Hero lands the final blow, calm returns.",
+            "dialogue": "It's over. We live to see tomorrow.",
+            "camera": {"shot_type": "close", "lens": 50, "motion": "push_in"},
+            "vfx": ["spark_fade"],
+            "sfx": ["impact_soft"],
+            "ambience": ["relief"],
+            "music_cue": "resolve",
+        },
+    ]
+    act_duration = max(1.0, duration_s / 3.0)
+    plan: list[dict[str, object]] = []
+    script_lines: list[str] = []
+    for idx, act in enumerate(acts):
+        t0 = idx * act_duration
+        t1 = min(duration_s, (idx + 1) * act_duration)
+        beat = {
+            "t0": round(t0, 2),
+            "t1": round(t1, 2),
+            **act,
+        }
+        plan.append(beat)
+        script_lines.append(f"{act['dialogue']}")
+    script = " ".join(script_lines)
+    return script, plan
+
+
+def _write_script_plan(output_dir: Path, script: str, plan: list[dict[str, object]]) -> Path:
+    payload = {
+        "generated_at": datetime.utcnow().isoformat(),
+        "script": script,
+        "plan": plan,
+    }
+    path = output_dir / "script_plan.json"
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
+def _generate_tone(
+    path: Path,
+    duration_s: float,
+    frequency: float,
+    sample_rate: int = 44100,
+    amplitude: int = 12000,
+) -> None:
+    total_frames = int(duration_s * sample_rate)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        for i in range(total_frames):
+            t = i / sample_rate
+            sample = int(amplitude * math.sin(2 * math.pi * frequency * t))
+            handle.writeframes(sample.to_bytes(2, byteorder="little", signed=True))
+
+
+def _generate_sfx_burst(path: Path, duration_s: float, sample_rate: int = 44100) -> None:
+    total_frames = int(duration_s * sample_rate)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        for i in range(total_frames):
+            t = i / sample_rate
+            envelope = max(0.0, 1.0 - (t / max(duration_s, 0.01)))
+            noise = int(8000 * envelope * math.sin(2 * math.pi * 440 * t))
+            handle.writeframes(noise.to_bytes(2, byteorder="little", signed=True))
 
 
 def _emit_status(
@@ -453,20 +560,38 @@ def _proof_static_frames(frames_dir: Path, report_path: Path) -> None:
         raise RuntimeError("motion check failed: frames appear static")
 
 
-def _generate_audio(output_dir: Path, duration_s: float, status_callback: StatusCallback) -> Path:
+def _generate_audio(
+    output_dir: Path,
+    duration_s: float,
+    script_text: str,
+    status_callback: StatusCallback,
+    *,
+    enable_sfx: bool,
+    enable_music: bool,
+) -> Path:
     _emit_status(status_callback, stage_key="audio", status="Generating audio", progress_pct=8)
-    base_tone = output_dir / "base_tone.wav"
-    _generate_base_tone(base_tone, duration_s)
-    tts_path = output_dir / "tts.wav"
+    ambience_path = output_dir / "ambience.wav"
+    _generate_tone(ambience_path, duration_s, frequency=110, amplitude=4000)
+    music_path = output_dir / "music.wav"
+    if enable_music:
+        _generate_tone(music_path, duration_s, frequency=220, amplitude=2500)
+    tts_path = output_dir / "narration.wav"
     try:
-        generate_tts("MoneyOS 3D test line. Audio and lips are synced.", tts_path)
+        generate_tts(script_text, tts_path)
     except Exception:
         tts_path = None
     final_path = output_dir / "audio.wav"
-    base_clip = AudioFileClip(str(base_tone))
-    clips = [base_clip.volumex(0.35)]
+    base_clip = AudioFileClip(str(ambience_path)).volumex(0.25)
+    clips = [base_clip]
+    if enable_music and music_path.exists():
+        clips.append(AudioFileClip(str(music_path)).volumex(0.18))
     if tts_path and tts_path.exists():
-        clips.append(AudioFileClip(str(tts_path)).volumex(1.0).set_start(1.0))
+        clips.append(AudioFileClip(str(tts_path)).volumex(1.0).set_start(0.5))
+    if enable_sfx:
+        sfx_path = output_dir / "sfx.wav"
+        _generate_sfx_burst(sfx_path, min(1.0, duration_s))
+        if sfx_path.exists():
+            clips.append(AudioFileClip(str(sfx_path)).volumex(0.6).set_start(duration_s * 0.5))
     composite = CompositeAudioClip(clips).set_duration(duration_s)
     composite.write_audiofile(str(final_path), fps=44100, logger=None)
     composite.close()
@@ -482,6 +607,7 @@ def render_anime_3d_60s(
     overrides: dict | None = None,
 ) -> Anime3DResult:
     warnings: list[str] = []
+    ensure_blender_path()
     render_preset = os.getenv("MONEYOS_RENDER_PRESET", "fast_proof").strip().lower()
     if render_preset not in {"fast_proof", "phase15_quality"}:
         render_preset = "fast_proof"
@@ -514,6 +640,9 @@ def render_anime_3d_60s(
     environment = env_template
     character_asset = None
     mode = "default"
+    enable_sfx = True
+    enable_lipsync = True
+    enable_music = True
     seed_value: int | None = None
     strict_assets = 0
     action = None
@@ -535,6 +664,12 @@ def render_anime_3d_60s(
         mode = str(overrides["mode"]).strip().lower()
     if overrides.get("seed") is not None:
         seed_value = int(overrides["seed"])
+    if overrides.get("enable_sfx") is not None:
+        enable_sfx = bool(overrides["enable_sfx"])
+    if overrides.get("enable_lipsync") is not None:
+        enable_lipsync = bool(overrides["enable_lipsync"])
+    if overrides.get("enable_music") is not None:
+        enable_music = bool(overrides["enable_music"])
     strict_assets_env = os.getenv("MONEYOS_STRICT_ASSETS")
     strict_assets_explicit = False
     if overrides.get("strict_assets") is not None:
@@ -563,6 +698,8 @@ def render_anime_3d_60s(
         quality = str(overrides["quality"])
     if overrides.get("style_preset"):
         style_preset = str(overrides["style_preset"])
+        if style_preset == "key_art":
+            style_preset = "default"
     if overrides.get("outline_mode"):
         outline_mode = str(overrides["outline_mode"])
     if overrides.get("postfx") is not None:
@@ -593,8 +730,20 @@ def render_anime_3d_60s(
     _ensure_assets(missing_assets, strict_assets == 1)
     output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
+    required_bytes = compute_required_bytes(
+        render_temp_budget=default_render_budget_bytes(),
+        final_output_estimate=default_output_estimate_bytes(),
+    )
+    ensure_storage_budget([get_assets_root(), output_dir], required_bytes, "render")
     if seed_value is None:
         seed_value = _derive_episode_seed(job_id, output_dir)
+    script_text, beat_plan = _generate_script_and_plan(duration_s, seed_value)
+    _write_script_plan(output_dir, script_text, beat_plan)
+    if mode == "anime_auto_pro_3d" and beat_plan:
+        environment = str(beat_plan[0].get("environment", environment))
+        unique_envs = {beat.get("environment") for beat in beat_plan}
+        if len(unique_envs) > 1:
+            warnings.append("environment_changes_requested")
     fingerprint_payload = {
         "engine": BLENDER_ENGINE,
         "gpu": "1" if BLENDER_GPU else "0",
@@ -625,7 +774,16 @@ def render_anime_3d_60s(
             f"Using short workdir: {short_root}. "
             f"Longest path: {longest_path} ({longest_len})."
         )
-    audio_path = _generate_audio(output_dir, duration_s, status_callback)
+    if not enable_lipsync:
+        warnings.append("lipsync_disabled")
+    audio_path = _generate_audio(
+        output_dir,
+        duration_s,
+        script_text,
+        status_callback,
+        enable_sfx=enable_sfx,
+        enable_music=enable_music,
+    )
     video_path = output_dir / "segment.mp4"
     video_raw_path = output_dir / "video_raw.mp4"
     report_path = output_dir / "render_report.json"
