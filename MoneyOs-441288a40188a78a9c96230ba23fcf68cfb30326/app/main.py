@@ -127,6 +127,8 @@ class AiVideoRequest(BaseModel):
 
 @app.on_event("startup")
 def bootstrap_dependencies() -> None:
+    if "MONEYOS_USE_GPU" not in os.environ:
+        os.environ["MONEYOS_USE_GPU"] = "1"
     ensure_dependencies()
     start_autopilot()
     try:
@@ -1045,6 +1047,11 @@ async def generate_anime_episode_3d_60s(
             "final_video": str((output_dir / "final.mp4").resolve()),
         }
     )
+
+
+@app.post("/jobs/anime-episode-60s")
+async def generate_anime_episode_60s(req: Anime3DRequest = Body(default=Anime3DRequest())) -> JSONResponse:
+    return await generate_anime_episode_3d_60s(req)
 
 
 @app.post("/jobs/anime-clip-3d")

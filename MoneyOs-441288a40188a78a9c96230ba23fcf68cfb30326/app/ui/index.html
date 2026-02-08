@@ -92,7 +92,7 @@
     <h1>MoneyOS – Video Generator</h1>
     <button id="generateButton">Start anime_3d 60s</button>
     <div class="status">
-      <div><span class="label">Endpoint:</span> <span id="endpointText">POST /jobs/anime-episode-60s-3d</span></div>
+      <div><span class="label">Endpoint:</span> <span id="endpointText">POST /jobs/anime-episode-60s</span></div>
       <div><span class="label">Stage:</span> <span id="stageText">Idle</span></div>
       <div><span class="label">Status:</span> <span id="statusText">Idle</span></div>
       <div><span class="label">Progress:</span> <span id="progressText">0%</span></div>
@@ -280,7 +280,7 @@
       finalStatus.textContent = 'In Progress';
       logTail.innerHTML = '';
 
-      const response = await fetch('/jobs/anime-episode-60s-3d', { method: 'POST' });
+      const response = await fetch('/jobs/anime-episode-60s', { method: 'POST' });
       const data = await response.json();
       const jobId = data.job_id;
 
