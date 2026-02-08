@@ -136,6 +136,12 @@ def bootstrap_dependencies() -> None:
     if "MONEYOS_USE_GPU" not in os.environ:
         os.environ["MONEYOS_USE_GPU"] = "1"
     ensure_dependencies()
+    try:
+        from app.core.assets3d.pruner import prune_assets  # noqa: WPS433
+
+        prune_assets(min_free_bytes=int(os.getenv("MONEYOS_MIN_FREE_BYTES", str(15 * 1024**3))))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[PRUNE] startup scan failed: {exc}")
     start_autopilot()
     try:
         from app.core.visuals.ffmpeg_utils import select_video_encoder  # noqa: WPS433
@@ -393,6 +399,9 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
             status_text = "Complete"
         _set_status(job_id, status_text, anime_3d_result=result, stage_key="done", progress_pct=100)
     except Exception as exc:  # noqa: BLE001
+        from app.core.assets3d.manifest import clear_in_use  # noqa: WPS433
+
+        clear_in_use(job_id)
         output_dir = anime_3d_output_dir(job_id)
         extra = {
             "output_dir": str(output_dir.resolve()),

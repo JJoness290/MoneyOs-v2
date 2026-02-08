@@ -14,6 +14,8 @@ def ensure_storage_budget(
     required_bytes: int,
     stage: str,
 ) -> None:
+    if os.getenv("MONEYOS_SKIP_STORAGE_CHECKS") == "1":
+        return
     required_bytes = max(0, int(required_bytes))
     for path in paths:
         root = path.resolve()

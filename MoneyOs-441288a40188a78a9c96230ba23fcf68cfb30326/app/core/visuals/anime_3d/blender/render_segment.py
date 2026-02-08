@@ -33,9 +33,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--fingerprint", default="")
     parser.add_argument("--strict-assets", type=int, default=1)
     parser.add_argument("--environment", default="room")
+    parser.add_argument("--beat-plan", default="")
     parser.add_argument("--character-asset", default="")
     parser.add_argument("--mode", default="default")
-    parser.add_argument("--style-preset", default="key_art")
+    parser.add_argument("--style-preset", default="default")
     parser.add_argument("--outline-mode", default="freestyle")
     parser.add_argument("--postfx", default="on")
     parser.add_argument("--quality", default="balanced")
@@ -1259,9 +1260,121 @@ def _build_environment_template(template: str) -> None:
         apply_env_material(wall)
 
 
+def _build_environment_collection(template: str, name: str) -> bpy.types.Collection:
+    scene = bpy.context.scene
+    collection = bpy.data.collections.new(name)
+    scene.collection.children.link(collection)
+    before = set(scene.objects)
+    _build_environment_template(template)
+    after = set(scene.objects)
+    new_objects = [obj for obj in after - before if obj.name in bpy.context.scene.objects]
+    for obj in new_objects:
+        if obj.users_collection:
+            for col in list(obj.users_collection):
+                col.objects.unlink(obj)
+        collection.objects.link(obj)
+    return collection
+
+
+def _apply_environment_schedule(
+    schedule: list[dict[str, object]],
+    fps: int,
+    default_env: str,
+) -> str:
+    scene = bpy.context.scene
+    if not schedule:
+        _build_environment_template(default_env)
+        return default_env
+    env_names = []
+    collections = {}
+    for idx, beat in enumerate(schedule):
+        env_name = str(beat.get("environment", default_env))
+        if env_name in collections:
+            continue
+        col = _build_environment_collection(env_name, f"ENV_{idx}_{env_name}")
+        collections[env_name] = col
+        env_names.append(env_name)
+    if not env_names:
+        _build_environment_template(default_env)
+        return default_env
+    for beat in schedule:
+        env_name = str(beat.get("environment", default_env))
+        t0 = float(beat.get("t0", 0))
+        t1 = float(beat.get("t1", t0 + 1))
+        start_frame = max(1, int(t0 * fps))
+        end_frame = max(start_frame + 1, int(t1 * fps))
+        for name, col in collections.items():
+            scene.frame_set(start_frame)
+            col.hide_render = name != env_name
+            col.hide_viewport = name != env_name
+            col.keyframe_insert(data_path="hide_render")
+            col.keyframe_insert(data_path="hide_viewport")
+            scene.frame_set(end_frame)
+            col.hide_render = name != env_name
+            col.hide_viewport = name != env_name
+            col.keyframe_insert(data_path="hide_render")
+            col.keyframe_insert(data_path="hide_viewport")
+    return env_names[0]
+
+
+def _apply_environment_schedule_local(
+    schedule: list[dict[str, object]],
+    fps: int,
+    env_candidates: list[Path],
+    default_env: str,
+) -> str:
+    if not schedule or not env_candidates:
+        return default_env
+    env_map = {path.stem.lower(): path for path in env_candidates}
+    collections: dict[str, list[bpy.types.Collection]] = {}
+    for beat in schedule:
+        env_name = str(beat.get("environment", default_env)).lower()
+        path = env_map.get(env_name) or env_candidates[0]
+        if env_name not in collections:
+            collections[env_name] = _append_collections(path)
+    for beat in schedule:
+        env_name = str(beat.get("environment", default_env)).lower()
+        t0 = float(beat.get("t0", 0))
+        t1 = float(beat.get("t1", t0 + 1))
+        start_frame = max(1, int(t0 * fps))
+        end_frame = max(start_frame + 1, int(t1 * fps))
+        for name, cols in collections.items():
+            for col in cols:
+                bpy.context.scene.frame_set(start_frame)
+                col.hide_render = name != env_name
+                col.hide_viewport = name != env_name
+                col.keyframe_insert(data_path="hide_render")
+                col.keyframe_insert(data_path="hide_viewport")
+                bpy.context.scene.frame_set(end_frame)
+                col.hide_render = name != env_name
+                col.hide_viewport = name != env_name
+                col.keyframe_insert(data_path="hide_render")
+                col.keyframe_insert(data_path="hide_viewport")
+    return schedule[0].get("environment", default_env)
+
+
+def _build_viseme_schedule(text: str, frame_count: int) -> list[float]:
+    if not text:
+        return [0.0 for _ in range(frame_count)]
+    vowels = "aeiou"
+    values = []
+    for char in text.lower():
+        if char in vowels:
+            values.append(1.0)
+        elif char.isalpha():
+            values.append(0.4)
+    if not values:
+        return [0.0 for _ in range(frame_count)]
+    schedule = []
+    for idx in range(frame_count):
+        value = values[int(idx / frame_count * len(values))]
+        schedule.append(value)
+    return schedule
+
 def _animate(
     objects: dict[str, bpy.types.Object | None],
     envelope: list[float],
+    viseme_schedule: list[float],
     fps: int,
     assets_dir: Path,
     asset_mode: str,
@@ -1306,22 +1419,23 @@ def _animate(
             camera.location.y = camera.location.y + math.cos(t * 0.7) * 0.05
             camera.location.z = camera.location.z + math.sin(t * 1.2) * 0.03
             camera.keyframe_insert(data_path="location", index=-1)
+        viseme_value = viseme_schedule[frame] if frame < len(viseme_schedule) else envelope[frame]
         if jaw_bone:
-            jaw_bone.rotation_euler.x = -envelope[frame] * 0.6
+            jaw_bone.rotation_euler.x = -max(envelope[frame], viseme_value) * 0.6
             jaw_bone.keyframe_insert(data_path="rotation_euler", index=0)
-            if envelope[frame] > 0.02:
+            if max(envelope[frame], viseme_value) > 0.02:
                 mouth_keyframes += 1
         elif objects.get("hero_jaw"):
             jaw_obj = objects["hero_jaw"]
-            jaw_obj.rotation_euler.x = -envelope[frame] * 0.6
+            jaw_obj.rotation_euler.x = -max(envelope[frame], viseme_value) * 0.6
             jaw_obj.keyframe_insert(data_path="rotation_euler", index=0)
-            if envelope[frame] > 0.02:
+            if max(envelope[frame], viseme_value) > 0.02:
                 mouth_keyframes += 1
         elif mouth_key:
             _, key = mouth_key
-            key.value = min(1.0, envelope[frame] * 1.2)
+            key.value = min(1.0, max(envelope[frame], viseme_value) * 1.2)
             key.keyframe_insert(data_path="value")
-            if envelope[frame] > 0.02:
+            if max(envelope[frame], viseme_value) > 0.02:
                 mouth_keyframes += 1
     return mouth_keyframes
 
@@ -1719,7 +1833,7 @@ def main() -> None:
     light_preset = os.getenv("MONEYOS_ANIME3D_LIGHT_PRESET", "default").strip().lower()
     outlines_mode = os.getenv("MONEYOS_ANIME3D_OUTLINES", "freestyle")
     compositor_enabled = os.getenv("MONEYOS_ANIME3D_COMPOSITOR", "1") != "0"
-    watermark_enabled = os.getenv("MONEYOS_ANIME3D_WATERMARK", "1") != "0"
+    watermark_enabled = os.getenv("MONEYOS_ANIME3D_WATERMARK", "0") != "0"
     try:
         samples = int(os.getenv("MONEYOS_ANIME3D_SAMPLES", "96"))
     except ValueError:
@@ -1783,12 +1897,7 @@ def main() -> None:
 
     procedural_humanoid = False
     if procedural_fallback:
-        print("[ASSETS] missing assets detected. Using procedural fallback.")
-        procedural_humanoid = _build_procedural_scene(
-            scene,
-            total_frames,
-            force_procedural_humanoid=bool(args.force_procedural_humanoid),
-        )
+        raise RuntimeError("Missing assets; Blender-only pipeline requires asset packs.")
         subject_obj, char_source, char_fmt = _ensure_character(scene, args, assets_dir, seed_value)
         _apply_outlines(scene, outlines_mode)
         if quality_enabled:
@@ -1845,14 +1954,25 @@ def main() -> None:
         report_path.write_text(json.dumps(render_report, indent=2), encoding="utf-8")
         return
 
+    beat_plan = []
+    if args.beat_plan:
+        plan_path = Path(args.beat_plan)
+        if plan_path.exists():
+            payload = json.loads(plan_path.read_text(encoding="utf-8"))
+            beat_plan = payload.get("plan", []) if isinstance(payload, dict) else []
     if args.asset_mode != "local":
         template_options = ["room", "street", "studio"]
         if args.environment and args.environment not in template_options:
             template_options.append(args.environment)
         selected_env = rng.choice(template_options)
+        if beat_plan:
+            selected_env = _apply_environment_schedule(beat_plan, args.fps, selected_env)
+        else:
+            _build_environment_template(selected_env)
+    else:
+        if beat_plan and env_candidates:
+            selected_env = _apply_environment_schedule_local(beat_plan, args.fps, env_candidates, selected_env)
     print(f"[PHASE2] env={selected_env} character={args.character_asset or 'none'} preset={preset}")
-    if args.asset_mode != "local":
-        _build_environment_template(selected_env)
     objects = _create_scene(assets_dir, args.asset_mode, env_blend, hero_asset, enemy_asset)
     _ensure_visual_density(scene, args.duration, args.fps)
     character_meshes = _load_character_asset(assets_dir, args.character_asset, warnings)
@@ -1874,6 +1994,8 @@ def main() -> None:
     if args.postfx == "on" and not args.fast_proof:
         _setup_compositor(scene, warnings)
     envelope = _load_rms_envelope(Path(args.audio) if args.audio else Path(), args.fps, scene.frame_end)
+    dialogue_text = " ".join(str(beat.get("dialogue", "")) for beat in beat_plan) if beat_plan else ""
+    viseme_schedule = _build_viseme_schedule(dialogue_text, scene.frame_end)
     motion_info = _ensure_minimum_motion(objects, scene, args.duration, args.fps)
     print(
         "[MOTION] camera_motion="
@@ -1884,6 +2006,7 @@ def main() -> None:
     mouth_keyframes = _animate(
         objects,
         envelope,
+        viseme_schedule,
         args.fps,
         assets_dir,
         args.asset_mode,
@@ -1907,7 +2030,7 @@ def main() -> None:
         if watermark_enabled:
             _apply_watermark(
                 scene,
-                f"key_art_v1 | 1080p | S{samples} | CHAR:{char_fmt} | SRC:{char_source}",
+                f"Anime3D | 1080p | S{samples} | CHAR:{char_fmt} | SRC:{char_source}",
             )
 
     selection = {

@@ -36,6 +36,8 @@ from app.config import (
 )
 from app.core.paths import get_assets_root
 from app.core.tts import generate_tts
+from app.core.assets3d.bootstrapper import ensure_minimum_assets
+from app.core.assets3d.manifest import clear_in_use
 from app.core.visuals.anime_3d.blender_installer import ensure_blender_path
 from app.core.visuals.anime_3d.blender_runner import build_blender_command
 from app.core.visuals.anime_3d.storage import (
@@ -157,6 +159,7 @@ def _generate_script_and_plan(duration_s: float, seed: int) -> tuple[str, list[d
         beat = {
             "t0": round(t0, 2),
             "t1": round(t1, 2),
+            "characters": ["hero", "enemy"],
             **act,
         }
         plan.append(beat)
@@ -560,10 +563,38 @@ def _proof_static_frames(frames_dir: Path, report_path: Path) -> None:
         raise RuntimeError("motion check failed: frames appear static")
 
 
+def _normalize_wav(path: Path) -> None:
+    if not path.exists():
+        return
+    with wave.open(str(path), "rb") as handle:
+        params = handle.getparams()
+        frames = handle.readframes(handle.getnframes())
+    if not frames:
+        return
+    sample_width = params.sampwidth
+    if sample_width != 2:
+        return
+    samples = [
+        int.from_bytes(frames[i : i + 2], byteorder="little", signed=True)
+        for i in range(0, len(frames), 2)
+    ]
+    peak = max(abs(sample) for sample in samples) or 1
+    scale = min(1.0, 28000 / peak)
+    if scale >= 0.99:
+        return
+    normalized = b"".join(
+        int(sample * scale).to_bytes(2, byteorder="little", signed=True) for sample in samples
+    )
+    with wave.open(str(path), "wb") as handle:
+        handle.setparams(params)
+        handle.writeframes(normalized)
+
+
 def _generate_audio(
     output_dir: Path,
     duration_s: float,
     script_text: str,
+    narration_path: Path,
     status_callback: StatusCallback,
     *,
     enable_sfx: bool,
@@ -575,7 +606,7 @@ def _generate_audio(
     music_path = output_dir / "music.wav"
     if enable_music:
         _generate_tone(music_path, duration_s, frequency=220, amplitude=2500)
-    tts_path = output_dir / "narration.wav"
+    tts_path = narration_path
     try:
         generate_tts(script_text, tts_path)
     except Exception:
@@ -584,7 +615,8 @@ def _generate_audio(
     base_clip = AudioFileClip(str(ambience_path)).volumex(0.25)
     clips = [base_clip]
     if enable_music and music_path.exists():
-        clips.append(AudioFileClip(str(music_path)).volumex(0.18))
+        music_clip = AudioFileClip(str(music_path)).volumex(0.12)
+        clips.append(music_clip)
     if tts_path and tts_path.exists():
         clips.append(AudioFileClip(str(tts_path)).volumex(1.0).set_start(0.5))
     if enable_sfx:
@@ -597,6 +629,7 @@ def _generate_audio(
     composite.close()
     for clip in clips:
         clip.close()
+    _normalize_wav(final_path)
     _emit_status(status_callback, stage_key="audio", status="Generating audio", progress_pct=12)
     return final_path
 
@@ -608,6 +641,7 @@ def render_anime_3d_60s(
 ) -> Anime3DResult:
     warnings: list[str] = []
     ensure_blender_path()
+    ensure_minimum_assets(job_id)
     render_preset = os.getenv("MONEYOS_RENDER_PRESET", "fast_proof").strip().lower()
     if render_preset not in {"fast_proof", "phase15_quality"}:
         render_preset = "fast_proof"
@@ -643,6 +677,7 @@ def render_anime_3d_60s(
     enable_sfx = True
     enable_lipsync = True
     enable_music = True
+    asset_mode = ANIME3D_ASSET_MODE
     seed_value: int | None = None
     strict_assets = 0
     action = None
@@ -678,6 +713,10 @@ def render_anime_3d_60s(
     elif strict_assets_env is not None:
         strict_assets = 1 if strict_assets_env == "1" else 0
         strict_assets_explicit = strict_assets == 1
+    if mode == "anime_auto_pro_3d":
+        strict_assets = 1
+        strict_assets_explicit = True
+        asset_mode = "local"
     if overrides.get("action"):
         action = str(overrides["action"]).strip().lower()
     if overrides.get("camera_preset"):
@@ -724,7 +763,7 @@ def render_anime_3d_60s(
         quality = "fast"
     if duration_s <= 0:
         raise RuntimeError("Duration must be provided from audio beats and be > 0 seconds.")
-    missing_assets = _missing_required_assets()
+    missing_assets = _missing_required_assets() if asset_mode == "local" else []
     if (ANIME3D_ASSET_MODE == "auto" or missing_assets) and not strict_assets_explicit:
         strict_assets = 0
     _ensure_assets(missing_assets, strict_assets == 1)
@@ -757,6 +796,7 @@ def render_anime_3d_60s(
         "fps": fps,
         "duration": f"{duration_s:.6f}",
         "assets_dir": str(get_assets_root()),
+        "asset_mode": asset_mode,
     }
     fingerprint = _build_fingerprint(fingerprint_payload)
     planned_paths = [
@@ -776,10 +816,13 @@ def render_anime_3d_60s(
         )
     if not enable_lipsync:
         warnings.append("lipsync_disabled")
+    narration_path = OUTPUT_DIR / "temp" / f"{job_id}_narration.wav"
+    narration_path.parent.mkdir(parents=True, exist_ok=True)
     audio_path = _generate_audio(
         output_dir,
         duration_s,
         script_text,
+        narration_path,
         status_callback,
         enable_sfx=enable_sfx,
         enable_music=enable_music,
@@ -795,8 +838,9 @@ def render_anime_3d_60s(
     add_opt(blender_args, "--audio", audio_path)
     add_opt(blender_args, "--report", report_path)
     add_opt(blender_args, "--assets-dir", get_assets_root())
-    add_opt(blender_args, "--asset-mode", ANIME3D_ASSET_MODE)
+    add_opt(blender_args, "--asset-mode", asset_mode)
     add_opt(blender_args, "--strict-assets", strict_assets)
+    add_opt(blender_args, "--beat-plan", output_dir / "script_plan.json")
     if phase15:
         add_opt(blender_args, "--engine", "cycles")
     add_opt(blender_args, "--render-preset", render_preset)
@@ -980,6 +1024,7 @@ def render_anime_3d_60s(
         expected_seed=None,
         expected_fingerprint=None,
     )
+    ensure_storage_budget([output_dir], required_bytes, "encode")
     _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
     _assemble_frames_video(
         frames_dir,
@@ -1003,7 +1048,10 @@ def render_anime_3d_60s(
     if not video_path.exists():
         raise RuntimeError("segment.mp4 missing after frame encode")
     final_path = output_dir / "final.mp4"
+    ensure_storage_budget([output_dir], required_bytes, "export")
     _finalize_mux(video_path, audio_path, final_path)
+    if not final_path.exists() or final_path.stat().st_size == 0:
+        raise RuntimeError(f"final.mp4 missing or empty: {final_path}")
     _validate_blender_artifacts(
         output_dir,
         report_path,
@@ -1018,6 +1066,7 @@ def render_anime_3d_60s(
         if not fast_proof:
             raise RuntimeError(validation.message)
     _update_report_warnings(report_path, warnings)
+    clear_in_use(job_id)
     return Anime3DResult(
         output_dir=output_dir,
         final_video=final_path,
@@ -1043,7 +1092,10 @@ def finalize_anime_3d(job_id: str, status_callback: StatusCallback = None) -> An
         video_path = video_raw_path
     if not video_path.exists():
         raise RuntimeError("No video_raw.mp4 or segment.mp4 found to finalize")
+    ensure_storage_budget([output_dir], default_output_estimate_bytes(), "export")
     _finalize_mux(video_path, audio_path, final_path)
+    if not final_path.exists() or final_path.stat().st_size == 0:
+        raise RuntimeError(f"final.mp4 missing or empty: {final_path}")
     _validate_blender_artifacts(
         output_dir,
         report_path,
