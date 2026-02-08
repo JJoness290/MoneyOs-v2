@@ -13,8 +13,8 @@ class CogVideoXBackend(AiVideoBackend):
 
     def __init__(self) -> None:
         self.model_id = os.getenv(
-            "MONEYOS_COGVIDEOX_MODEL_ID",
-            os.getenv("MONEYOS_AI_VIDEO_MODEL_ID", "zai-org/CogVideoX-5b"),
+            "MONEYOS_AI_VIDEO_MODEL_ID",
+            os.getenv("MONEYOS_COGVIDEOX_MODEL_ID", "zai-org/CogVideoX-5b"),
         )
         self._pipe = None
         self._device = "cpu"
@@ -185,13 +185,26 @@ class CogVideoXBackend(AiVideoBackend):
                 ) from exc
             raise
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        export_to_video(frames, str(out_path), fps=fps)
-        del frames
-        if "outputs" in locals():
-            del outputs
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
+        print(f"[AI_VIDEO][COGVIDEOX] exporting to: {out_path}", flush=True)
+        try:
+            export_to_video(frames, str(out_path), fps=fps)
+            if (not out_path.exists()) or out_path.stat().st_size == 0:
+                raise RuntimeError(
+                    "[AI_VIDEO][COGVIDEOX] export finished but file missing/empty: "
+                    f"{out_path}"
+                )
+            print(
+                f"[AI_VIDEO][COGVIDEOX] wrote: {out_path} bytes={out_path.stat().st_size}",
+                flush=True,
+            )
+        finally:
+            if "frames" in locals():
+                del frames
+            if "outputs" in locals():
+                del outputs
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
         return BackendResult(
             fps=fps,
             resolution=f"{width}x{height}",
