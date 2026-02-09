@@ -11,4 +11,5 @@ set MONEYOS_RAM_MODE=low
 set MONEYOS_SD_PROFILE=balanced
 set MONEYOS_VISUAL_MODE=anime_3d
 
+python tools\bootstrap_cc0_anime3d_assets.py
 python -m app.tools.run_anime_3d_test

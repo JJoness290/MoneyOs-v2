@@ -34,7 +34,7 @@ from app.config import (
     VFX_SCALE,
     VFX_SCREEN_COVERAGE,
 )
-from app.core.paths import get_assets_root
+from app.core.paths import get_assets_root, get_output_root
 from app.core.tts import generate_tts
 from app.core.assets3d.auto_assets import ensure_anime3d_assets_auto
 from app.core.assets3d.bootstrapper import ensure_minimum_assets
@@ -51,6 +51,7 @@ from src.utils.cli_args import add_opt, validate_no_empty_value_flags
 from app.core.visuals.anime_3d.validators import validate_episode
 from app.core.visuals.ffmpeg_utils import has_nvenc, run_ffmpeg, _fallback_to_x264, _uses_nvenc
 from src.utils.win_paths import planned_paths_preflight
+from src.moneyos.auto_assets.cc0_bootstrap_anime3d import ensure_cc0_anime3d_assets
 
 
 @dataclass(frozen=True)
@@ -760,6 +761,22 @@ def render_anime_3d_60s(
     if duration_s <= 0:
         raise RuntimeError("Duration must be provided from audio beats and be > 0 seconds.")
     missing_assets = _missing_required_assets()
+    if missing_assets:
+        _emit_status(
+            status_callback,
+            stage_key="assets",
+            status="Bootstrapping CC0 assets...",
+            progress_pct=2,
+        )
+        cache_root = get_output_root() / "auto_assets"
+        allow_network = os.getenv("MONEYOS_DISABLE_NET") != "1"
+        ensure_cc0_anime3d_assets(
+            get_assets_root(),
+            cache_root,
+            ensure_blender_path(),
+            allow_network=allow_network,
+        )
+        missing_assets = _missing_required_assets()
     if asset_mode == "auto" or missing_assets:
         ensure_anime3d_assets_auto(get_assets_root(), "render", strict_assets == 1)
         missing_assets = _missing_required_assets()
