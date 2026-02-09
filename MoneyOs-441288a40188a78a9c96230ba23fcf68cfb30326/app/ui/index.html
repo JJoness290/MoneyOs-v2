@@ -92,7 +92,7 @@
     <h1>MoneyOS – Video Generator</h1>
     <button id="generateButton">Start anime_3d 60s</button>
     <div class="status">
-      <div><span class="label">Endpoint:</span> <span id="endpointText">POST /jobs/anime-episode-60s</span></div>
+      <div><span class="label">Endpoint:</span> <span id="endpointText">POST /jobs/anime-episode-60s-3d</span></div>
       <div><span class="label">Stage:</span> <span id="stageText">Idle</span></div>
       <div><span class="label">Status:</span> <span id="statusText">Idle</span></div>
       <div><span class="label">Progress:</span> <span id="progressText">0%</span></div>
@@ -280,23 +280,18 @@
       finalStatus.textContent = 'In Progress';
       logTail.innerHTML = '';
 
-      const payload = {
-        mode: 'anime_auto_pro_3d',
-        duration_seconds: 60,
-        fps: 24,
-        width: 1920,
-        height: 1080,
-        seed: null,
-        enable_sfx: true,
-        enable_lipsync: true,
-        enable_music: true,
-        quality: 'max',
-      };
-      const response = await fetch('/jobs/anime-episode-60s', {
+      const response = await fetch('/jobs/anime-episode-60s-3d', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({}),
       });
+      if (!response.ok) {
+        const errorText = await response.text();
+        finalStatus.textContent = 'FAILED';
+        generateButton.disabled = false;
+        appendLog(`Request failed (${response.status}): ${errorText}`);
+        return;
+      }
       const data = await response.json();
       const jobId = data.job_id;
       if (!jobId) {
