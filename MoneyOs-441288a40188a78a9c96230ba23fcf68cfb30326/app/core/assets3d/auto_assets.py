@@ -17,7 +17,10 @@ from app.core.assets3d.asset_pack_installer import (
     get_required_anime3d_assets as _get_required_anime3d_assets,
     missing_required_assets as _missing_required_assets,
 )
+from app.core.paths import get_output_root
+from app.core.visuals.anime_3d.blender_installer import ensure_blender_path
 from app.core.visuals.anime_3d.blender_runner import BlenderCommand, run_blender
+from src.moneyos.auto_assets.cc0_bootstrap_anime3d import ensure_cc0_anime3d_assets
 
 
 KENNEY_VFX_ZIP_URLS = [
@@ -239,6 +242,9 @@ def ensure_anime3d_assets_auto(assets_root: Path, stage: str, strict_assets: boo
     if not missing:
         return
     quiet = os.getenv("MONEYOS_STORAGE_QUIET") == "1"
+    cache_root = get_output_root() / "auto_assets"
+    _log(f"assets_root={assets_root}", quiet)
+    _log(f"cache_root={cache_root}", quiet)
     timeout = int(os.getenv("MONEYOS_AUTO_ASSETS_TIMEOUT", "60"))
     retries = int(os.getenv("MONEYOS_AUTO_ASSETS_RETRIES", "2"))
     lock_path = assets_root / ".auto_assets.lock"
@@ -252,6 +258,17 @@ def ensure_anime3d_assets_auto(assets_root: Path, stage: str, strict_assets: boo
         missing = missing_required_assets(assets_root)
         if not missing:
             return
+        allow_network = os.getenv("MONEYOS_DISABLE_NET") != "1"
+        try:
+            ensure_cc0_anime3d_assets(
+                assets_root,
+                cache_root,
+                ensure_blender_path(),
+                allow_network=allow_network,
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"cc0 bootstrap failed: {exc}")
+        missing = missing_required_assets(assets_root)
         missing_set = set(missing)
         if any(path.startswith("vfx/") for path in missing_set):
             try:

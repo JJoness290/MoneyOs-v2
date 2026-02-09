@@ -7,6 +7,8 @@ Set these before running (PowerShell example):
 $env:MONEYOS_VISUAL_MODE = "anime_3d"
 $env:MONEYOS_USE_GPU = "1"
 $env:MONEYOS_ANIME3D_ASSET_MODE = "auto"
+$env:MONEYOS_OUTPUT_ROOT = "D:\MoneyOS\work"
+$env:MONEYOS_ASSETS_ROOT = "D:\MoneyOS\assets"
 $env:MONEYOS_ANIME3D_TEXTURE_MODE = "sd_local"
 $env:MONEYOS_ANIME3D_RES = "1920x1080"
 $env:MONEYOS_ANIME3D_FPS = "30"
@@ -16,6 +18,13 @@ $env:MONEYOS_ANIME3D_STYLE_PRESET = "key_art"
 $env:MONEYOS_ANIME3D_OUTLINE_MODE = "freestyle"
 $env:MONEYOS_ANIME3D_POSTFX = "on"
 $env:MONEYOS_ANIME3D_SFX_MODE = "auto"
+```
+
+Persist the storage roots (PowerShell):
+
+```powershell
+setx MONEYOS_OUTPUT_ROOT "D:\MoneyOS\work"
+setx MONEYOS_ASSETS_ROOT "D:\MoneyOS\assets"
 ```
 
 ## Local asset override (optional)
@@ -38,7 +47,7 @@ Then set:
 
 ```powershell
 $env:MONEYOS_ANIME3D_ASSET_MODE = "local"
-$env:MONEYOS_ASSETS_DIR = "C:\MO_ASSETS\anime3d"
+$env:MONEYOS_ASSETS_ROOT = "C:\MO_ASSETS\anime3d"
 ```
 
 ## Run the server
@@ -57,7 +66,7 @@ curl -X POST http://127.0.0.1:8000/jobs/anime-episode-60s-3d \
 
 ## Output
 
-`output/episodes/<job_id>/final.mp4`
+`D:\MoneyOS\work\episodes\<job_id>\final.mp4` (or `${MONEYOS_OUTPUT_ROOT}`)
 
 Artifacts in the same folder:
 - `segment.mp4`

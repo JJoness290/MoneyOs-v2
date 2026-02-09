@@ -356,11 +356,37 @@ def _color_from_temperature(temp_k: float) -> tuple[float, float, float]:
     return red, green, blue
 
 
+ASSET_DIR_ALIASES = {
+    "envs": ["envs", "environments", "environment"],
+    "characters": ["characters", "chars", "character"],
+    "anims": ["anims", "animations", "anim"],
+    "vfx": ["vfx", "sprites", "fx"],
+}
+
+
+def _resolve_asset_dir(assets_dir: Path, aliases: list[str]) -> Path | None:
+    for alias in aliases:
+        candidate = assets_dir / alias
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _resolve_asset_dirs(assets_dir: Path) -> dict[str, Path | None]:
+    return {
+        "envs": _resolve_asset_dir(assets_dir, ASSET_DIR_ALIASES["envs"]),
+        "characters": _resolve_asset_dir(assets_dir, ASSET_DIR_ALIASES["characters"]),
+        "anims": _resolve_asset_dir(assets_dir, ASSET_DIR_ALIASES["anims"]),
+        "vfx": _resolve_asset_dir(assets_dir, ASSET_DIR_ALIASES["vfx"]),
+    }
+
+
 def _discover_assets(assets_dir: Path) -> dict[str, list[Path]]:
-    envs = sorted((assets_dir / "envs").glob("*.blend"))
-    characters = sorted((assets_dir / "characters").glob("*.blend"))
-    anims = sorted((assets_dir / "anims").glob("*.fbx"))
-    vfx = sorted((assets_dir / "vfx").glob("*.*"))
+    asset_dirs = _resolve_asset_dirs(assets_dir)
+    envs = sorted(asset_dirs["envs"].glob("*.blend")) if asset_dirs["envs"] else []
+    characters = sorted(asset_dirs["characters"].glob("*.blend")) if asset_dirs["characters"] else []
+    anims = sorted(asset_dirs["anims"].glob("*.fbx")) if asset_dirs["anims"] else []
+    vfx = sorted(asset_dirs["vfx"].glob("*.*")) if asset_dirs["vfx"] else []
     return {
         "envs": envs,
         "characters": characters,
@@ -370,22 +396,65 @@ def _discover_assets(assets_dir: Path) -> dict[str, list[Path]]:
 
 
 def _required_assets(assets_dir: Path) -> dict[str, Path]:
+    asset_dirs = _resolve_asset_dirs(assets_dir)
+    characters_dir = asset_dirs["characters"] or (assets_dir / "characters")
+    envs_dir = asset_dirs["envs"] or (assets_dir / "envs")
+    anims_dir = asset_dirs["anims"] or (assets_dir / "anims")
+    vfx_dir = asset_dirs["vfx"] or (assets_dir / "vfx")
     return {
-        "characters/hero.blend": assets_dir / "characters" / "hero.blend",
-        "characters/enemy.blend": assets_dir / "characters" / "enemy.blend",
-        "envs/city.blend": assets_dir / "envs" / "city.blend",
-        "anims/idle.fbx": assets_dir / "anims" / "idle.fbx",
-        "anims/run.fbx": assets_dir / "anims" / "run.fbx",
-        "anims/punch.fbx": assets_dir / "anims" / "punch.fbx",
-        "vfx/explosion.png": assets_dir / "vfx" / "explosion.png",
-        "vfx/energy_arc.png": assets_dir / "vfx" / "energy_arc.png",
-        "vfx/smoke.png": assets_dir / "vfx" / "smoke.png",
+        "characters/hero.blend": characters_dir / "hero.blend",
+        "characters/enemy.blend": characters_dir / "enemy.blend",
+        "envs/city.blend": envs_dir / "city.blend",
+        "anims/idle.fbx": anims_dir / "idle.fbx",
+        "anims/run.fbx": anims_dir / "run.fbx",
+        "anims/punch.fbx": anims_dir / "punch.fbx",
+        "vfx/explosion.png": vfx_dir / "explosion.png",
+        "vfx/energy_arc.png": vfx_dir / "energy_arc.png",
+        "vfx/smoke.png": vfx_dir / "smoke.png",
     }
 
 
 def _find_missing_assets(assets_dir: Path) -> list[str]:
     return [key for key, path in _required_assets(assets_dir).items() if not path.exists()]
 
+
+def _select_env_blend(env_candidates: list[Path]) -> Path | None:
+    for candidate in env_candidates:
+        if candidate.name.lower() == "city.blend":
+            return candidate
+    return env_candidates[0] if env_candidates else None
+
+
+def _select_character_assets(char_candidates: list[Path]) -> tuple[Path | None, Path | None]:
+    hero = None
+    enemy = None
+    for candidate in char_candidates:
+        name = candidate.name.lower()
+        if name == "hero.blend":
+            hero = candidate
+        elif name == "enemy.blend":
+            enemy = candidate
+    if hero is None and char_candidates:
+        hero = char_candidates[0]
+    if enemy is None:
+        for candidate in char_candidates:
+            if candidate != hero:
+                enemy = candidate
+                break
+    return hero, enemy
+
+
+def _select_animation_assets(anim_candidates: list[Path]) -> dict[str, Path | None]:
+    selections: dict[str, Path | None] = {"idle": None, "run": None, "punch": None}
+    for candidate in anim_candidates:
+        name = candidate.stem.lower()
+        if selections["idle"] is None and "idle" in name:
+            selections["idle"] = candidate
+        if selections["run"] is None and ("run" in name or "jog" in name):
+            selections["run"] = candidate
+        if selections["punch"] is None and "punch" in name:
+            selections["punch"] = candidate
+    return selections
 
 def _create_procedural_humanoid(name: str, location: tuple[float, float, float]) -> tuple[bpy.types.Object, int]:
     print(f"[ANIME3D_CHAR] source=generated name={name}")
@@ -510,7 +579,9 @@ def _build_procedural_scene(
 
 
 def _find_character_asset(workdir: Path) -> Path | None:
-    search_dirs = [workdir, workdir / "assets", workdir / "characters"]
+    search_dirs = [workdir, workdir / "assets"]
+    for alias in ASSET_DIR_ALIASES["characters"]:
+        search_dirs.append(workdir / alias)
     for directory in search_dirs:
         if not directory.exists():
             continue
@@ -805,6 +876,7 @@ def _create_scene(
     env_blend: Path | None,
     hero_asset: Path | None,
     enemy_asset: Path | None,
+    default_env: str,
 ) -> dict[str, bpy.types.Object | None]:
     scene = bpy.context.scene
     outline_material = _create_outline_material()
@@ -814,12 +886,27 @@ def _create_scene(
     hero_jaw = None
     hero_body = None
     if asset_mode == "local":
-        env_path = env_blend or (assets_dir / "envs" / "city.blend")
-        hero_path = hero_asset or (assets_dir / "characters" / "hero.blend")
-        enemy_path = enemy_asset or (assets_dir / "characters" / "enemy.blend")
-        env_collections = _append_collections(env_path)
-        hero_collections = _append_collections(hero_path)
-        enemy_collections = _append_collections(enemy_path)
+        asset_dirs = _resolve_asset_dirs(assets_dir)
+        env_path = env_blend or (
+            (asset_dirs["envs"] / "city.blend") if asset_dirs["envs"] else None
+        )
+        hero_path = hero_asset or (
+            (asset_dirs["characters"] / "hero.blend") if asset_dirs["characters"] else None
+        )
+        enemy_path = enemy_asset or (
+            (asset_dirs["characters"] / "enemy.blend") if asset_dirs["characters"] else None
+        )
+        if env_path and env_path.exists():
+            env_collections = _append_collections(env_path)
+        else:
+            env_collections = []
+            _build_environment_template(default_env)
+        hero_collections = []
+        enemy_collections = []
+        if hero_path and hero_path.exists():
+            hero_collections = _append_collections(hero_path)
+        if enemy_path and enemy_path.exists():
+            enemy_collections = _append_collections(enemy_path)
 
         hero_armature = _find_armature(hero_collections)
         enemy_armature = _find_armature(enemy_collections)
@@ -833,8 +920,13 @@ def _create_scene(
             for child in hero_armature.children_recursive:
                 if child.type == "MESH":
                     child["mo_role"] = "subject"
+        elif hero_path is None or not hero_path.exists():
+            hero_root, _ = _create_procedural_humanoid("hero", (0, 0, 0))
+            hero_body = hero_root
         if enemy_armature:
             enemy_armature.location = (3, -2, 0)
+        elif enemy_path is None or not enemy_path.exists():
+            _create_procedural_humanoid("enemy", (3, -2, 0))
     else:
         hero = _create_character("hero", (0, 0, 0))
         enemy = _create_character("enemy", (2.5, -2.0, 0))
@@ -1193,7 +1285,9 @@ def _load_character_asset(assets_dir: Path, character_asset: str, warnings: list
         return []
     asset_path = Path(character_asset)
     if not asset_path.is_file():
-        asset_path = assets_dir / "characters" / character_asset
+        asset_dirs = _resolve_asset_dirs(assets_dir)
+        characters_dir = asset_dirs["characters"] or (assets_dir / "characters")
+        asset_path = characters_dir / character_asset
     if asset_path.is_dir():
         blend_files = sorted(asset_path.glob("*.blend"))
         if blend_files:
@@ -1276,6 +1370,43 @@ def _build_environment_collection(template: str, name: str) -> bpy.types.Collect
     return collection
 
 
+def _set_collection_render_visibility(
+    col: bpy.types.Collection,
+    visible: bool,
+    frame: int,
+    keyframe: bool = True,
+) -> None:
+    hide = not visible
+    if hasattr(col, "hide_render"):
+        try:
+            col.hide_render = hide
+        except Exception:  # noqa: BLE001
+            pass
+    if hasattr(col, "hide_viewport"):
+        try:
+            col.hide_viewport = hide
+        except Exception:  # noqa: BLE001
+            pass
+    objs = []
+    if hasattr(col, "all_objects"):
+        objs = list(col.all_objects)
+    elif hasattr(col, "objects"):
+        objs = list(col.objects)
+    for obj in objs:
+        try:
+            obj.hide_render = hide
+            if keyframe:
+                obj.keyframe_insert(data_path="hide_render", frame=frame)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            obj.hide_viewport = hide
+            if keyframe:
+                obj.keyframe_insert(data_path="hide_viewport", frame=frame)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _apply_environment_schedule(
     schedule: list[dict[str, object]],
     fps: int,
@@ -1305,15 +1436,9 @@ def _apply_environment_schedule(
         end_frame = max(start_frame + 1, int(t1 * fps))
         for name, col in collections.items():
             scene.frame_set(start_frame)
-            col.hide_render = name != env_name
-            col.hide_viewport = name != env_name
-            col.keyframe_insert(data_path="hide_render")
-            col.keyframe_insert(data_path="hide_viewport")
+            _set_collection_render_visibility(col, name == env_name, start_frame)
             scene.frame_set(end_frame)
-            col.hide_render = name != env_name
-            col.hide_viewport = name != env_name
-            col.keyframe_insert(data_path="hide_render")
-            col.keyframe_insert(data_path="hide_viewport")
+            _set_collection_render_visibility(col, name == env_name, end_frame)
     return env_names[0]
 
 
@@ -1341,15 +1466,9 @@ def _apply_environment_schedule_local(
         for name, cols in collections.items():
             for col in cols:
                 bpy.context.scene.frame_set(start_frame)
-                col.hide_render = name != env_name
-                col.hide_viewport = name != env_name
-                col.keyframe_insert(data_path="hide_render")
-                col.keyframe_insert(data_path="hide_viewport")
+                _set_collection_render_visibility(col, name == env_name, start_frame)
                 bpy.context.scene.frame_set(end_frame)
-                col.hide_render = name != env_name
-                col.hide_viewport = name != env_name
-                col.keyframe_insert(data_path="hide_render")
-                col.keyframe_insert(data_path="hide_viewport")
+                _set_collection_render_visibility(col, name == env_name, end_frame)
     return schedule[0].get("environment", default_env)
 
 
@@ -1387,8 +1506,12 @@ def _animate(
     mouth_keyframes = 0
     action = None
     if asset_mode == "local":
-        action_path = assets_dir / "anims" / "run.fbx"
-        if action_path.exists():
+        asset_dirs = _resolve_asset_dirs(assets_dir)
+        anims_dir = asset_dirs["anims"]
+        anim_candidates = sorted(anims_dir.glob("*.fbx")) if anims_dir else []
+        selection = _select_animation_assets(anim_candidates)
+        action_path = selection.get("run")
+        if action_path and action_path.exists():
             action = _import_action(action_path)
     _apply_action(hero_armature, action)
     mesh_objects = []
@@ -1580,6 +1703,8 @@ def _add_vfx(
 ) -> None:
     if camera is None or camera.data is None:
         return
+    asset_dirs = _resolve_asset_dirs(assets_dir)
+    vfx_dir = asset_dirs["vfx"] or (assets_dir / "vfx")
     vfx_collection = _ensure_vfx_collection(scene)
     vfx_items = [
         ("explosion.png", (1.5, 0.0, 1.2)),
@@ -1599,7 +1724,7 @@ def _add_vfx(
     scale_x = vfx_width * 0.5 * vfx_scale
     scale_y = vfx_height * 0.5 * vfx_scale
     for filename, location in vfx_items:
-        image_path = assets_dir / "vfx" / filename
+        image_path = vfx_dir / filename
         if not image_path.exists():
             continue
         item_offset = right * (location[0] * 0.15) + up * (location[1] * 0.15)
@@ -1799,15 +1924,16 @@ def main() -> None:
     if missing_assets and not strict_assets:
         procedural_fallback = True
     assets_inventory = _discover_assets(assets_dir) if args.asset_mode == "local" else {}
+    asset_dirs = _resolve_asset_dirs(assets_dir)
 
     env_candidates = assets_inventory.get("envs", [])
     char_candidates = assets_inventory.get("characters", [])
-    selected_env = rng.choice(env_candidates).stem if env_candidates else args.environment
-    env_blend = rng.choice(env_candidates) if env_candidates else None
-    hero_asset = rng.choice(char_candidates) if char_candidates else None
-    enemy_asset = rng.choice(char_candidates) if char_candidates else None
-    if hero_asset and enemy_asset and hero_asset == enemy_asset and len(char_candidates) > 1:
-        enemy_asset = rng.choice([path for path in char_candidates if path != hero_asset])
+    anim_candidates = assets_inventory.get("anims", [])
+    vfx_candidates = assets_inventory.get("vfx", [])
+    env_blend = _select_env_blend(env_candidates)
+    selected_env = env_blend.stem if env_blend else args.environment
+    hero_asset, enemy_asset = _select_character_assets(char_candidates)
+    anim_selections = _select_animation_assets(anim_candidates)
     used_assets = [
         str(asset)
         for asset in (env_blend, hero_asset, enemy_asset)
@@ -1816,11 +1942,23 @@ def main() -> None:
 
     assets_log = (
         f"[ASSETS] assets_dir={assets_dir} "
+        f"env_dir={asset_dirs.get('envs')} char_dir={asset_dirs.get('characters')} "
+        f"anim_dir={asset_dirs.get('anims')} vfx_dir={asset_dirs.get('vfx')} "
         f"found_env={len(env_candidates)} found_chars={len(char_candidates)} "
-        f"found_anims={len(assets_inventory.get('anims', []))} "
-        f"found_vfx={len(assets_inventory.get('vfx', []))}"
+        f"found_anims={len(anim_candidates)} found_vfx={len(vfx_candidates)}"
+    )
+    selected_log = (
+        "[ASSETS] selected_env="
+        f"{env_blend.name if env_blend else 'none'} "
+        f"selected_chars={[p.name for p in (hero_asset, enemy_asset) if p]} "
+        f"selected_anims={{"
+        f"idle={anim_selections.get('idle').name if anim_selections.get('idle') else 'none'}, "
+        f"run={anim_selections.get('run').name if anim_selections.get('run') else 'none'}, "
+        f"punch={anim_selections.get('punch').name if anim_selections.get('punch') else 'none'}"
+        "}}"
     )
     print(assets_log)
+    print(selected_log)
 
     _clear_scene()
     scene = bpy.context.scene
@@ -1923,7 +2061,7 @@ def main() -> None:
         if beat_plan and env_candidates:
             selected_env = _apply_environment_schedule_local(beat_plan, args.fps, env_candidates, selected_env)
     print(f"[PHASE2] env={selected_env} character={args.character_asset or 'none'} preset={preset}")
-    objects = _create_scene(assets_dir, args.asset_mode, env_blend, hero_asset, enemy_asset)
+    objects = _create_scene(assets_dir, args.asset_mode, env_blend, hero_asset, enemy_asset, selected_env)
     _ensure_visual_density(scene, args.duration, args.fps)
     character_meshes = _load_character_asset(assets_dir, args.character_asset, warnings)
     if character_meshes:

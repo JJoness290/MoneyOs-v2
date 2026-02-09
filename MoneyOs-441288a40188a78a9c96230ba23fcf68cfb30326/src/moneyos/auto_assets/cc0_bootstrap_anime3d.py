@@ -49,7 +49,7 @@ def verify_cc0_in_html(html: str) -> bool:
 
 
 def extract_oga_zip_url(html: str) -> str | None:
-    matches = re.findall(r'href="([^"]+\.zip)"', html)
+    matches = re.findall(r'href=[\"\']([^\"\']+\.zip)[\"\']', html)
     for match in matches:
         if "sites/default/files" in match:
             return match
@@ -82,6 +82,13 @@ def _sha256(path: Path) -> str:
             digest.update(chunk)
     return digest.hexdigest()
 
+
+def _temp_dir(cache_root: Path, prefix: str) -> Path:
+    temp_root = cache_root / "tmp"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=str(temp_root)))
+
+
 def _find_files(root: Path, extensions: tuple[str, ...]) -> list[Path]:
     results: list[Path] = []
     for ext in extensions:
@@ -101,8 +108,9 @@ def _export_actions_to_fbx(
     blender_path: Path,
     source_blend: Path,
     output_dir: Path,
+    cache_root: Path,
 ) -> dict[str, Path]:
-    script_path = Path(tempfile.mkdtemp(prefix="moneyos_actions_")) / "export_actions.py"
+    script_path = _temp_dir(cache_root, "moneyos_actions_") / "export_actions.py"
     script_path.write_text(
         """
 import argparse
@@ -183,8 +191,13 @@ for label, action in resolved.items():
     }
 
 
-def _recolor_enemy_blend(blender_path: Path, source_blend: Path, output_blend: Path) -> None:
-    script_path = Path(tempfile.mkdtemp(prefix="moneyos_enemy_")) / "recolor_enemy.py"
+def _recolor_enemy_blend(
+    blender_path: Path,
+    source_blend: Path,
+    output_blend: Path,
+    cache_root: Path,
+) -> None:
+    script_path = _temp_dir(cache_root, "moneyos_enemy_") / "recolor_enemy.py"
     script_path.write_text(
         """
 import argparse
@@ -222,8 +235,13 @@ bpy.ops.wm.save_as_mainfile(filepath=opts.output)
         )
 
 
-def _import_scene_and_save(blender_path: Path, sources: list[Path], output_blend: Path) -> None:
-    script_path = Path(tempfile.mkdtemp(prefix="moneyos_scene_")) / "assemble_scene.py"
+def _import_scene_and_save(
+    blender_path: Path,
+    sources: list[Path],
+    output_blend: Path,
+    cache_root: Path,
+) -> None:
+    script_path = _temp_dir(cache_root, "moneyos_scene_") / "assemble_scene.py"
     script_path.write_text(
         f"""
 import argparse
@@ -286,6 +304,10 @@ def ensure_cc0_anime3d_assets(
         raise CC0BootstrapError("Network access disabled; cannot download CC0 assets.")
 
     cache_root.mkdir(parents=True, exist_ok=True)
+    for subdir in ("characters", "envs", "anims", "vfx"):
+        (assets_root / subdir).mkdir(parents=True, exist_ok=True)
+    _log(f"assets_root={assets_root}")
+    _log(f"cache_root={cache_root}")
     installed: list[str] = []
     sources: list[str] = []
     errors: list[str] = []
@@ -306,7 +328,7 @@ def ensure_cc0_anime3d_assets(
         zip_path, sha256 = download_url(zip_url, cache_root / "downloads")
         update_sources_manifest(cache_root, ANIMATED_HUMAN_URL, "CC0", CC0_LICENSE_URL, sha256, zip_path)
         sources.append(zip_url)
-        extract_dir = Path(tempfile.mkdtemp(prefix="moneyos_human_"))
+        extract_dir = _temp_dir(cache_root, "moneyos_human_")
         try:
             shutil.unpack_archive(str(zip_path), str(extract_dir))
             blends = _find_files(extract_dir, (".blend",))
@@ -320,7 +342,7 @@ def ensure_cc0_anime3d_assets(
             installed.append("characters/hero.blend")
             _log(f"installed => {hero_dest}")
             _ensure_dir(enemy_dest)
-            _recolor_enemy_blend(blender_exe, hero_dest, enemy_dest)
+            _recolor_enemy_blend(blender_exe, hero_dest, enemy_dest, cache_root)
             installed.append("characters/enemy.blend")
             _log(f"installed => {enemy_dest}")
 
@@ -337,7 +359,7 @@ def ensure_cc0_anime3d_assets(
                 installed.extend(["anims/idle.fbx", "anims/run.fbx", "anims/punch.fbx"])
                 _log("installed => animations from zip")
             else:
-                exported = _export_actions_to_fbx(blender_exe, source_blend, anim_dir)
+                exported = _export_actions_to_fbx(blender_exe, source_blend, anim_dir, cache_root)
                 for key, path in exported.items():
                     if not path.exists():
                         raise CC0BootstrapError(f"Missing exported animation {key}.")
@@ -365,7 +387,7 @@ def ensure_cc0_anime3d_assets(
         zip_path, sha256 = download_url(zip_url, cache_root / "downloads")
         update_sources_manifest(cache_root, STREET_PACK_MIRROR_URL, "CC0", CC0_LICENSE_URL, sha256, zip_path)
         sources.append(zip_url)
-        extract_dir = Path(tempfile.mkdtemp(prefix="moneyos_city_"))
+        extract_dir = _temp_dir(cache_root, "moneyos_city_")
         try:
             shutil.unpack_archive(str(zip_path), str(extract_dir))
             blends = _find_files(extract_dir, (".blend",))
@@ -380,7 +402,7 @@ def ensure_cc0_anime3d_assets(
                 if not models:
                     raise CC0BootstrapError("Street pack has no .blend/.fbx/.obj assets to build city scene.")
                 _ensure_dir(env_dest)
-                _import_scene_and_save(blender_exe, models[:25], env_dest)
+                _import_scene_and_save(blender_exe, models[:25], env_dest, cache_root)
                 installed.append("envs/city.blend")
                 _log(f"installed => {env_dest}")
         finally:
