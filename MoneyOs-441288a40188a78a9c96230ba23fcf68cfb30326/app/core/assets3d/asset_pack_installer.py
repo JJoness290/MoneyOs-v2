@@ -13,7 +13,11 @@ import hashlib
 from app.core.visuals.anime_3d.storage import compute_required_bytes, ensure_storage_budget
 
 
-DEFAULT_ASSET_PACK_URLS: list[str] = []
+DEFAULT_ASSET_PACK_URLS: list[str] = [
+    "https://github.com/MoneyOS/MoneyOS/releases/latest/download/moneyos-anime3d-starter-pack.zip"
+]
+
+_LAST_ASSET_PACK_ERROR: str | None = None
 
 
 def get_required_anime3d_assets() -> list[str]:
@@ -40,6 +44,7 @@ def missing_required_assets(assets_root: Path) -> list[str]:
 
 def _log(message: str, quiet: bool) -> None:
     if quiet:
+        print(f"[ASSET_PACK] {message}", flush=True)
         return
     print(f"[ASSET_PACK] {message}", flush=True)
 
@@ -107,6 +112,7 @@ def _merge_tree(source: Path, target: Path) -> list[str]:
 
 
 def ensure_anime3d_asset_pack(assets_root: Path, stage: str, strict_assets: bool) -> None:
+    global _LAST_ASSET_PACK_ERROR
     missing = missing_required_assets(assets_root)
     if not missing:
         return
@@ -114,6 +120,7 @@ def ensure_anime3d_asset_pack(assets_root: Path, stage: str, strict_assets: bool
     urls = [url.strip() for url in urls_env.split(",") if url.strip()] or DEFAULT_ASSET_PACK_URLS
     quiet = os.getenv("MONEYOS_STORAGE_QUIET") == "1"
     if not urls:
+        _LAST_ASSET_PACK_ERROR = "no_urls_configured"
         raise RuntimeError(
             "Missing assets and no asset pack URLs configured. "
             "Set MONEYOS_ASSET_PACK_URLS to a starter pack zip."
@@ -134,47 +141,61 @@ def ensure_anime3d_asset_pack(assets_root: Path, stage: str, strict_assets: bool
         if not missing:
             return
         temp_root = Path(os.getenv("TEMP") or os.getenv("TMP") or tempfile.gettempdir())
-        work_dir = Path(tempfile.mkdtemp(prefix="moneyos_asset_pack_", dir=str(temp_root)))
-        zip_path = work_dir / "asset_pack.zip"
-        selected_url = ""
+        sha_env = os.getenv("MONEYOS_ASSET_PACK_SHA256")
+        success = False
         for url in urls:
-            selected_url = url
-            _log(f"downloading {url}", quiet)
-            _download_with_retries(url, zip_path, retries, timeout)
-            sha_env = os.getenv("MONEYOS_ASSET_PACK_SHA256")
-            if sha_env:
-                actual = _sha256(zip_path)
-                if actual.lower() != sha_env.lower():
-                    raise RuntimeError("asset pack sha256 mismatch")
-            extract_dir = work_dir / "extract"
-            extract_dir.mkdir(parents=True, exist_ok=True)
-            root = _extract_zip(zip_path, extract_dir)
-            installed = _merge_tree(root, assets_root)
-            marker = assets_root / ".asset_pack_installed.json"
-            marker.write_text(
-                json.dumps(
-                    {
-                        "url": url,
-                        "sha256": os.getenv("MONEYOS_ASSET_PACK_SHA256"),
-                        "timestamp": time.time(),
-                        "installed_files": installed,
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-            if quiet:
-                print(f"[ASSET_PACK] installed {len(installed)} files from {url}", flush=True)
-            else:
+            work_dir = Path(tempfile.mkdtemp(prefix="moneyos_asset_pack_", dir=str(temp_root)))
+            zip_path = work_dir / "asset_pack.zip"
+            try:
+                _log(f"downloading {url}", quiet)
+                _download_with_retries(url, zip_path, retries, timeout)
+                if sha_env:
+                    actual = _sha256(zip_path)
+                    if actual.lower() != sha_env.lower():
+                        message = "asset pack sha256 mismatch"
+                        _LAST_ASSET_PACK_ERROR = message
+                        if strict_assets:
+                            raise RuntimeError(message)
+                        _log(f"{message}; trying next URL", quiet)
+                        continue
+                extract_dir = work_dir / "extract"
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                root = _extract_zip(zip_path, extract_dir)
+                installed = _merge_tree(root, assets_root)
+                remaining = missing_required_assets(assets_root)
+                if remaining:
+                    _LAST_ASSET_PACK_ERROR = "missing_required_files_after_extract"
+                    _log(
+                        f"installed from {url} but missing {len(remaining)} files; trying next URL",
+                        quiet,
+                    )
+                    continue
+                marker = assets_root / ".asset_pack_installed.json"
+                marker.write_text(
+                    json.dumps(
+                        {
+                            "url": url,
+                            "sha256": sha_env,
+                            "timestamp": time.time(),
+                            "installed_files": installed,
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
                 _log(f"installed {len(installed)} files from {url}", quiet)
-            break
-        if not selected_url:
+                success = True
+                break
+            finally:
+                shutil.rmtree(work_dir, ignore_errors=True)
+        if not success:
             raise RuntimeError("asset pack download failed")
     except Exception as exc:  # noqa: BLE001
         message = (
             "Missing assets even after auto-install attempt. "
             "Check server logs and MONEYOS_ASSET_PACK_URLS."
         )
+        _LAST_ASSET_PACK_ERROR = str(exc)
         if quiet:
             print(f"[ASSET_PACK] failed: {message}", flush=True)
         raise RuntimeError(message) from exc
