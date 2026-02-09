@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import tempfile
+import zipfile
+
+ASSETS_ROOT = Path(tempfile.mkdtemp(prefix="moneyos_assets_"))
 
 os.environ.setdefault("MONEYOS_TEST_MODE", "1")
 os.environ.setdefault("MONEYOS_SELFTEST", "1")
@@ -13,11 +17,13 @@ os.environ.setdefault("MONEYOS_EXTRACTION_OVERHEAD_BYTES", "1")
 os.environ.setdefault("MONEYOS_NORMALIZE_OVERHEAD_BYTES", "1")
 os.environ.setdefault("MONEYOS_SKIP_STORAGE_CHECKS", "1")
 os.environ.setdefault("MONEYOS_VISUAL_MODE", "anime_3d")
+os.environ.setdefault("MONEYOS_ASSETS_DIR", str(ASSETS_ROOT))
 
 from fastapi.testclient import TestClient
 
 from app.core.assets3d.manifest import AssetRecord, load_manifest, upsert_asset
 from app.core.assets3d.pruner import prune_assets
+from app.core.assets3d.asset_pack_installer import ensure_anime3d_asset_pack, get_required_anime3d_assets
 from app.core.visuals.anime_3d.blender_installer import ensure_blender_path
 from app.core.visuals.anime_3d.storage import ensure_storage_budget
 from app.core.paths import get_assets_root
@@ -145,10 +151,26 @@ def _test_manifest_and_pruner() -> None:
     assert "inuse_asset" in assets
 
 
+def _test_asset_pack_install() -> None:
+    temp_root = Path(tempfile.mkdtemp(prefix="moneyos_pack_"))
+    zip_path = temp_root / "asset_pack.zip"
+    with zipfile.ZipFile(zip_path, "w") as handle:
+        for rel_path in get_required_anime3d_assets():
+            file_path = temp_root / rel_path
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text("dummy", encoding="utf-8")
+            handle.write(file_path, rel_path)
+    os.environ["MONEYOS_ASSET_PACK_URLS"] = zip_path.as_uri()
+    ensure_anime3d_asset_pack(get_assets_root(), "selftest", strict_assets=True)
+    for rel_path in get_required_anime3d_assets():
+        assert (get_assets_root() / rel_path).exists()
+
+
 def main() -> None:
     _test_blender_detection()
     _test_disk_space_check()
     _test_manifest_and_pruner()
+    _test_asset_pack_install()
     _test_endpoint_smoke()
     print("selftest: ok")
 

@@ -36,6 +36,7 @@ from app.config import (
 )
 from app.core.paths import get_assets_root
 from app.core.tts import generate_tts
+from app.core.assets3d.asset_pack_installer import ensure_anime3d_asset_pack
 from app.core.assets3d.bootstrapper import ensure_minimum_assets
 from app.core.assets3d.manifest import clear_in_use
 from app.core.visuals.anime_3d.blender_installer import ensure_blender_path
@@ -763,6 +764,8 @@ def render_anime_3d_60s(
         quality = "fast"
     if duration_s <= 0:
         raise RuntimeError("Duration must be provided from audio beats and be > 0 seconds.")
+    missing_assets = _missing_required_assets() if asset_mode == "local" else []
+    ensure_anime3d_asset_pack(get_assets_root(), "render", strict_assets == 1)
     missing_assets = _missing_required_assets() if asset_mode == "local" else []
     if (ANIME3D_ASSET_MODE == "auto" or missing_assets) and not strict_assets_explicit:
         strict_assets = 0

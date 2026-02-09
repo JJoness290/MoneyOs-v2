@@ -1897,62 +1897,12 @@ def main() -> None:
 
     procedural_humanoid = False
     if procedural_fallback:
-        raise RuntimeError("Missing assets; Blender-only pipeline requires asset packs.")
-        subject_obj, char_source, char_fmt = _ensure_character(scene, args, assets_dir, seed_value)
-        _apply_outlines(scene, outlines_mode)
-        if quality_enabled:
-            _setup_anime_lighting(scene, subject_obj)
-            setup_anime_materials(scene.collection, preset=light_preset)
-            if compositor_enabled:
-                _setup_anime_compositor(scene, args)
-            if scene.camera:
-                camera_modes = ["push_in", "orbit", "handheld", "static"]
-                camera_mode = camera_modes[seed_value % len(camera_modes)]
-                setup_anime_camera_motion(scene.camera, subject_obj, camera_mode, total_frames, seed_value)
-        if watermark_enabled:
-            _apply_watermark(
-                scene,
-                f"key_art_v1 | 1080p | S{samples} | CHAR:{char_fmt} | SRC:{char_source}",
-            )
-        _write_report(
-            report_path,
-            {
-                "status": "started",
-                "fingerprint": fingerprint,
-                "seed": seed_value,
-                "missing_assets": missing_assets,
-                "used_assets": used_assets,
-                "procedural_fallback": True,
-                "parsed_args": vars(args),
-            },
+        if strict_assets:
+            raise RuntimeError("Missing assets; Blender-only pipeline requires asset packs.")
+        raise RuntimeError(
+            "Missing assets even after auto-install attempt. "
+            "Check server logs and MONEYOS_ASSET_PACK_URLS."
         )
-        bpy.ops.render.render(animation=True, write_still=False)
-        rendered_report = {
-            "status": "rendered",
-            "frame_count": scene.frame_end,
-            "frames_dir": str(frames_dir),
-            "seed": seed_value,
-            "fingerprint": fingerprint,
-        }
-        report_path.write_text(json.dumps(rendered_report, indent=2), encoding="utf-8")
-        render_report = {
-            "status": "complete",
-            "fingerprint": fingerprint,
-            "seed": seed_value,
-            "frame_end": scene.frame_end,
-            "fps": scene.render.fps,
-            "res": f"{scene.render.resolution_x}x{scene.render.resolution_y}",
-            "duration": args.duration,
-            "warnings": warnings,
-            "parsed_args": vars(args),
-            "gpu": gpu_info,
-            "procedural_humanoid": procedural_humanoid,
-            "missing_assets": missing_assets,
-            "used_assets": used_assets,
-            "procedural_fallback": True,
-        }
-        report_path.write_text(json.dumps(render_report, indent=2), encoding="utf-8")
-        return
 
     beat_plan = []
     if args.beat_plan:
