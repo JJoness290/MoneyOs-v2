@@ -1051,8 +1051,7 @@ async def enqueue_anime_episode_autopilot(
 async def generate_anime_episode_3d_60s(
     req: Anime3DRequest = Body(default=Anime3DRequest()),
 ) -> JSONResponse:
-    if VISUAL_MODE != "anime_3d":
-        raise HTTPException(status_code=400, detail="MONEYOS_VISUAL_MODE must be anime_3d")
+    visual_mode = "anime_3d"
     from app.core.visuals.anime_3d.render_pipeline import _ensure_assets  # noqa: WPS433
 
     try:
@@ -1077,7 +1076,7 @@ async def generate_anime_episode_3d_60s(
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     job_id = uuid.uuid4().hex
-    _set_status(job_id, "Queued 3D render")
+    _set_status(job_id, "Queued 3D render", extra={"visual_mode": visual_mode})
     thread = threading.Thread(target=_run_anime_3d_60s, args=(job_id, req), daemon=True)
     thread.start()
     output_dir = anime_3d_output_dir(job_id)
