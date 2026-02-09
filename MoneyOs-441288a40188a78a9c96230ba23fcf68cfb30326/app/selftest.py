@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 from app.core.assets3d.manifest import AssetRecord, load_manifest, upsert_asset
 from app.core.assets3d.pruner import prune_assets
 from app.core.assets3d.asset_pack_installer import ensure_anime3d_asset_pack, get_required_anime3d_assets
+from app.core.assets3d.auto_assets import ensure_anime3d_assets_auto
 from app.core.visuals.anime_3d.blender_installer import ensure_blender_path
 from app.core.visuals.anime_3d.storage import ensure_storage_budget
 from app.core.paths import get_assets_root
@@ -166,11 +167,28 @@ def _test_asset_pack_install() -> None:
         assert (get_assets_root() / rel_path).exists()
 
 
+def _test_auto_assets_install() -> None:
+    temp_root = Path(tempfile.mkdtemp(prefix="moneyos_auto_assets_"))
+    prev_assets_dir = os.getenv("MONEYOS_ASSETS_DIR")
+    os.environ["MONEYOS_ASSETS_DIR"] = str(temp_root)
+    try:
+        ensure_anime3d_assets_auto(get_assets_root(), "selftest", strict_assets=False)
+        for rel_path in get_required_anime3d_assets():
+            assert (get_assets_root() / rel_path).exists()
+        ensure_anime3d_assets_auto(get_assets_root(), "selftest", strict_assets=False)
+    finally:
+        if prev_assets_dir is None:
+            os.environ.pop("MONEYOS_ASSETS_DIR", None)
+        else:
+            os.environ["MONEYOS_ASSETS_DIR"] = prev_assets_dir
+
+
 def main() -> None:
     _test_blender_detection()
     _test_disk_space_check()
     _test_manifest_and_pruner()
     _test_asset_pack_install()
+    _test_auto_assets_install()
     _test_endpoint_smoke()
     print("selftest: ok")
 

@@ -500,6 +500,19 @@ async def debug_status() -> JSONResponse:
         "vfx/energy_arc.png": (assets_root / "vfx" / "energy_arc.png"),
         "vfx/smoke.png": (assets_root / "vfx" / "smoke.png"),
     }
+    auto_assets_marker = assets_root / ".auto_assets_installed.json"
+    auto_assets_payload: dict[str, object] = {}
+    if auto_assets_marker.exists():
+        try:
+            auto_assets_payload = json.loads(auto_assets_marker.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            auto_assets_payload = {}
+    try:
+        from app.core.assets3d.auto_assets import get_last_auto_assets_error  # noqa: WPS433
+
+        last_auto_assets_error = get_last_auto_assets_error()
+    except Exception as exc:  # noqa: BLE001
+        last_auto_assets_error = str(exc)
     vram_gb = None
     payload = {
         "autopilot": autopilot_status(),
@@ -509,8 +522,13 @@ async def debug_status() -> JSONResponse:
         "repo_root": str(get_repo_root()),
         "assets_root": str(assets_root),
         "output_root": str(get_output_root()),
+        "required_assets": {key: path.exists() for key, path in required_assets.items()},
         "assets_ready": {key: path.exists() for key, path in required_assets.items()},
         "assets_missing": [key for key, path in required_assets.items() if not path.exists()],
+        "auto_assets_marker_present": auto_assets_marker.exists(),
+        "auto_assets_last_install_time": auto_assets_payload.get("timestamp"),
+        "auto_assets_sources_used": auto_assets_payload.get("sources", []),
+        "last_auto_assets_error": last_auto_assets_error,
         "asset_mode": ANIME3D_ASSET_MODE,
         "texture_mode": ANIME3D_TEXTURE_MODE,
         "sd_model_used": SD_MODEL_PATH,

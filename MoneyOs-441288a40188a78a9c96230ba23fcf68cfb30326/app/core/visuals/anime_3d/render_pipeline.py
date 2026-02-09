@@ -36,7 +36,7 @@ from app.config import (
 )
 from app.core.paths import get_assets_root
 from app.core.tts import generate_tts
-from app.core.assets3d.asset_pack_installer import ensure_anime3d_asset_pack
+from app.core.assets3d.auto_assets import ensure_anime3d_assets_auto
 from app.core.assets3d.bootstrapper import ensure_minimum_assets
 from app.core.assets3d.manifest import clear_in_use
 from app.core.visuals.anime_3d.blender_installer import ensure_blender_path
@@ -707,17 +707,12 @@ def render_anime_3d_60s(
     if overrides.get("enable_music") is not None:
         enable_music = bool(overrides["enable_music"])
     strict_assets_env = os.getenv("MONEYOS_STRICT_ASSETS")
-    strict_assets_explicit = False
     if overrides.get("strict_assets") is not None:
         strict_assets = int(bool(overrides["strict_assets"]))
-        strict_assets_explicit = True
     elif strict_assets_env is not None:
         strict_assets = 1 if strict_assets_env == "1" else 0
-        strict_assets_explicit = strict_assets == 1
     if mode == "anime_auto_pro_3d":
-        strict_assets = 1
-        strict_assets_explicit = True
-        asset_mode = "local"
+        asset_mode = "auto"
     if overrides.get("action"):
         action = str(overrides["action"]).strip().lower()
     if overrides.get("camera_preset"):
@@ -764,12 +759,12 @@ def render_anime_3d_60s(
         quality = "fast"
     if duration_s <= 0:
         raise RuntimeError("Duration must be provided from audio beats and be > 0 seconds.")
-    missing_assets = _missing_required_assets() if asset_mode == "local" else []
-    ensure_anime3d_asset_pack(get_assets_root(), "render", strict_assets == 1)
-    missing_assets = _missing_required_assets() if asset_mode == "local" else []
-    if (ANIME3D_ASSET_MODE == "auto" or missing_assets) and not strict_assets_explicit:
-        strict_assets = 0
-    _ensure_assets(missing_assets, strict_assets == 1)
+    missing_assets = _missing_required_assets()
+    if asset_mode == "auto" or missing_assets:
+        ensure_anime3d_assets_auto(get_assets_root(), "render", strict_assets == 1)
+        missing_assets = _missing_required_assets()
+    if asset_mode == "local":
+        _ensure_assets(missing_assets, strict_assets == 1)
     output_dir = anime_3d_output_dir(job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     required_bytes = compute_required_bytes(
