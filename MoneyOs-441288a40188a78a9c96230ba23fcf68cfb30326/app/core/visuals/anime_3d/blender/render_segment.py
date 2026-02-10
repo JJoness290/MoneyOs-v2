@@ -1528,11 +1528,12 @@ def _apply_shot_camera(
     if not fcurves:
         print("[MOTION][WARN] Shot camera action has no fcurves; skipping cleanup.")
     else:
-        for fc in list(fcurves):
-            try:
-                fcurves.remove(fc)
-            except Exception:  # noqa: BLE001
-                pass
+        for fcurve in list(fcurves):
+            for kp in fcurve.keyframe_points:
+                if kp.co.x <= overshoot:
+                    kp.interpolation = "LINEAR"
+                elif kp.co.x <= settle:
+                    kp.interpolation = "BEZIER"
 
 
 def _apply_impact_vfx(scene: bpy.types.Scene, shot: dict[str, object], emission_strength: float) -> None:
