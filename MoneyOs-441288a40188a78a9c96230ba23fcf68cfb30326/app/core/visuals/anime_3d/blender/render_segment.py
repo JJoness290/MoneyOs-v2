@@ -235,6 +235,24 @@ def _setup_anime_lighting(scene: bpy.types.Scene, subject_obj: bpy.types.Object 
     print(f"[ANIME3D_LIGHTS] key={key.energy} fill={fill.energy} rim={rim.energy} world={world_strength}")
 
 
+def _set_principled_input(
+    principled: bpy.types.Node,
+    names: list[str],
+    value: object,
+    label: str,
+) -> bool:
+    for name in names:
+        socket = principled.inputs.get(name)
+        if socket is not None:
+            socket.default_value = value
+            return True
+    print(f"[MATERIALS] missing Principled input for {label}: {names}")
+    if os.getenv("MONEYOS_ANIME3D_DEBUG") == "1":
+        available = [socket.name for socket in principled.inputs]
+        print(f"[MATERIALS] available Principled inputs: {available}")
+    return False
+
+
 def setup_anime_materials(obj_or_collection: object, preset: str = "default") -> None:
     if isinstance(obj_or_collection, bpy.types.Collection):
         objects = list(obj_or_collection.all_objects)
@@ -254,12 +272,22 @@ def setup_anime_materials(obj_or_collection: object, preset: str = "default") ->
             principled = nodes.get("Principled BSDF")
             if principled:
                 principled.inputs["Roughness"].default_value = 0.45
-                principled.inputs["Specular"].default_value = 0.25
+                _set_principled_input(
+                    principled,
+                    ["Specular IOR Level", "Specular"],
+                    0.25,
+                    "specular",
+                )
                 principled.inputs["Emission Strength"].default_value = 0.03
             name_lower = mat.name.lower()
             if any(tag in name_lower for tag in ("eye", "iris", "pupil")) and principled:
                 principled.inputs["Roughness"].default_value = 0.2
-                principled.inputs["Specular"].default_value = 0.5
+                _set_principled_input(
+                    principled,
+                    ["Specular IOR Level", "Specular"],
+                    0.5,
+                    "specular_eye",
+                )
                 principled.inputs["Emission Strength"].default_value = 0.05
     print("[MATERIALS] anime materials applied")
 
