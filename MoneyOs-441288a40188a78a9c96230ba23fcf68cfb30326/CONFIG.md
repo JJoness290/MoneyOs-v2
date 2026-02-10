@@ -114,7 +114,9 @@ GET /debug/status
 | `MONEYOS_RENDER_RES` | `1920x1080` | Render resolution (auto caps by hardware). |
 | `MONEYOS_RENDER_FPS` | `30` | Render fps. |
 | `MONEYOS_TOON_SHADER` | `1` | Enable toon shader mode. |
-| `MONEYOS_ASSETS_DIR` | `assets/` | Base assets folder. Defaults to repo `assets` if set; otherwise uses `MONEYOS_OUTPUT_ROOT/assets` or repo root. Example: `set MONEYOS_ASSETS_DIR=C:\Users\joshu\Documents\MoneyOs-codex-create-moneyos-local-tiktok-video-generator\assets`. |
+| `MONEYOS_OUTPUT_ROOT` | `D:\MoneyOS\work` | Output/cache root; defaults to `D:\MoneyOS\work` when D: exists, otherwise `C:\MoneyOS\work`. |
+| `MONEYOS_ASSETS_ROOT` | `D:\MoneyOS\assets` | Base assets folder; defaults to `D:\MoneyOS\assets` when D: exists. |
+| `MONEYOS_ASSETS_DIR` | `assets/` | Legacy alias for assets root (overridden by `MONEYOS_ASSETS_ROOT`). Example: `set MONEYOS_ASSETS_DIR=C:\MO_ASSETS\anime3d`. |
 | `MONEYOS_CHARACTERS_DIR` | `assets/characters_3d/` | Rigged characters source. |
 | `MONEYOS_ANIMATIONS_DIR` | `assets/animations/` | Animation clips output. |
 | `MONEYOS_VFX_DIR` | `assets/vfx/` | VFX assets directory. |
@@ -125,6 +127,13 @@ GET /debug/status
 | `MONEYOS_PHASE15_RES` | `1920x1080` | Phase 1.5 resolution. |
 | `MONEYOS_PHASE15_BOUNCES` | `6` | Phase 1.5 max bounces. |
 | `MONEYOS_PHASE15_TILE` | `256` | Phase 1.5 tile size (if supported). |
+
+### Storage roots (Windows)
+
+```
+setx MONEYOS_OUTPUT_ROOT "D:\MoneyOS\work"
+setx MONEYOS_ASSETS_ROOT "D:\MoneyOS\assets"
+```
 
 ### 60s 3D smoke test
 

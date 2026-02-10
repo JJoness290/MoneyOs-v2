@@ -10,5 +10,8 @@ set MONEYOS_NVENC_MODE=cq
 set MONEYOS_RAM_MODE=low
 set MONEYOS_SD_PROFILE=balanced
 set MONEYOS_VISUAL_MODE=anime_3d
+if "%MONEYOS_OUTPUT_ROOT%"=="" set MONEYOS_OUTPUT_ROOT=D:\MoneyOS\work
+if "%MONEYOS_ASSETS_ROOT%"=="" set MONEYOS_ASSETS_ROOT=D:\MoneyOS\assets
 
+python tools\bootstrap_cc0_anime3d_assets.py
 python -m app.tools.run_anime_3d_test

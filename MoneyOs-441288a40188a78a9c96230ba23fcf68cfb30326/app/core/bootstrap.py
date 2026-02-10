@@ -44,6 +44,19 @@ def _pip_install(args: Iterable[str]) -> bool:
     return True
 
 
+def ensure_packages(required: dict[str, str]) -> None:
+    missing: list[str] = []
+    for module, version in required.items():
+        if not _has_module(module):
+            missing.append(f"{module}=={version}")
+    if not missing:
+        return
+    for spec in missing:
+        print(f"[DEPS] installing {spec}", flush=True)
+    command = [sys.executable, "-m", "pip", "install", "--quiet", *missing]
+    subprocess.run(command, check=False)
+
+
 def ensure_dependencies() -> None:
     if os.getenv("MONEYOS_AUTO_PIP", "1") == "0":
         _log("Auto-install disabled via MONEYOS_AUTO_PIP=0")

@@ -33,9 +33,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--fingerprint", default="")
     parser.add_argument("--strict-assets", type=int, default=1)
     parser.add_argument("--environment", default="room")
+    parser.add_argument("--beat-plan", default="")
     parser.add_argument("--character-asset", default="")
     parser.add_argument("--mode", default="default")
-    parser.add_argument("--style-preset", default="key_art")
+    parser.add_argument("--style-preset", default="default")
     parser.add_argument("--outline-mode", default="freestyle")
     parser.add_argument("--postfx", default="on")
     parser.add_argument("--quality", default="balanced")
@@ -234,6 +235,24 @@ def _setup_anime_lighting(scene: bpy.types.Scene, subject_obj: bpy.types.Object 
     print(f"[ANIME3D_LIGHTS] key={key.energy} fill={fill.energy} rim={rim.energy} world={world_strength}")
 
 
+def _set_principled_input(
+    principled: bpy.types.Node,
+    names: list[str],
+    value: object,
+    label: str,
+) -> bool:
+    for name in names:
+        socket = principled.inputs.get(name)
+        if socket is not None:
+            socket.default_value = value
+            return True
+    print(f"[MATERIALS] missing Principled input for {label}: {names}")
+    if os.getenv("MONEYOS_ANIME3D_DEBUG") == "1":
+        available = [socket.name for socket in principled.inputs]
+        print(f"[MATERIALS] available Principled inputs: {available}")
+    return False
+
+
 def setup_anime_materials(obj_or_collection: object, preset: str = "default") -> None:
     if isinstance(obj_or_collection, bpy.types.Collection):
         objects = list(obj_or_collection.all_objects)
@@ -253,12 +272,22 @@ def setup_anime_materials(obj_or_collection: object, preset: str = "default") ->
             principled = nodes.get("Principled BSDF")
             if principled:
                 principled.inputs["Roughness"].default_value = 0.45
-                principled.inputs["Specular"].default_value = 0.25
+                _set_principled_input(
+                    principled,
+                    ["Specular IOR Level", "Specular"],
+                    0.25,
+                    "specular",
+                )
                 principled.inputs["Emission Strength"].default_value = 0.03
             name_lower = mat.name.lower()
             if any(tag in name_lower for tag in ("eye", "iris", "pupil")) and principled:
                 principled.inputs["Roughness"].default_value = 0.2
-                principled.inputs["Specular"].default_value = 0.5
+                _set_principled_input(
+                    principled,
+                    ["Specular IOR Level", "Specular"],
+                    0.5,
+                    "specular_eye",
+                )
                 principled.inputs["Emission Strength"].default_value = 0.05
     print("[MATERIALS] anime materials applied")
 
@@ -292,11 +321,21 @@ def setup_anime_camera_motion(
     camera.keyframe_insert(data_path="location", frame=1)
     camera.location = end
     camera.keyframe_insert(data_path="location", frame=duration_frames)
-    for fcurve in camera.animation_data.action.fcurves:
-        for keyframe in fcurve.keyframe_points:
-            keyframe.interpolation = "BEZIER"
-            keyframe.handle_left_type = "AUTO_CLAMPED"
-            keyframe.handle_right_type = "AUTO_CLAMPED"
+    animation_data = getattr(camera, "animation_data", None)
+    action = getattr(animation_data, "action", None)
+    fcurves = getattr(action, "fcurves", None)
+    if fcurves is None:
+        print("[MOTION][WARN] No fcurves available on camera action; skipping curve cleanup.")
+    else:
+        for fcurve in list(fcurves):
+            try:
+                keyframe_points = getattr(fcurve, "keyframe_points", [])
+                for keyframe in keyframe_points:
+                    keyframe.interpolation = "BEZIER"
+                    keyframe.handle_left_type = "AUTO_CLAMPED"
+                    keyframe.handle_right_type = "AUTO_CLAMPED"
+            except Exception as exc:  # noqa: BLE001
+                print(f"[MOTION][WARN] Failed to process camera fcurve: {exc}")
     print(f"[CAMERA] mode={mode}")
 
 
@@ -326,8 +365,15 @@ def apply_anime_animation_polish(
 def _setup_anime_compositor(scene: bpy.types.Scene, args: argparse.Namespace) -> None:
     if args.postfx != "on":
         return
-    scene.use_nodes = True
-    tree = scene.node_tree
+    try:
+        scene.use_nodes = True
+    except Exception:  # noqa: BLE001
+        print("[WARN] Compositor node_tree not available; skipping postfx.")
+        return
+    tree = getattr(scene, "node_tree", None) or getattr(bpy.context.scene, "node_tree", None)
+    if tree is None:
+        print("[WARN] Compositor node_tree not available; skipping postfx.")
+        return
     tree.nodes.clear()
     render_layers = tree.nodes.new(type="CompositorNodeRLayers")
     color_balance = tree.nodes.new(type="CompositorNodeColorBalance")
@@ -355,11 +401,37 @@ def _color_from_temperature(temp_k: float) -> tuple[float, float, float]:
     return red, green, blue
 
 
+ASSET_DIR_ALIASES = {
+    "envs": ["envs", "environments", "environment"],
+    "characters": ["characters", "chars", "character"],
+    "anims": ["anims", "animations", "anim"],
+    "vfx": ["vfx", "sprites", "fx"],
+}
+
+
+def _resolve_asset_dir(assets_dir: Path, aliases: list[str]) -> Path | None:
+    for alias in aliases:
+        candidate = assets_dir / alias
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _resolve_asset_dirs(assets_dir: Path) -> dict[str, Path | None]:
+    return {
+        "envs": _resolve_asset_dir(assets_dir, ASSET_DIR_ALIASES["envs"]),
+        "characters": _resolve_asset_dir(assets_dir, ASSET_DIR_ALIASES["characters"]),
+        "anims": _resolve_asset_dir(assets_dir, ASSET_DIR_ALIASES["anims"]),
+        "vfx": _resolve_asset_dir(assets_dir, ASSET_DIR_ALIASES["vfx"]),
+    }
+
+
 def _discover_assets(assets_dir: Path) -> dict[str, list[Path]]:
-    envs = sorted((assets_dir / "envs").glob("*.blend"))
-    characters = sorted((assets_dir / "characters").glob("*.blend"))
-    anims = sorted((assets_dir / "anims").glob("*.fbx"))
-    vfx = sorted((assets_dir / "vfx").glob("*.*"))
+    asset_dirs = _resolve_asset_dirs(assets_dir)
+    envs = sorted(asset_dirs["envs"].glob("*.blend")) if asset_dirs["envs"] else []
+    characters = sorted(asset_dirs["characters"].glob("*.blend")) if asset_dirs["characters"] else []
+    anims = sorted(asset_dirs["anims"].glob("*.fbx")) if asset_dirs["anims"] else []
+    vfx = sorted(asset_dirs["vfx"].glob("*.*")) if asset_dirs["vfx"] else []
     return {
         "envs": envs,
         "characters": characters,
@@ -369,22 +441,65 @@ def _discover_assets(assets_dir: Path) -> dict[str, list[Path]]:
 
 
 def _required_assets(assets_dir: Path) -> dict[str, Path]:
+    asset_dirs = _resolve_asset_dirs(assets_dir)
+    characters_dir = asset_dirs["characters"] or (assets_dir / "characters")
+    envs_dir = asset_dirs["envs"] or (assets_dir / "envs")
+    anims_dir = asset_dirs["anims"] or (assets_dir / "anims")
+    vfx_dir = asset_dirs["vfx"] or (assets_dir / "vfx")
     return {
-        "characters/hero.blend": assets_dir / "characters" / "hero.blend",
-        "characters/enemy.blend": assets_dir / "characters" / "enemy.blend",
-        "envs/city.blend": assets_dir / "envs" / "city.blend",
-        "anims/idle.fbx": assets_dir / "anims" / "idle.fbx",
-        "anims/run.fbx": assets_dir / "anims" / "run.fbx",
-        "anims/punch.fbx": assets_dir / "anims" / "punch.fbx",
-        "vfx/explosion.png": assets_dir / "vfx" / "explosion.png",
-        "vfx/energy_arc.png": assets_dir / "vfx" / "energy_arc.png",
-        "vfx/smoke.png": assets_dir / "vfx" / "smoke.png",
+        "characters/hero.blend": characters_dir / "hero.blend",
+        "characters/enemy.blend": characters_dir / "enemy.blend",
+        "envs/city.blend": envs_dir / "city.blend",
+        "anims/idle.fbx": anims_dir / "idle.fbx",
+        "anims/run.fbx": anims_dir / "run.fbx",
+        "anims/punch.fbx": anims_dir / "punch.fbx",
+        "vfx/explosion.png": vfx_dir / "explosion.png",
+        "vfx/energy_arc.png": vfx_dir / "energy_arc.png",
+        "vfx/smoke.png": vfx_dir / "smoke.png",
     }
 
 
 def _find_missing_assets(assets_dir: Path) -> list[str]:
     return [key for key, path in _required_assets(assets_dir).items() if not path.exists()]
 
+
+def _select_env_blend(env_candidates: list[Path]) -> Path | None:
+    for candidate in env_candidates:
+        if candidate.name.lower() == "city.blend":
+            return candidate
+    return env_candidates[0] if env_candidates else None
+
+
+def _select_character_assets(char_candidates: list[Path]) -> tuple[Path | None, Path | None]:
+    hero = None
+    enemy = None
+    for candidate in char_candidates:
+        name = candidate.name.lower()
+        if name == "hero.blend":
+            hero = candidate
+        elif name == "enemy.blend":
+            enemy = candidate
+    if hero is None and char_candidates:
+        hero = char_candidates[0]
+    if enemy is None:
+        for candidate in char_candidates:
+            if candidate != hero:
+                enemy = candidate
+                break
+    return hero, enemy
+
+
+def _select_animation_assets(anim_candidates: list[Path]) -> dict[str, Path | None]:
+    selections: dict[str, Path | None] = {"idle": None, "run": None, "punch": None}
+    for candidate in anim_candidates:
+        name = candidate.stem.lower()
+        if selections["idle"] is None and "idle" in name:
+            selections["idle"] = candidate
+        if selections["run"] is None and ("run" in name or "jog" in name):
+            selections["run"] = candidate
+        if selections["punch"] is None and "punch" in name:
+            selections["punch"] = candidate
+    return selections
 
 def _create_procedural_humanoid(name: str, location: tuple[float, float, float]) -> tuple[bpy.types.Object, int]:
     print(f"[ANIME3D_CHAR] source=generated name={name}")
@@ -509,7 +624,9 @@ def _build_procedural_scene(
 
 
 def _find_character_asset(workdir: Path) -> Path | None:
-    search_dirs = [workdir, workdir / "assets", workdir / "characters"]
+    search_dirs = [workdir, workdir / "assets"]
+    for alias in ASSET_DIR_ALIASES["characters"]:
+        search_dirs.append(workdir / alias)
     for directory in search_dirs:
         if not directory.exists():
             continue
@@ -804,6 +921,7 @@ def _create_scene(
     env_blend: Path | None,
     hero_asset: Path | None,
     enemy_asset: Path | None,
+    default_env: str,
 ) -> dict[str, bpy.types.Object | None]:
     scene = bpy.context.scene
     outline_material = _create_outline_material()
@@ -813,12 +931,27 @@ def _create_scene(
     hero_jaw = None
     hero_body = None
     if asset_mode == "local":
-        env_path = env_blend or (assets_dir / "envs" / "city.blend")
-        hero_path = hero_asset or (assets_dir / "characters" / "hero.blend")
-        enemy_path = enemy_asset or (assets_dir / "characters" / "enemy.blend")
-        env_collections = _append_collections(env_path)
-        hero_collections = _append_collections(hero_path)
-        enemy_collections = _append_collections(enemy_path)
+        asset_dirs = _resolve_asset_dirs(assets_dir)
+        env_path = env_blend or (
+            (asset_dirs["envs"] / "city.blend") if asset_dirs["envs"] else None
+        )
+        hero_path = hero_asset or (
+            (asset_dirs["characters"] / "hero.blend") if asset_dirs["characters"] else None
+        )
+        enemy_path = enemy_asset or (
+            (asset_dirs["characters"] / "enemy.blend") if asset_dirs["characters"] else None
+        )
+        if env_path and env_path.exists():
+            env_collections = _append_collections(env_path)
+        else:
+            env_collections = []
+            _build_environment_template(default_env)
+        hero_collections = []
+        enemy_collections = []
+        if hero_path and hero_path.exists():
+            hero_collections = _append_collections(hero_path)
+        if enemy_path and enemy_path.exists():
+            enemy_collections = _append_collections(enemy_path)
 
         hero_armature = _find_armature(hero_collections)
         enemy_armature = _find_armature(enemy_collections)
@@ -832,8 +965,13 @@ def _create_scene(
             for child in hero_armature.children_recursive:
                 if child.type == "MESH":
                     child["mo_role"] = "subject"
+        elif hero_path is None or not hero_path.exists():
+            hero_root, _ = _create_procedural_humanoid("hero", (0, 0, 0))
+            hero_body = hero_root
         if enemy_armature:
             enemy_armature.location = (3, -2, 0)
+        elif enemy_path is None or not enemy_path.exists():
+            _create_procedural_humanoid("enemy", (3, -2, 0))
     else:
         hero = _create_character("hero", (0, 0, 0))
         enemy = _create_character("enemy", (2.5, -2.0, 0))
@@ -1192,7 +1330,9 @@ def _load_character_asset(assets_dir: Path, character_asset: str, warnings: list
         return []
     asset_path = Path(character_asset)
     if not asset_path.is_file():
-        asset_path = assets_dir / "characters" / character_asset
+        asset_dirs = _resolve_asset_dirs(assets_dir)
+        characters_dir = asset_dirs["characters"] or (assets_dir / "characters")
+        asset_path = characters_dir / character_asset
     if asset_path.is_dir():
         blend_files = sorted(asset_path.glob("*.blend"))
         if blend_files:
@@ -1259,9 +1399,146 @@ def _build_environment_template(template: str) -> None:
         apply_env_material(wall)
 
 
+def _build_environment_collection(template: str, name: str) -> bpy.types.Collection:
+    scene = bpy.context.scene
+    collection = bpy.data.collections.new(name)
+    scene.collection.children.link(collection)
+    before = set(scene.objects)
+    _build_environment_template(template)
+    after = set(scene.objects)
+    new_objects = [obj for obj in after - before if obj.name in bpy.context.scene.objects]
+    for obj in new_objects:
+        if obj.users_collection:
+            for col in list(obj.users_collection):
+                col.objects.unlink(obj)
+        collection.objects.link(obj)
+    return collection
+
+
+def _set_collection_render_visibility(
+    col: bpy.types.Collection,
+    visible: bool,
+    frame: int,
+    keyframe: bool = True,
+) -> None:
+    hide = not visible
+    if hasattr(col, "hide_render"):
+        try:
+            col.hide_render = hide
+        except Exception:  # noqa: BLE001
+            pass
+    if hasattr(col, "hide_viewport"):
+        try:
+            col.hide_viewport = hide
+        except Exception:  # noqa: BLE001
+            pass
+    objs = []
+    if hasattr(col, "all_objects"):
+        objs = list(col.all_objects)
+    elif hasattr(col, "objects"):
+        objs = list(col.objects)
+    for obj in objs:
+        try:
+            obj.hide_render = hide
+            if keyframe:
+                obj.keyframe_insert(data_path="hide_render", frame=frame)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            obj.hide_viewport = hide
+            if keyframe:
+                obj.keyframe_insert(data_path="hide_viewport", frame=frame)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _apply_environment_schedule(
+    schedule: list[dict[str, object]],
+    fps: int,
+    default_env: str,
+) -> str:
+    scene = bpy.context.scene
+    if not schedule:
+        _build_environment_template(default_env)
+        return default_env
+    env_names = []
+    collections = {}
+    for idx, beat in enumerate(schedule):
+        env_name = str(beat.get("environment", default_env))
+        if env_name in collections:
+            continue
+        col = _build_environment_collection(env_name, f"ENV_{idx}_{env_name}")
+        collections[env_name] = col
+        env_names.append(env_name)
+    if not env_names:
+        _build_environment_template(default_env)
+        return default_env
+    for beat in schedule:
+        env_name = str(beat.get("environment", default_env))
+        t0 = float(beat.get("t0", 0))
+        t1 = float(beat.get("t1", t0 + 1))
+        start_frame = max(1, int(t0 * fps))
+        end_frame = max(start_frame + 1, int(t1 * fps))
+        for name, col in collections.items():
+            scene.frame_set(start_frame)
+            _set_collection_render_visibility(col, name == env_name, start_frame)
+            scene.frame_set(end_frame)
+            _set_collection_render_visibility(col, name == env_name, end_frame)
+    return env_names[0]
+
+
+def _apply_environment_schedule_local(
+    schedule: list[dict[str, object]],
+    fps: int,
+    env_candidates: list[Path],
+    default_env: str,
+) -> str:
+    if not schedule or not env_candidates:
+        return default_env
+    env_map = {path.stem.lower(): path for path in env_candidates}
+    collections: dict[str, list[bpy.types.Collection]] = {}
+    for beat in schedule:
+        env_name = str(beat.get("environment", default_env)).lower()
+        path = env_map.get(env_name) or env_candidates[0]
+        if env_name not in collections:
+            collections[env_name] = _append_collections(path)
+    for beat in schedule:
+        env_name = str(beat.get("environment", default_env)).lower()
+        t0 = float(beat.get("t0", 0))
+        t1 = float(beat.get("t1", t0 + 1))
+        start_frame = max(1, int(t0 * fps))
+        end_frame = max(start_frame + 1, int(t1 * fps))
+        for name, cols in collections.items():
+            for col in cols:
+                bpy.context.scene.frame_set(start_frame)
+                _set_collection_render_visibility(col, name == env_name, start_frame)
+                bpy.context.scene.frame_set(end_frame)
+                _set_collection_render_visibility(col, name == env_name, end_frame)
+    return schedule[0].get("environment", default_env)
+
+
+def _build_viseme_schedule(text: str, frame_count: int) -> list[float]:
+    if not text:
+        return [0.0 for _ in range(frame_count)]
+    vowels = "aeiou"
+    values = []
+    for char in text.lower():
+        if char in vowels:
+            values.append(1.0)
+        elif char.isalpha():
+            values.append(0.4)
+    if not values:
+        return [0.0 for _ in range(frame_count)]
+    schedule = []
+    for idx in range(frame_count):
+        value = values[int(idx / frame_count * len(values))]
+        schedule.append(value)
+    return schedule
+
 def _animate(
     objects: dict[str, bpy.types.Object | None],
     envelope: list[float],
+    viseme_schedule: list[float],
     fps: int,
     assets_dir: Path,
     asset_mode: str,
@@ -1274,8 +1551,12 @@ def _animate(
     mouth_keyframes = 0
     action = None
     if asset_mode == "local":
-        action_path = assets_dir / "anims" / "run.fbx"
-        if action_path.exists():
+        asset_dirs = _resolve_asset_dirs(assets_dir)
+        anims_dir = asset_dirs["anims"]
+        anim_candidates = sorted(anims_dir.glob("*.fbx")) if anims_dir else []
+        selection = _select_animation_assets(anim_candidates)
+        action_path = selection.get("run")
+        if action_path and action_path.exists():
             action = _import_action(action_path)
     _apply_action(hero_armature, action)
     mesh_objects = []
@@ -1306,22 +1587,23 @@ def _animate(
             camera.location.y = camera.location.y + math.cos(t * 0.7) * 0.05
             camera.location.z = camera.location.z + math.sin(t * 1.2) * 0.03
             camera.keyframe_insert(data_path="location", index=-1)
+        viseme_value = viseme_schedule[frame] if frame < len(viseme_schedule) else envelope[frame]
         if jaw_bone:
-            jaw_bone.rotation_euler.x = -envelope[frame] * 0.6
+            jaw_bone.rotation_euler.x = -max(envelope[frame], viseme_value) * 0.6
             jaw_bone.keyframe_insert(data_path="rotation_euler", index=0)
-            if envelope[frame] > 0.02:
+            if max(envelope[frame], viseme_value) > 0.02:
                 mouth_keyframes += 1
         elif objects.get("hero_jaw"):
             jaw_obj = objects["hero_jaw"]
-            jaw_obj.rotation_euler.x = -envelope[frame] * 0.6
+            jaw_obj.rotation_euler.x = -max(envelope[frame], viseme_value) * 0.6
             jaw_obj.keyframe_insert(data_path="rotation_euler", index=0)
-            if envelope[frame] > 0.02:
+            if max(envelope[frame], viseme_value) > 0.02:
                 mouth_keyframes += 1
         elif mouth_key:
             _, key = mouth_key
-            key.value = min(1.0, envelope[frame] * 1.2)
+            key.value = min(1.0, max(envelope[frame], viseme_value) * 1.2)
             key.keyframe_insert(data_path="value")
-            if envelope[frame] > 0.02:
+            if max(envelope[frame], viseme_value) > 0.02:
                 mouth_keyframes += 1
     return mouth_keyframes
 
@@ -1466,6 +1748,8 @@ def _add_vfx(
 ) -> None:
     if camera is None or camera.data is None:
         return
+    asset_dirs = _resolve_asset_dirs(assets_dir)
+    vfx_dir = asset_dirs["vfx"] or (assets_dir / "vfx")
     vfx_collection = _ensure_vfx_collection(scene)
     vfx_items = [
         ("explosion.png", (1.5, 0.0, 1.2)),
@@ -1485,7 +1769,7 @@ def _add_vfx(
     scale_x = vfx_width * 0.5 * vfx_scale
     scale_y = vfx_height * 0.5 * vfx_scale
     for filename, location in vfx_items:
-        image_path = assets_dir / "vfx" / filename
+        image_path = vfx_dir / filename
         if not image_path.exists():
             continue
         item_offset = right * (location[0] * 0.15) + up * (location[1] * 0.15)
@@ -1685,15 +1969,16 @@ def main() -> None:
     if missing_assets and not strict_assets:
         procedural_fallback = True
     assets_inventory = _discover_assets(assets_dir) if args.asset_mode == "local" else {}
+    asset_dirs = _resolve_asset_dirs(assets_dir)
 
     env_candidates = assets_inventory.get("envs", [])
     char_candidates = assets_inventory.get("characters", [])
-    selected_env = rng.choice(env_candidates).stem if env_candidates else args.environment
-    env_blend = rng.choice(env_candidates) if env_candidates else None
-    hero_asset = rng.choice(char_candidates) if char_candidates else None
-    enemy_asset = rng.choice(char_candidates) if char_candidates else None
-    if hero_asset and enemy_asset and hero_asset == enemy_asset and len(char_candidates) > 1:
-        enemy_asset = rng.choice([path for path in char_candidates if path != hero_asset])
+    anim_candidates = assets_inventory.get("anims", [])
+    vfx_candidates = assets_inventory.get("vfx", [])
+    env_blend = _select_env_blend(env_candidates)
+    selected_env = env_blend.stem if env_blend else args.environment
+    hero_asset, enemy_asset = _select_character_assets(char_candidates)
+    anim_selections = _select_animation_assets(anim_candidates)
     used_assets = [
         str(asset)
         for asset in (env_blend, hero_asset, enemy_asset)
@@ -1702,11 +1987,23 @@ def main() -> None:
 
     assets_log = (
         f"[ASSETS] assets_dir={assets_dir} "
+        f"env_dir={asset_dirs.get('envs')} char_dir={asset_dirs.get('characters')} "
+        f"anim_dir={asset_dirs.get('anims')} vfx_dir={asset_dirs.get('vfx')} "
         f"found_env={len(env_candidates)} found_chars={len(char_candidates)} "
-        f"found_anims={len(assets_inventory.get('anims', []))} "
-        f"found_vfx={len(assets_inventory.get('vfx', []))}"
+        f"found_anims={len(anim_candidates)} found_vfx={len(vfx_candidates)}"
+    )
+    selected_log = (
+        "[ASSETS] selected_env="
+        f"{env_blend.name if env_blend else 'none'} "
+        f"selected_chars={[p.name for p in (hero_asset, enemy_asset) if p]} "
+        f"selected_anims={{"
+        f"idle={anim_selections.get('idle').name if anim_selections.get('idle') else 'none'}, "
+        f"run={anim_selections.get('run').name if anim_selections.get('run') else 'none'}, "
+        f"punch={anim_selections.get('punch').name if anim_selections.get('punch') else 'none'}"
+        "}}"
     )
     print(assets_log)
+    print(selected_log)
 
     _clear_scene()
     scene = bpy.context.scene
@@ -1719,7 +2016,7 @@ def main() -> None:
     light_preset = os.getenv("MONEYOS_ANIME3D_LIGHT_PRESET", "default").strip().lower()
     outlines_mode = os.getenv("MONEYOS_ANIME3D_OUTLINES", "freestyle")
     compositor_enabled = os.getenv("MONEYOS_ANIME3D_COMPOSITOR", "1") != "0"
-    watermark_enabled = os.getenv("MONEYOS_ANIME3D_WATERMARK", "1") != "0"
+    watermark_enabled = os.getenv("MONEYOS_ANIME3D_WATERMARK", "0") != "0"
     try:
         samples = int(os.getenv("MONEYOS_ANIME3D_SAMPLES", "96"))
     except ValueError:
@@ -1783,77 +2080,33 @@ def main() -> None:
 
     procedural_humanoid = False
     if procedural_fallback:
-        print("[ASSETS] missing assets detected. Using procedural fallback.")
-        procedural_humanoid = _build_procedural_scene(
-            scene,
-            total_frames,
-            force_procedural_humanoid=bool(args.force_procedural_humanoid),
+        if strict_assets:
+            raise RuntimeError("Missing assets; Blender-only pipeline requires asset packs.")
+        raise RuntimeError(
+            "Missing assets even after auto-install attempt. "
+            "Check server logs and MONEYOS_ASSET_PACK_URLS."
         )
-        subject_obj, char_source, char_fmt = _ensure_character(scene, args, assets_dir, seed_value)
-        _apply_outlines(scene, outlines_mode)
-        if quality_enabled:
-            _setup_anime_lighting(scene, subject_obj)
-            setup_anime_materials(scene.collection, preset=light_preset)
-            if compositor_enabled:
-                _setup_anime_compositor(scene, args)
-            if scene.camera:
-                camera_modes = ["push_in", "orbit", "handheld", "static"]
-                camera_mode = camera_modes[seed_value % len(camera_modes)]
-                setup_anime_camera_motion(scene.camera, subject_obj, camera_mode, total_frames, seed_value)
-        if watermark_enabled:
-            _apply_watermark(
-                scene,
-                f"key_art_v1 | 1080p | S{samples} | CHAR:{char_fmt} | SRC:{char_source}",
-            )
-        _write_report(
-            report_path,
-            {
-                "status": "started",
-                "fingerprint": fingerprint,
-                "seed": seed_value,
-                "missing_assets": missing_assets,
-                "used_assets": used_assets,
-                "procedural_fallback": True,
-                "parsed_args": vars(args),
-            },
-        )
-        bpy.ops.render.render(animation=True, write_still=False)
-        rendered_report = {
-            "status": "rendered",
-            "frame_count": scene.frame_end,
-            "frames_dir": str(frames_dir),
-            "seed": seed_value,
-            "fingerprint": fingerprint,
-        }
-        report_path.write_text(json.dumps(rendered_report, indent=2), encoding="utf-8")
-        render_report = {
-            "status": "complete",
-            "fingerprint": fingerprint,
-            "seed": seed_value,
-            "frame_end": scene.frame_end,
-            "fps": scene.render.fps,
-            "res": f"{scene.render.resolution_x}x{scene.render.resolution_y}",
-            "duration": args.duration,
-            "warnings": warnings,
-            "parsed_args": vars(args),
-            "gpu": gpu_info,
-            "procedural_humanoid": procedural_humanoid,
-            "missing_assets": missing_assets,
-            "used_assets": used_assets,
-            "procedural_fallback": True,
-        }
-        report_path.write_text(json.dumps(render_report, indent=2), encoding="utf-8")
-        return
 
+    beat_plan = []
+    if args.beat_plan:
+        plan_path = Path(args.beat_plan)
+        if plan_path.exists():
+            payload = json.loads(plan_path.read_text(encoding="utf-8"))
+            beat_plan = payload.get("plan", []) if isinstance(payload, dict) else []
     if args.asset_mode != "local":
         template_options = ["room", "street", "studio"]
         if args.environment and args.environment not in template_options:
             template_options.append(args.environment)
         selected_env = rng.choice(template_options)
+        if beat_plan:
+            selected_env = _apply_environment_schedule(beat_plan, args.fps, selected_env)
+        else:
+            _build_environment_template(selected_env)
+    else:
+        if beat_plan and env_candidates:
+            selected_env = _apply_environment_schedule_local(beat_plan, args.fps, env_candidates, selected_env)
     print(f"[PHASE2] env={selected_env} character={args.character_asset or 'none'} preset={preset}")
-    if args.asset_mode != "local":
-        _build_environment_template(selected_env)
-    objects = _create_scene(assets_dir, args.asset_mode, env_blend, hero_asset, enemy_asset)
+    objects = _create_scene(assets_dir, args.asset_mode, env_blend, hero_asset, enemy_asset, selected_env)
     _ensure_visual_density(scene, args.duration, args.fps)
     character_meshes = _load_character_asset(assets_dir, args.character_asset, warnings)
     if character_meshes:
@@ -1874,6 +2127,8 @@ def main() -> None:
     if args.postfx == "on" and not args.fast_proof:
         _setup_compositor(scene, warnings)
     envelope = _load_rms_envelope(Path(args.audio) if args.audio else Path(), args.fps, scene.frame_end)
+    dialogue_text = " ".join(str(beat.get("dialogue", "")) for beat in beat_plan) if beat_plan else ""
+    viseme_schedule = _build_viseme_schedule(dialogue_text, scene.frame_end)
     motion_info = _ensure_minimum_motion(objects, scene, args.duration, args.fps)
     print(
         "[MOTION] camera_motion="
@@ -1884,6 +2139,7 @@ def main() -> None:
     mouth_keyframes = _animate(
         objects,
         envelope,
+        viseme_schedule,
         args.fps,
         assets_dir,
         args.asset_mode,
@@ -1907,7 +2163,7 @@ def main() -> None:
         if watermark_enabled:
             _apply_watermark(
                 scene,
-                f"key_art_v1 | 1080p | S{samples} | CHAR:{char_fmt} | SRC:{char_source}",
+                f"Anime3D | 1080p | S{samples} | CHAR:{char_fmt} | SRC:{char_source}",
             )
 
     selection = {

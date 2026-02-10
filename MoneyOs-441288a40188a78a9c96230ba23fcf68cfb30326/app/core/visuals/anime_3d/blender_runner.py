@@ -4,10 +4,12 @@ import json
 import shutil
 import subprocess
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Iterable
 
 from app.config import BLENDER_ENGINE, BLENDER_GPU, BLENDER_PATH
+from app.core.visuals.anime_3d.blender_installer import ensure_blender_path
 from src.utils.cli_args import validate_no_empty_value_flags
 
 
@@ -27,13 +29,18 @@ class BlenderDetection:
 
 def _candidate_paths() -> list[Path]:
     base_dir = Path("C:/Program Files/Blender Foundation")
+    local_app = Path(os.getenv("LOCALAPPDATA", "")) / "Programs" / "Blender Foundation"
     candidates = [
         base_dir / "Blender" / "blender.exe",
         base_dir / "Blender 4.0" / "blender.exe",
         base_dir / "Blender 3.6" / "blender.exe",
+        local_app / "Blender" / "blender.exe",
     ]
     if base_dir.exists():
         for path in sorted(base_dir.glob("Blender*/blender.exe")):
+            candidates.append(path)
+    if local_app.exists():
+        for path in sorted(local_app.glob("Blender*/blender.exe")):
             candidates.append(path)
     return candidates
 
@@ -47,9 +54,7 @@ def _resolve_blender_path() -> Path:
     which_path = shutil.which("blender")
     if which_path:
         return Path(which_path)
-    raise FileNotFoundError(
-        "Blender not found. Set MONEYOS_BLENDER_PATH to blender.exe (e.g. C:/Program Files/Blender Foundation/Blender/blender.exe)."
-    )
+    return ensure_blender_path()
 
 
 def build_blender_command(

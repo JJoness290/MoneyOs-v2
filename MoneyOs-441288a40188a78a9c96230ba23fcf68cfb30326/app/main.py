@@ -104,6 +104,8 @@ class Anime3DRequest(BaseModel):
     duration_seconds: Optional[float] = None
     duration_s: Optional[float] = None
     fps: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
     res: Optional[str] = None
     quality: Optional[str] = None
     style_preset: Optional[str] = None
@@ -117,6 +119,10 @@ class Anime3DRequest(BaseModel):
     character_asset: Optional[str] = None
     disable_overlays: Optional[bool] = None
     mode: Optional[str] = None
+    seed: Optional[int] = None
+    enable_sfx: Optional[bool] = None
+    enable_lipsync: Optional[bool] = None
+    enable_music: Optional[bool] = None
     strict_assets: Optional[bool] = None
 
 
@@ -127,7 +133,15 @@ class AiVideoRequest(BaseModel):
 
 @app.on_event("startup")
 def bootstrap_dependencies() -> None:
+    if "MONEYOS_USE_GPU" not in os.environ:
+        os.environ["MONEYOS_USE_GPU"] = "1"
     ensure_dependencies()
+    try:
+        from app.core.assets3d.pruner import prune_assets  # noqa: WPS433
+
+        prune_assets(min_free_bytes=int(os.getenv("MONEYOS_MIN_FREE_BYTES", str(15 * 1024**3))))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[PRUNE] startup scan failed: {exc}")
     start_autopilot()
     try:
         from app.core.visuals.ffmpeg_utils import select_video_encoder  # noqa: WPS433
@@ -351,17 +365,25 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
     try:
         _set_status(job_id, "Generating audio", stage_key="audio", progress_pct=5)
         overrides = req.dict(exclude_none=True)
+        overrides.setdefault("mode", "anime_auto_pro_3d")
         overrides.setdefault("render_preset", "phase15_quality")
         overrides.setdefault("quality", "max")
         overrides.setdefault("postfx", True)
         overrides.setdefault("res", "1920x1080")
-        overrides.setdefault("outline_mode", "off")
-        overrides.setdefault("style_preset", "key_art")
+        overrides.setdefault("outline_mode", "freestyle")
+        overrides.setdefault("style_preset", "default")
         overrides.setdefault("disable_overlays", False)
+        overrides.setdefault("enable_sfx", True)
+        overrides.setdefault("enable_lipsync", True)
+        overrides.setdefault("enable_music", True)
+        overrides.setdefault("duration_seconds", 60.0)
+        overrides.setdefault("fps", 24)
         if req.duration_s is not None:
             overrides["duration_s"] = float(req.duration_s)
         if req.fps is not None:
             overrides["fps"] = int(req.fps)
+        if req.width is not None and req.height is not None:
+            overrides["res"] = f"{int(req.width)}x{int(req.height)}"
         if "duration_seconds" not in overrides and "duration_s" in overrides:
             overrides["duration_seconds"] = overrides["duration_s"]
         result = render_anime_3d_60s(
@@ -377,6 +399,9 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
             status_text = "Complete"
         _set_status(job_id, status_text, anime_3d_result=result, stage_key="done", progress_pct=100)
     except Exception as exc:  # noqa: BLE001
+        from app.core.assets3d.manifest import clear_in_use  # noqa: WPS433
+
+        clear_in_use(job_id)
         output_dir = anime_3d_output_dir(job_id)
         extra = {
             "output_dir": str(output_dir.resolve()),
@@ -475,6 +500,19 @@ async def debug_status() -> JSONResponse:
         "vfx/energy_arc.png": (assets_root / "vfx" / "energy_arc.png"),
         "vfx/smoke.png": (assets_root / "vfx" / "smoke.png"),
     }
+    auto_assets_marker = assets_root / ".auto_assets_installed.json"
+    auto_assets_payload: dict[str, object] = {}
+    if auto_assets_marker.exists():
+        try:
+            auto_assets_payload = json.loads(auto_assets_marker.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            auto_assets_payload = {}
+    try:
+        from app.core.assets3d.auto_assets import get_last_auto_assets_error  # noqa: WPS433
+
+        last_auto_assets_error = get_last_auto_assets_error()
+    except Exception as exc:  # noqa: BLE001
+        last_auto_assets_error = str(exc)
     vram_gb = None
     payload = {
         "autopilot": autopilot_status(),
@@ -484,8 +522,13 @@ async def debug_status() -> JSONResponse:
         "repo_root": str(get_repo_root()),
         "assets_root": str(assets_root),
         "output_root": str(get_output_root()),
+        "required_assets": {key: path.exists() for key, path in required_assets.items()},
         "assets_ready": {key: path.exists() for key, path in required_assets.items()},
         "assets_missing": [key for key, path in required_assets.items() if not path.exists()],
+        "auto_assets_marker_present": auto_assets_marker.exists(),
+        "auto_assets_last_install_time": auto_assets_payload.get("timestamp"),
+        "auto_assets_sources_used": auto_assets_payload.get("sources", []),
+        "last_auto_assets_error": last_auto_assets_error,
         "asset_mode": ANIME3D_ASSET_MODE,
         "texture_mode": ANIME3D_TEXTURE_MODE,
         "sd_model_used": SD_MODEL_PATH,
@@ -1008,8 +1051,7 @@ async def enqueue_anime_episode_autopilot(
 async def generate_anime_episode_3d_60s(
     req: Anime3DRequest = Body(default=Anime3DRequest()),
 ) -> JSONResponse:
-    if VISUAL_MODE != "anime_3d":
-        raise HTTPException(status_code=400, detail="MONEYOS_VISUAL_MODE must be anime_3d")
+    visual_mode = "anime_3d"
     from app.core.visuals.anime_3d.render_pipeline import _ensure_assets  # noqa: WPS433
 
     try:
@@ -1034,7 +1076,7 @@ async def generate_anime_episode_3d_60s(
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     job_id = uuid.uuid4().hex
-    _set_status(job_id, "Queued 3D render")
+    _set_status(job_id, "Queued 3D render", extra={"visual_mode": visual_mode})
     thread = threading.Thread(target=_run_anime_3d_60s, args=(job_id, req), daemon=True)
     thread.start()
     output_dir = anime_3d_output_dir(job_id)
@@ -1045,6 +1087,11 @@ async def generate_anime_episode_3d_60s(
             "final_video": str((output_dir / "final.mp4").resolve()),
         }
     )
+
+
+@app.post("/jobs/anime-episode-60s")
+async def generate_anime_episode_60s(req: Anime3DRequest = Body(default=Anime3DRequest())) -> JSONResponse:
+    return await generate_anime_episode_3d_60s(req)
 
 
 @app.post("/jobs/anime-clip-3d")

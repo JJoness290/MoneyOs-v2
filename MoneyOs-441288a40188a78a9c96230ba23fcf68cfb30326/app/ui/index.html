@@ -280,9 +280,26 @@
       finalStatus.textContent = 'In Progress';
       logTail.innerHTML = '';
 
-      const response = await fetch('/jobs/anime-episode-60s-3d', { method: 'POST' });
+      const response = await fetch('/jobs/anime-episode-60s-3d', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        finalStatus.textContent = 'FAILED';
+        generateButton.disabled = false;
+        appendLog(`Request failed (${response.status}): ${errorText}`);
+        return;
+      }
       const data = await response.json();
       const jobId = data.job_id;
+      if (!jobId) {
+        finalStatus.textContent = 'FAILED';
+        generateButton.disabled = false;
+        appendLog('Job id missing from response.');
+        return;
+      }
 
       subscribeEvents(jobId);
       polling = setInterval(() => pollStatus(jobId), 2000);

@@ -54,11 +54,13 @@ def ram_mode() -> str:
     global _RAM_MODE_CACHE, _RAM_MODE_LOGGED
     if _RAM_MODE_CACHE:
         return _RAM_MODE_CACHE
-    env_mode = os.getenv("MONEYOS_RAM_MODE")
-    if env_mode:
-        env_mode = env_mode.strip().lower()
+    env_mode_raw = os.getenv("MONEYOS_RAM_MODE")
+    if env_mode_raw:
+        env_mode = env_mode_raw.strip().lower()
         if env_mode in {"low", "balanced", "high"}:
             _RAM_MODE_CACHE = env_mode
+        elif env_mode in {"conservative"}:
+            _RAM_MODE_CACHE = "low"
         else:
             _RAM_MODE_CACHE = "balanced"
     else:
@@ -68,8 +70,10 @@ def ram_mode() -> str:
         logical_threads = psutil.cpu_count(logical=True) or 1
         default_threads = max(1, min(6, max(1, logical_threads - 2)))
         threads = 1 if _RAM_MODE_CACHE == "low" else default_threads
+        raw_value = env_mode_raw if env_mode_raw is not None else "<unset>"
         print(
-            f"[PERF] ram_mode={_RAM_MODE_CACHE} total_ram_gb={total_ram_gb():.1f} "
+            f"[PERF] ram_mode_raw={raw_value} ram_mode={_RAM_MODE_CACHE} "
+            f"total_ram_gb={total_ram_gb():.1f} "
             f"ffmpeg_threads={threads}"
         )
     return _RAM_MODE_CACHE

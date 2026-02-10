@@ -13,8 +13,8 @@ class CogVideoXBackend(AiVideoBackend):
 
     def __init__(self) -> None:
         self.model_id = os.getenv(
-            "MONEYOS_COGVIDEOX_MODEL_ID",
-            os.getenv("MONEYOS_AI_VIDEO_MODEL_ID", "zai-org/CogVideoX-5b"),
+            "MONEYOS_AI_VIDEO_MODEL_ID",
+            os.getenv("MONEYOS_COGVIDEOX_MODEL_ID", "zai-org/CogVideoX-5b"),
         )
         self._pipe = None
         self._device = "cpu"
@@ -28,6 +28,18 @@ class CogVideoXBackend(AiVideoBackend):
     @staticmethod
     def _env_flag(name: str, default: str = "1") -> bool:
         return os.getenv(name, default).strip().lower() not in {"0", "false", "no"}
+
+    @staticmethod
+    def _env_flag_alias(name: str, aliases: list[str], default: str = "1") -> bool:
+        value = os.getenv(name)
+        if value is None:
+            for alias in aliases:
+                value = os.getenv(alias)
+                if value is not None:
+                    break
+        if value is None:
+            value = default
+        return value.strip().lower() not in {"0", "false", "no"}
 
     @staticmethod
     def _env_int(name: str, default: int) -> int:
@@ -63,7 +75,11 @@ class CogVideoXBackend(AiVideoBackend):
         self._device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
         from diffusers import CogVideoXPipeline
 
-        self._offload_enabled = self._env_flag("MONEYOS_COGVIDEOX_OFFLOAD", "1")
+        self._offload_enabled = self._env_flag_alias(
+            "MONEYOS_COGVIDEOX_OFFLOAD",
+            ["MONEYOS_AI_VIDEO_OFFLOAD"],
+            "1",
+        )
         self._fp16_enabled = self._env_flag("MONEYOS_COGVIDEOX_FP16", "1")
         self._attention_slicing = self._env_flag("MONEYOS_COGVIDEOX_ATTENTION_SLICING", "1")
         self._vae_slicing = self._env_flag("MONEYOS_COGVIDEOX_VAE_SLICING", "1")
@@ -140,8 +156,10 @@ class CogVideoXBackend(AiVideoBackend):
         import torch
 
         fps = self._env_int("MONEYOS_COGVIDEOX_FPS", 8)
-        width = self._env_int("MONEYOS_COGVIDEOX_WIDTH", 1024)
-        height = self._env_int("MONEYOS_COGVIDEOX_HEIGHT", 576)
+        width_env = os.getenv("MONEYOS_COGVIDEOX_WIDTH") or os.getenv("MONEYOS_AI_VIDEO_WIDTH")
+        height_env = os.getenv("MONEYOS_COGVIDEOX_HEIGHT") or os.getenv("MONEYOS_AI_VIDEO_HEIGHT")
+        width = int(width_env) if width_env else 1024
+        height = int(height_env) if height_env else 576
         steps = self._env_int("MONEYOS_COGVIDEOX_STEPS", 25)
         guidance = self._env_float("MONEYOS_COGVIDEOX_GUIDANCE", 6.0)
         num_frames_env = os.getenv("MONEYOS_COGVIDEOX_NUM_FRAMES")
@@ -185,13 +203,26 @@ class CogVideoXBackend(AiVideoBackend):
                 ) from exc
             raise
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        export_to_video(frames, str(out_path), fps=fps)
-        del frames
-        if "outputs" in locals():
-            del outputs
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
+        print(f"[AI_VIDEO][COGVIDEOX] exporting to: {out_path}", flush=True)
+        try:
+            export_to_video(frames, str(out_path), fps=fps)
+            if (not out_path.exists()) or out_path.stat().st_size == 0:
+                raise RuntimeError(
+                    "[AI_VIDEO][COGVIDEOX] export finished but file missing/empty: "
+                    f"{out_path}"
+                )
+            print(
+                f"[AI_VIDEO][COGVIDEOX] wrote: {out_path} bytes={out_path.stat().st_size}",
+                flush=True,
+            )
+        finally:
+            if "frames" in locals():
+                del frames
+            if "outputs" in locals():
+                del outputs
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
         return BackendResult(
             fps=fps,
             resolution=f"{width}x{height}",

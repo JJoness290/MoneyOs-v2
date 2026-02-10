@@ -13,8 +13,10 @@ except Exception:  # noqa: BLE001
 
 
 def get_short_workdir() -> Path:
-    root = os.getenv("MONEYOS_SHORT_WORKDIR", r"C:\MoneyOS\work")
-    path = Path(root)
+    from app.core.paths import get_output_root
+
+    root = os.getenv("MONEYOS_SHORT_WORKDIR")
+    path = Path(root) if root else get_output_root()
     path.mkdir(parents=True, exist_ok=True)
     return path
 
