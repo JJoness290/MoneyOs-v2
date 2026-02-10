@@ -355,8 +355,15 @@ def apply_anime_animation_polish(
 def _setup_anime_compositor(scene: bpy.types.Scene, args: argparse.Namespace) -> None:
     if args.postfx != "on":
         return
-    scene.use_nodes = True
-    tree = scene.node_tree
+    try:
+        scene.use_nodes = True
+    except Exception:  # noqa: BLE001
+        print("[WARN] Compositor node_tree not available; skipping postfx.")
+        return
+    tree = getattr(scene, "node_tree", None) or getattr(bpy.context.scene, "node_tree", None)
+    if tree is None:
+        print("[WARN] Compositor node_tree not available; skipping postfx.")
+        return
     tree.nodes.clear()
     render_layers = tree.nodes.new(type="CompositorNodeRLayers")
     color_balance = tree.nodes.new(type="CompositorNodeColorBalance")
