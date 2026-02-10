@@ -385,8 +385,13 @@ def apply_anime_animation_polish(
         obj.keyframe_insert(data_path="location", frame=1)
         obj.location.z -= amplitude
         obj.keyframe_insert(data_path="location", frame=duration_frames)
-        if obj.animation_data:
-            for fcurve in obj.animation_data.action.fcurves:
+        animation_data = getattr(obj, "animation_data", None)
+        action = getattr(animation_data, "action", None)
+        fcurves = getattr(action, "fcurves", None) if action else None
+        if not fcurves:
+            print("[MOTION][WARN] Shot camera action has no fcurves; skipping cleanup.")
+        else:
+            for fcurve in list(fcurves):
                 for keyframe in fcurve.keyframe_points:
                     keyframe.interpolation = "BEZIER"
                     keyframe.handle_left_type = "AUTO_CLAMPED"
@@ -931,7 +936,11 @@ def _apply_action(armature: bpy.types.Object, action: bpy.types.Action | None) -
         return
     armature.animation_data_create()
     armature.animation_data.action = action
-    for fcurve in action.fcurves:
+    fcurves = getattr(action, "fcurves", None) if action else None
+    if not fcurves:
+        print("[MOTION][WARN] Shot camera action has no fcurves; skipping cleanup.")
+        return
+    for fcurve in list(fcurves):
         mod = fcurve.modifiers.new(type="CYCLES")
         mod.mode_before = "REPEAT"
         mod.mode_after = "REPEAT"
@@ -1515,16 +1524,15 @@ def _apply_shot_camera(
         camera.keyframe_insert(data_path="rotation_euler", frame=frame_end)
     animation_data = getattr(camera, "animation_data", None)
     action = getattr(animation_data, "action", None)
-    fcurves = getattr(action, "fcurves", None)
+    fcurves = getattr(action, "fcurves", None) if action else None
     if not fcurves:
         print("[MOTION][WARN] Shot camera action has no fcurves; skipping cleanup.")
     else:
-        for fcurve in list(fcurves):
-            for kp in fcurve.keyframe_points:
-                if kp.co.x <= overshoot:
-                    kp.interpolation = "LINEAR"
-                elif kp.co.x <= settle:
-                    kp.interpolation = "BEZIER"
+        for fc in list(fcurves):
+            try:
+                fcurves.remove(fc)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _apply_impact_vfx(scene: bpy.types.Scene, shot: dict[str, object], emission_strength: float) -> None:
