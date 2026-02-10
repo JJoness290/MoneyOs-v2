@@ -1513,9 +1513,13 @@ def _apply_shot_camera(
         camera.rotation_euler = hold_rot
         camera.keyframe_insert(data_path="location", frame=frame_end)
         camera.keyframe_insert(data_path="rotation_euler", frame=frame_end)
-    action = getattr(getattr(camera, "animation_data", None), "action", None)
-    if action:
-        for fcurve in action.fcurves:
+    animation_data = getattr(camera, "animation_data", None)
+    action = getattr(animation_data, "action", None)
+    fcurves = getattr(action, "fcurves", None)
+    if not fcurves:
+        print("[MOTION][WARN] Shot camera action has no fcurves; skipping cleanup.")
+    else:
+        for fcurve in list(fcurves):
             for kp in fcurve.keyframe_points:
                 if kp.co.x <= overshoot:
                     kp.interpolation = "LINEAR"
