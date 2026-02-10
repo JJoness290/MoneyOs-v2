@@ -64,7 +64,7 @@ _last_job_snapshot: dict[str, object] = {}
 _perf_lock = threading.Lock()
 _perf_history_path = OUTPUT_DIR / "perf_history.json"
 
-_STAGE_ORDER = ["script", "broll", "render", "audio", "blender", "frames", "encode", "mux", "done"]
+_STAGE_ORDER = ["script", "broll", "render", "audio", "director", "blender", "frames", "encode", "mux", "done"]
 _STAGE_ALIASES = {
     "generating script": "script",
     "downloading b-roll": "broll",
@@ -74,7 +74,9 @@ _STAGE_ALIASES = {
     "rendering anime 3d episode": "render",
     "generating audio": "audio",
     "audio": "audio",
+    "planning shots": "director",
     "blender": "blender",
+    "rendering shots": "frames",
     "rendering frames": "frames",
     "encoding video": "encode",
     "muxing audio": "mux",
@@ -87,6 +89,7 @@ _STAGE_PROGRESS = {
     "broll": 40,
     "render": 85,
     "audio": 10,
+    "director": 16,
     "blender": 20,
     "frames": 50,
     "encode": 95,

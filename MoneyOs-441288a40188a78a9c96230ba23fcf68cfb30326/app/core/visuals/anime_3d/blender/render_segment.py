@@ -235,6 +235,38 @@ def _setup_anime_lighting(scene: bpy.types.Scene, subject_obj: bpy.types.Object 
     print(f"[ANIME3D_LIGHTS] key={key.energy} fill={fill.energy} rim={rim.energy} world={world_strength}")
 
 
+def _safe_look_at(camera: bpy.types.Object, target: Vector) -> None:
+    direction = target - camera.location
+    if direction.length <= 1e-6:
+        return
+    camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+
+
+def _collect_lights(scene: bpy.types.Scene) -> dict[str, bpy.types.Object]:
+    lights: dict[str, bpy.types.Object] = {}
+    for obj in scene.objects:
+        if obj.type != "LIGHT":
+            continue
+        name = obj.name.lower()
+        if "key" in name and "key" not in lights:
+            lights["key"] = obj
+        elif "fill" in name and "fill" not in lights:
+            lights["fill"] = obj
+        elif "rim" in name and "rim" not in lights:
+            lights["rim"] = obj
+    return lights
+
+
+def _set_world_strength(scene: bpy.types.Scene, strength: float) -> None:
+    world = scene.world
+    if not world:
+        return
+    world.use_nodes = True
+    node_tree = world.node_tree
+    if node_tree and "Background" in node_tree.nodes:
+        node_tree.nodes["Background"].inputs[1].default_value = float(strength)
+
+
 def _set_principled_input(
     principled: bpy.types.Node,
     names: list[str],
@@ -1299,6 +1331,227 @@ def _setup_visibility_scene(
     }
 
 
+def _build_shot_plan(
+    beat_plan: list[dict[str, object]],
+    fps: int,
+    total_frames: int,
+    seed_value: int,
+) -> list[dict[str, object]]:
+    rng = random.Random(seed_value + 7919)
+    min_shot = max(1, int(2 * fps))
+    max_shot = max(min_shot, int(6 * fps))
+    beat_frames: list[int] = []
+    for beat in beat_plan:
+        start_s = beat.get("start")
+        if start_s is None:
+            start_s = beat.get("start_seconds", beat.get("t_start", beat.get("time", 0.0)))
+        try:
+            frame = int(round(float(start_s) * fps)) + 1
+        except Exception:  # noqa: BLE001
+            continue
+        frame = max(2, min(total_frames, frame))
+        beat_frames.append(frame)
+    beat_frames = sorted(set(beat_frames))
+    cuts = [1]
+    cursor = 1
+    while cursor < total_frames:
+        target = cursor + rng.randint(min_shot, max_shot)
+        candidates = [frame for frame in beat_frames if cursor + min_shot <= frame <= cursor + max_shot]
+        next_cut = min(candidates, key=lambda frame: abs(frame - target)) if candidates else target
+        next_cut = max(cursor + min_shot, min(next_cut, cursor + max_shot, total_frames))
+        if total_frames - next_cut < min_shot:
+            next_cut = total_frames
+        if next_cut <= cursor:
+            next_cut = min(total_frames, cursor + min_shot)
+        cuts.append(next_cut)
+        cursor = next_cut
+    if cuts[-1] != total_frames:
+        cuts.append(total_frames)
+    presets = [
+        "POWER_LOW_ANGLE",
+        "AGGRESSIVE_PUSH_IN",
+        "ORBIT_SNAP",
+        "EXTREME_CLOSEUP",
+        "STATIC_IMPACT_HOLD",
+    ]
+    impacts = {
+        max(2, int(total_frames * 0.4)),
+        max(3, int(total_frames * 0.8)),
+    }
+    shots: list[dict[str, object]] = []
+    for idx in range(len(cuts) - 1):
+        start_frame = cuts[idx]
+        end_frame = cuts[idx + 1]
+        if idx < len(cuts) - 2:
+            end_frame -= 1
+        shot_mid = (start_frame + end_frame) // 2
+        impact = any(abs(shot_mid - anchor) <= int(1.5 * fps) for anchor in impacts)
+        preset = rng.choice(presets[:-1])
+        if impact:
+            preset = "STATIC_IMPACT_HOLD" if rng.random() < 0.5 else "AGGRESSIVE_PUSH_IN"
+        shot = {
+            "shot_index": idx + 1,
+            "name": f"SHOT_{idx + 1:02d}",
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "camera_preset": preset,
+            "motion_preset": preset,
+            "lens": rng.randint(28, 40) if preset in {"POWER_LOW_ANGLE", "AGGRESSIVE_PUSH_IN", "ORBIT_SNAP"} else rng.randint(50, 85),
+            "distance": round(rng.uniform(2.0, 4.8), 3),
+            "angle": round(rng.uniform(-14.0, 18.0), 3),
+            "shake": round(rng.uniform(0.0, 0.05), 3),
+            "hold_frames": rng.randint(8, 12) if impact else 0,
+            "vfx_preset": "IMPACT_BURST" if impact else "NONE",
+            "lighting_preset": rng.choice(["RIM_HEAVY", "DARK_CONTRAST"]),
+            "impact": impact,
+        }
+        if impact and shot["lighting_preset"] == "DARK_CONTRAST":
+            shot["lighting_preset"] = "EXPLOSION_FLASH"
+        shots.append(shot)
+    impact_count = sum(1 for shot in shots if int(shot.get("hold_frames", 0)) > 0)
+    if impact_count < 2 and shots:
+        for marker in (int(len(shots) * 0.4), int(len(shots) * 0.8)):
+            idx = min(len(shots) - 1, max(0, marker))
+            shots[idx]["hold_frames"] = max(8, int(shots[idx].get("hold_frames", 0)))
+            shots[idx]["vfx_preset"] = "IMPACT_BURST"
+            shots[idx]["lighting_preset"] = "EXPLOSION_FLASH"
+    return shots
+
+
+def _apply_lighting_preset(scene: bpy.types.Scene, preset: str) -> None:
+    lights = _collect_lights(scene)
+    key = lights.get("key")
+    fill = lights.get("fill")
+    rim = lights.get("rim")
+    if preset == "RIM_HEAVY":
+        if key and key.data:
+            key.data.energy = 1800
+        if fill and fill.data:
+            fill.data.energy = 250
+        if rim and rim.data:
+            rim.data.energy = 1450
+        _set_world_strength(scene, 0.05)
+    elif preset == "DARK_CONTRAST":
+        if key and key.data:
+            key.data.energy = 2200
+        if fill and fill.data:
+            fill.data.energy = 160
+        if rim and rim.data:
+            rim.data.energy = 900
+        _set_world_strength(scene, 0.03)
+    elif preset == "EXPLOSION_FLASH":
+        if key and key.data:
+            key.data.energy = 2600
+        if fill and fill.data:
+            fill.data.energy = 1400
+        if rim and rim.data:
+            rim.data.energy = 1800
+        _set_world_strength(scene, 0.35)
+
+
+def _apply_shot_camera(
+    scene: bpy.types.Scene,
+    camera: bpy.types.Object,
+    subject_obj: bpy.types.Object | None,
+    shot: dict[str, object],
+) -> None:
+    target = subject_obj.location.copy() if subject_obj else Vector((0.0, 0.0, 1.2))
+    lens = float(shot.get("lens", 40))
+    if camera.data:
+        camera.data.lens = lens
+    distance = float(shot.get("distance", 3.0))
+    low_angle = math.radians(float(shot.get("angle", 0.0)))
+    base_height = max(0.45, target.z + (0.2 if shot.get("camera_preset") == "POWER_LOW_ANGLE" else 0.9))
+    start = target + Vector((0.0, -distance, base_height - target.z))
+    end = start.copy()
+    preset = str(shot.get("camera_preset", "STATIC_IMPACT_HOLD"))
+    if preset == "POWER_LOW_ANGLE":
+        start.z = target.z - 0.5
+        end.z = target.z - 0.35
+    elif preset == "AGGRESSIVE_PUSH_IN":
+        end.y += distance * 0.55
+    elif preset == "ORBIT_SNAP":
+        start.x -= 0.8
+        end.x += 0.6
+        end.y += distance * 0.2
+    elif preset == "EXTREME_CLOSEUP":
+        start.y += distance * 0.6
+        end.y += distance * 0.72
+    hold_frames = max(0, int(shot.get("hold_frames", 0)))
+    frame_start = int(shot["start_frame"])
+    frame_end = int(shot["end_frame"])
+    shot_len = max(2, frame_end - frame_start + 1)
+    hold_start = max(frame_start + 1, frame_end - hold_frames + 1)
+    overshoot = frame_start + max(1, int(shot_len * 0.22))
+    settle = frame_start + max(2, int(shot_len * 0.5))
+    scene.frame_set(frame_start)
+    camera.location = start
+    _safe_look_at(camera, target)
+    camera.rotation_euler.x += low_angle
+    camera.keyframe_insert(data_path="location", frame=frame_start)
+    camera.keyframe_insert(data_path="rotation_euler", frame=frame_start)
+    scene.frame_set(overshoot)
+    camera.location = end + (end - start) * 0.12
+    _safe_look_at(camera, target)
+    camera.rotation_euler.x += low_angle
+    camera.keyframe_insert(data_path="location", frame=overshoot)
+    camera.keyframe_insert(data_path="rotation_euler", frame=overshoot)
+    scene.frame_set(settle)
+    camera.location = end
+    _safe_look_at(camera, target)
+    camera.rotation_euler.x += low_angle
+    camera.keyframe_insert(data_path="location", frame=settle)
+    camera.keyframe_insert(data_path="rotation_euler", frame=settle)
+    if hold_frames > 0:
+        scene.frame_set(hold_start)
+        hold_loc = camera.location.copy()
+        hold_rot = camera.rotation_euler.copy()
+        camera.keyframe_insert(data_path="location", frame=hold_start)
+        camera.keyframe_insert(data_path="rotation_euler", frame=hold_start)
+        scene.frame_set(frame_end)
+        camera.location = hold_loc
+        camera.rotation_euler = hold_rot
+        camera.keyframe_insert(data_path="location", frame=frame_end)
+        camera.keyframe_insert(data_path="rotation_euler", frame=frame_end)
+    action = getattr(getattr(camera, "animation_data", None), "action", None)
+    if action:
+        for fcurve in action.fcurves:
+            for kp in fcurve.keyframe_points:
+                if kp.co.x <= overshoot:
+                    kp.interpolation = "LINEAR"
+                elif kp.co.x <= settle:
+                    kp.interpolation = "BEZIER"
+
+
+def _apply_impact_vfx(scene: bpy.types.Scene, shot: dict[str, object], emission_strength: float) -> None:
+    if int(shot.get("hold_frames", 0)) <= 0:
+        return
+    hold_frames = int(shot.get("hold_frames", 0))
+    frame_end = int(shot["end_frame"])
+    hold_start = max(int(shot["start_frame"]), frame_end - hold_frames + 1)
+    for obj in scene.objects:
+        if obj.type == "MESH" and obj.name.lower().startswith("vfx_"):
+            scene.frame_set(hold_start)
+            obj.hide_render = False
+            obj.keyframe_insert(data_path="hide_render", frame=hold_start)
+            obj.scale = obj.scale * 1.0
+            obj.keyframe_insert(data_path="scale", frame=hold_start)
+            scene.frame_set(frame_end)
+            obj.scale = obj.scale * 1.2
+            obj.keyframe_insert(data_path="scale", frame=frame_end)
+            break
+    for obj in scene.objects:
+        if obj.type != "LIGHT" or not getattr(obj, "data", None):
+            continue
+        base_energy = float(getattr(obj.data, "energy", 0.0))
+        scene.frame_set(hold_start)
+        obj.data.energy = base_energy
+        obj.data.keyframe_insert(data_path="energy", frame=hold_start)
+        scene.frame_set(frame_end)
+        obj.data.energy = base_energy + emission_strength * 1.5
+        obj.data.keyframe_insert(data_path="energy", frame=frame_end)
+
+
 def _normalize_character(objects: list[bpy.types.Object]) -> list[bpy.types.Object]:
     meshes = [obj for obj in objects if obj.type == "MESH"]
     if not meshes:
@@ -2061,7 +2314,7 @@ def main() -> None:
     scene.render.use_file_extension = True
     frames_dir = output_path.parent / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
-    scene.render.filepath = str(frames_dir / "frame_####")
+    scene.render.filepath = str(frames_dir / "frame_######")
 
     scene.render.use_freestyle = args.outline_mode == "freestyle"
     if hasattr(scene.render, "line_thickness"):
@@ -2093,6 +2346,11 @@ def main() -> None:
         if plan_path.exists():
             payload = json.loads(plan_path.read_text(encoding="utf-8"))
             beat_plan = payload.get("plan", []) if isinstance(payload, dict) else []
+    shot_plan = _build_shot_plan(beat_plan, args.fps, total_frames, seed_value)
+    shot_plan_path = output_path.parent / "shot_plan.json"
+    shot_plan_path.write_text(json.dumps({"shots": shot_plan}, indent=2), encoding="utf-8")
+    cut_points = [int(shot["end_frame"]) for shot in shot_plan[:-1]]
+    print(f"[DIRECTOR] shots={len(shot_plan)} cuts={cut_points}")
     if args.asset_mode != "local":
         template_options = ["room", "street", "studio"]
         if args.environment and args.environment not in template_options:
@@ -2166,6 +2424,11 @@ def main() -> None:
                 f"Anime3D | 1080p | S{samples} | CHAR:{char_fmt} | SRC:{char_source}",
             )
 
+    subject_obj = _get_subject_object(scene)
+    camera_obj = objects.get("camera") if isinstance(objects, dict) else scene.camera
+    if camera_obj is None:
+        camera_obj = scene.camera
+
     selection = {
         "seed": seed_value,
         "assets_dir": str(assets_dir),
@@ -2201,17 +2464,35 @@ def main() -> None:
             "missing_assets": missing_assets,
             "used_assets": used_assets,
             "procedural_fallback": False,
+            "shot_plan": str(shot_plan_path),
             **selection,
         },
     )
 
-    bpy.ops.render.render(animation=True, write_still=False)
+    for idx, shot in enumerate(shot_plan, start=1):
+        shot_start = int(shot["start_frame"])
+        shot_end = int(shot["end_frame"])
+        scene.frame_start = shot_start
+        scene.frame_end = shot_end
+        if camera_obj:
+            _apply_shot_camera(scene, camera_obj, subject_obj, shot)
+        _apply_lighting_preset(scene, str(shot.get("lighting_preset", "DARK_CONTRAST")))
+        _apply_impact_vfx(scene, shot, args.vfx_emission_strength)
+        print(
+            f"[SHOT {idx}/{len(shot_plan)}] preset={shot.get('camera_preset')} "
+            f"frames={shot_start}-{shot_end} impact_hold={shot.get('hold_frames', 0)}"
+        )
+        bpy.ops.render.render(animation=True, write_still=False)
+
+    scene.frame_start = 1
+    scene.frame_end = total_frames
     rendered_report = {
         "status": "rendered",
         "frame_count": scene.frame_end,
         "frames_dir": str(frames_dir),
         "seed": seed_value,
         "fingerprint": fingerprint,
+        "shot_plan": str(shot_plan_path),
     }
     report_path.write_text(json.dumps(rendered_report, indent=2), encoding="utf-8")
 
@@ -2251,6 +2532,8 @@ def main() -> None:
         "mode": args.mode,
         "style_preset": args.style_preset,
         "gpu": gpu_info,
+        "shot_plan": str(shot_plan_path),
+        "shot_count": len(shot_plan),
         "procedural_humanoid": procedural_humanoid,
         "missing_assets": missing_assets,
         "used_assets": used_assets,

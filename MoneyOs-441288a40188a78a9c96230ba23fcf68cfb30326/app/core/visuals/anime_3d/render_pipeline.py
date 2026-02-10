@@ -233,6 +233,22 @@ def _emit_status(
     status_callback(payload)
 
 
+def _parse_blender_shot_status(stdout_text: str) -> tuple[dict | None, bool]:
+    lines = stdout_text.splitlines()
+    planning_seen = any("[DIRECTOR]" in line for line in lines)
+    shot_regex = re.compile(r"\[SHOT\s+(\d+)/(\d+)\]\s+preset=([^\s]+)")
+    for line in reversed(lines):
+        match = shot_regex.search(line)
+        if not match:
+            continue
+        shot_index = int(match.group(1))
+        shot_total = int(match.group(2))
+        preset = match.group(3)
+        status = f"Rendering shots ({shot_index}/{shot_total}) - {preset}"
+        return ({"shot_index": shot_index, "shot_total": shot_total, "shot_preset": preset, "status": status}, planning_seen)
+    return (None, planning_seen)
+
+
 def _finalize_mux(video_path: Path, audio_path: Path, output_path: Path) -> None:
     args = ["ffmpeg", "-y", "-i", str(video_path)]
     if not audio_path.exists() or audio_path.stat().st_size == 0:
@@ -294,11 +310,11 @@ def _assemble_frames_video(
         raise RuntimeError(f"No frames found in {frames_dir}")
     if not audio_path.exists() or audio_path.stat().st_size == 0:
         raise RuntimeError(f"audio missing or empty during encode: {audio_path}")
-    first_frame = frames_dir / "frame_0001.png"
-    if not first_frame.exists():
+    has_first_frame = any(path.name in {"frame_0001.png", "frame_000001.png"} for path in frame_files)
+    if not has_first_frame:
         sample = [path.name for path in frame_files[:10]]
         raise RuntimeError(
-            "Missing expected first frame frame_0001.png. "
+            "Missing expected first frame (frame_0001.png or frame_000001.png). "
             f"Sample frames: {sample}"
         )
     pattern_regex = re.compile(r"frame_(\d+)\.png$")
@@ -979,7 +995,8 @@ def render_anime_3d_60s(
         progress_pct=15,
     )
 
-    _emit_status(status_callback, stage_key="blender", status="Launching Blender", progress_pct=15)
+    _emit_status(status_callback, stage_key="director", status="Planning shots", progress_pct=16)
+    _emit_status(status_callback, stage_key="blender", status="Launching Blender", progress_pct=17)
     with blender_stdout_path.open("w", encoding="utf-8") as stdout_handle, blender_stderr_path.open(
         "w", encoding="utf-8"
     ) as stderr_handle:
@@ -991,17 +1008,28 @@ def render_anime_3d_60s(
         )
         total_frames = max(1, int(math.ceil(duration_s * fps)))
         last_update = 0.0
+        planning_emitted = False
         while process.poll() is None:
             now = time.time()
             if now - last_update >= 2.0:
                 frame_count = len(list(frames_dir.glob("frame_*.png")))
                 progress = 10 + int(min(frame_count / total_frames, 1.0) * 84)
+                stdout_text_now = blender_stdout_path.read_text(encoding="utf-8") if blender_stdout_path.exists() else ""
+                shot_payload, planning_seen = _parse_blender_shot_status(stdout_text_now)
+                if planning_seen and not planning_emitted:
+                    planning_emitted = True
+                    _emit_status(status_callback, stage_key="director", status="Planning shots", progress_pct=18)
+                status_text = "Rendering frames"
+                extra_payload = {"frames_rendered": frame_count, "total_frames": total_frames}
+                if shot_payload:
+                    status_text = shot_payload["status"]
+                    extra_payload.update(shot_payload)
                 _emit_status(
                     status_callback,
                     stage_key="frames",
-                    status="Rendering frames",
+                    status=status_text,
                     progress_pct=progress,
-                    extra={"frames_rendered": frame_count, "total_frames": total_frames},
+                    extra=extra_payload,
                 )
                 last_update = now
             time.sleep(0.2)
@@ -1040,7 +1068,7 @@ def render_anime_3d_60s(
         expected_fingerprint=None,
     )
     ensure_storage_budget([output_dir], required_bytes, "encode")
-    _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
+    _emit_status(status_callback, stage_key="encode", status="Encoding", progress_pct=95)
     _assemble_frames_video(
         frames_dir,
         fps,
@@ -1064,6 +1092,7 @@ def render_anime_3d_60s(
         raise RuntimeError("segment.mp4 missing after frame encode")
     final_path = output_dir / "final.mp4"
     ensure_storage_budget([output_dir], required_bytes, "export")
+    _emit_status(status_callback, stage_key="mux", status="Muxing", progress_pct=98)
     _finalize_mux(video_path, audio_path, final_path)
     if not final_path.exists() or final_path.stat().st_size == 0:
         raise RuntimeError(f"final.mp4 missing or empty: {final_path}")
@@ -1101,7 +1130,7 @@ def finalize_anime_3d(job_id: str, status_callback: StatusCallback = None) -> An
     final_path = output_dir / "final.mp4"
     report_path = output_dir / "render_report.json"
     if not video_path.exists() and frames_dir.exists():
-        _emit_status(status_callback, stage_key="encode", status="Encoding video", progress_pct=95)
+        _emit_status(status_callback, stage_key="encode", status="Encoding", progress_pct=95)
         _assemble_frames_video(frames_dir, ANIME3D_FPS, audio_path, video_path, warnings, report_path)
     if not video_path.exists() and video_raw_path.exists():
         video_path = video_raw_path
