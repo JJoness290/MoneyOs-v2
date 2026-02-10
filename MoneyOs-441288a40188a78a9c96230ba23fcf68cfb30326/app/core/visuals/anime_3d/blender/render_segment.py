@@ -321,11 +321,21 @@ def setup_anime_camera_motion(
     camera.keyframe_insert(data_path="location", frame=1)
     camera.location = end
     camera.keyframe_insert(data_path="location", frame=duration_frames)
-    for fcurve in camera.animation_data.action.fcurves:
-        for keyframe in fcurve.keyframe_points:
-            keyframe.interpolation = "BEZIER"
-            keyframe.handle_left_type = "AUTO_CLAMPED"
-            keyframe.handle_right_type = "AUTO_CLAMPED"
+    animation_data = getattr(camera, "animation_data", None)
+    action = getattr(animation_data, "action", None)
+    fcurves = getattr(action, "fcurves", None)
+    if fcurves is None:
+        print("[MOTION][WARN] No fcurves available on camera action; skipping curve cleanup.")
+    else:
+        for fcurve in list(fcurves):
+            try:
+                keyframe_points = getattr(fcurve, "keyframe_points", [])
+                for keyframe in keyframe_points:
+                    keyframe.interpolation = "BEZIER"
+                    keyframe.handle_left_type = "AUTO_CLAMPED"
+                    keyframe.handle_right_type = "AUTO_CLAMPED"
+            except Exception as exc:  # noqa: BLE001
+                print(f"[MOTION][WARN] Failed to process camera fcurve: {exc}")
     print(f"[CAMERA] mode={mode}")
 
 
