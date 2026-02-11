@@ -97,6 +97,7 @@
       <div><span class="label">Status:</span> <span id="statusText">Idle</span></div>
       <div><span class="label">Progress:</span> <span id="progressText">0%</span></div>
       <div><span class="label">ETA:</span> <span id="etaText">--:--</span></div>
+      <div><span class="label">Shot:</span> <span id="shotText">-</span></div>
       <div class="progress-bar"><span id="progressBar"></span></div>
       <div class="output"><span class="label">Output:</span> <span id="outputPath">-</span></div>
       <div><span class="label">Duration:</span> <span id="outputDuration">-</span></div>
@@ -124,6 +125,7 @@
     const progressText = document.getElementById('progressText');
     const etaText = document.getElementById('etaText');
     const progressBar = document.getElementById('progressBar');
+    const shotText = document.getElementById('shotText');
     const outputPath = document.getElementById('outputPath');
     const outputDuration = document.getElementById('outputDuration');
     const downloadLink = document.getElementById('downloadLink');
@@ -153,6 +155,12 @@
       progressText.textContent = data.progress_pct ? `${data.progress_pct}%` : '0%';
       etaText.textContent = data.eta_mmss || '--:--';
       progressBar.style.width = data.progress_pct ? `${data.progress_pct}%` : '0%';
+      if (data.shot_index && data.shot_total) {
+        const preset = data.shot_preset ? ` (${data.shot_preset})` : '';
+        shotText.textContent = `${data.shot_index}/${data.shot_total}${preset}`;
+      } else {
+        shotText.textContent = '-';
+      }
       appendLog(data.status || 'Status update');
 
       if (data.success) {
