@@ -236,16 +236,25 @@ def _emit_status(
 def _parse_blender_shot_status(stdout_text: str) -> tuple[dict | None, bool]:
     lines = stdout_text.splitlines()
     planning_seen = any("[DIRECTOR]" in line for line in lines)
-    shot_regex = re.compile(r"\[SHOT\s+(\d+)/(\d+)\]\s+preset=([^\s]+)")
+    shot_regex = re.compile(r"\[SHOT\s+(\d+)/(\d+)\]\s+pre-hold=(\d+)\s+post-ease=(\d+)\s+preset=([^\s]+)")
+    fallback_regex = re.compile(r"\[SHOT\s+(\d+)/(\d+)\]\s+preset=([^\s]+)")
     for line in reversed(lines):
         match = shot_regex.search(line)
-        if not match:
-            continue
-        shot_index = int(match.group(1))
-        shot_total = int(match.group(2))
-        preset = match.group(3)
-        status = f"Rendering shots ({shot_index}/{shot_total}) - {preset}"
-        return ({"shot_index": shot_index, "shot_total": shot_total, "shot_preset": preset, "status": status}, planning_seen)
+        if match:
+            shot_index = int(match.group(1))
+            shot_total = int(match.group(2))
+            pre_hold = int(match.group(3))
+            post_ease = int(match.group(4))
+            preset = match.group(5)
+            status = f"Rendering shot frames with smoothing ({shot_index}/{shot_total})"
+            return ({"shot_index": shot_index, "shot_total": shot_total, "shot_preset": preset, "pre_hold_frames": pre_hold, "post_ease_frames": post_ease, "status": status}, planning_seen)
+        fallback = fallback_regex.search(line)
+        if fallback:
+            shot_index = int(fallback.group(1))
+            shot_total = int(fallback.group(2))
+            preset = fallback.group(3)
+            status = f"Rendering shots ({shot_index}/{shot_total}) - {preset}"
+            return ({"shot_index": shot_index, "shot_total": shot_total, "shot_preset": preset, "status": status}, planning_seen)
     return (None, planning_seen)
 
 

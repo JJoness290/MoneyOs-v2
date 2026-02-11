@@ -14,6 +14,15 @@ import bpy
 from mathutils import Vector
 
 
+SMOOTHING_PRESET_DEFAULTS: dict[str, tuple[int, int]] = {
+    "POWER_LOW_ANGLE": (8, 8),
+    "ORBIT_SNAP": (4, 4),
+    "AGGRESSIVE_PUSH_IN": (6, 6),
+    "EXTREME_CLOSEUP": (6, 6),
+    "STATIC_IMPACT_HOLD": (8, 8),
+}
+
+
 def _parse_args() -> argparse.Namespace:
     argv = sys.argv
     if "--" in argv:
@@ -1398,6 +1407,10 @@ def _build_shot_plan(
         preset = rng.choice(presets[:-1])
         if impact:
             preset = "STATIC_IMPACT_HOLD" if rng.random() < 0.5 else "AGGRESSIVE_PUSH_IN"
+        pre_hold_frames, post_ease_frames = SMOOTHING_PRESET_DEFAULTS.get(preset, (6, 6))
+        if (end_frame - start_frame + 1) < int(2 * fps):
+            pre_hold_frames = 0
+            post_ease_frames = 0
         shot = {
             "shot_index": idx + 1,
             "name": f"SHOT_{idx + 1:02d}",
@@ -1410,6 +1423,14 @@ def _build_shot_plan(
             "angle": round(rng.uniform(-14.0, 18.0), 3),
             "shake": round(rng.uniform(0.0, 0.05), 3),
             "hold_frames": rng.randint(8, 12) if impact else 0,
+            "pre_hold_frames": pre_hold_frames,
+            "post_ease_frames": post_ease_frames,
+            "transition_motion": {
+                "bias_strength": 0.08 if preset in {"AGGRESSIVE_PUSH_IN", "ORBIT_SNAP"} else 0.05,
+                "next_pull": 0.06,
+                "enable_micro_shake": bool(impact or preset == "POWER_LOW_ANGLE"),
+                "shake_strength": 0.03 if impact else (0.02 if preset == "POWER_LOW_ANGLE" else 0.0),
+            },
             "vfx_preset": "IMPACT_BURST" if impact else "NONE",
             "lighting_preset": rng.choice(["RIM_HEAVY", "DARK_CONTRAST"]),
             "impact": impact,
@@ -1458,16 +1479,11 @@ def _apply_lighting_preset(scene: bpy.types.Scene, preset: str) -> None:
         _set_world_strength(scene, 0.35)
 
 
-def _apply_shot_camera(
-    scene: bpy.types.Scene,
-    camera: bpy.types.Object,
+def _compute_shot_camera_positions(
     subject_obj: bpy.types.Object | None,
     shot: dict[str, object],
-) -> None:
+) -> tuple[Vector, Vector, Vector, float, float]:
     target = subject_obj.location.copy() if subject_obj else Vector((0.0, 0.0, 1.2))
-    lens = float(shot.get("lens", 40))
-    if camera.data:
-        camera.data.lens = lens
     distance = float(shot.get("distance", 3.0))
     low_angle = math.radians(float(shot.get("angle", 0.0)))
     base_height = max(0.45, target.z + (0.2 if shot.get("camera_preset") == "POWER_LOW_ANGLE" else 0.9))
@@ -1486,42 +1502,92 @@ def _apply_shot_camera(
     elif preset == "EXTREME_CLOSEUP":
         start.y += distance * 0.6
         end.y += distance * 0.72
-    hold_frames = max(0, int(shot.get("hold_frames", 0)))
+    return target, start, end, low_angle, distance
+
+
+def _apply_shot_camera(
+    scene: bpy.types.Scene,
+    camera: bpy.types.Object,
+    subject_obj: bpy.types.Object | None,
+    shot: dict[str, object],
+    next_shot: dict[str, object] | None = None,
+) -> None:
+    target, start, end, low_angle, _distance = _compute_shot_camera_positions(subject_obj, shot)
+    lens = float(shot.get("lens", 40))
+    if camera.data:
+        camera.data.lens = lens
     frame_start = int(shot["start_frame"])
     frame_end = int(shot["end_frame"])
     shot_len = max(2, frame_end - frame_start + 1)
-    hold_start = max(frame_start + 1, frame_end - hold_frames + 1)
-    overshoot = frame_start + max(1, int(shot_len * 0.22))
-    settle = frame_start + max(2, int(shot_len * 0.5))
+    pre_hold_frames = max(0, int(shot.get("pre_hold_frames", 0)))
+    post_ease_frames = max(0, int(shot.get("post_ease_frames", 0)))
+    transition_motion = shot.get("transition_motion") if isinstance(shot.get("transition_motion"), dict) else {}
+    bias_strength = float(transition_motion.get("bias_strength", 0.06) or 0.06)
+    next_pull = float(transition_motion.get("next_pull", 0.06) or 0.06)
+    enable_micro_shake = bool(transition_motion.get("enable_micro_shake", False))
+    shake_strength = float(transition_motion.get("shake_strength", 0.0) or 0.0)
+
+    move_delta = (end - start)
+    significant_motion = move_delta.length >= 0.35
+    if not significant_motion:
+        pre_hold_frames = 0
+
+    ease_end = min(frame_end - 2, frame_start + post_ease_frames)
+    pre_hold_start = max(ease_end + 1, frame_end - pre_hold_frames + 1)
+    motion_end = max(ease_end + 1, pre_hold_start - 1)
+
+    entry_start = start - (move_delta * bias_strength)
+    if next_shot:
+        _next_target, next_start, _next_end, _next_angle, _next_distance = _compute_shot_camera_positions(subject_obj, next_shot)
+        entry_start = entry_start.lerp(next_start, min(0.25, max(0.0, next_pull)))
+
+    if enable_micro_shake and shake_strength > 0.0:
+        entry_start.x += shake_strength
+        entry_start.z += shake_strength * 0.35
+
+    overshoot = ease_end + max(1, int((motion_end - ease_end) * 0.35))
+    settle = ease_end + max(2, int((motion_end - ease_end) * 0.7))
+
     scene.frame_set(frame_start)
-    camera.location = start
+    camera.location = entry_start
     _safe_look_at(camera, target)
     camera.rotation_euler.x += low_angle
     camera.keyframe_insert(data_path="location", frame=frame_start)
     camera.keyframe_insert(data_path="rotation_euler", frame=frame_start)
+
+    scene.frame_set(ease_end)
+    camera.location = start
+    _safe_look_at(camera, target)
+    camera.rotation_euler.x += low_angle
+    camera.keyframe_insert(data_path="location", frame=ease_end)
+    camera.keyframe_insert(data_path="rotation_euler", frame=ease_end)
+
     scene.frame_set(overshoot)
     camera.location = end + (end - start) * 0.12
     _safe_look_at(camera, target)
     camera.rotation_euler.x += low_angle
     camera.keyframe_insert(data_path="location", frame=overshoot)
     camera.keyframe_insert(data_path="rotation_euler", frame=overshoot)
+
     scene.frame_set(settle)
     camera.location = end
     _safe_look_at(camera, target)
     camera.rotation_euler.x += low_angle
     camera.keyframe_insert(data_path="location", frame=settle)
     camera.keyframe_insert(data_path="rotation_euler", frame=settle)
-    if hold_frames > 0:
-        scene.frame_set(hold_start)
+
+    if pre_hold_frames > 0:
+        scene.frame_set(pre_hold_start)
         hold_loc = camera.location.copy()
         hold_rot = camera.rotation_euler.copy()
-        camera.keyframe_insert(data_path="location", frame=hold_start)
-        camera.keyframe_insert(data_path="rotation_euler", frame=hold_start)
+        camera.keyframe_insert(data_path="location", frame=pre_hold_start)
+        camera.keyframe_insert(data_path="rotation_euler", frame=pre_hold_start)
         scene.frame_set(frame_end)
         camera.location = hold_loc
         camera.rotation_euler = hold_rot
         camera.keyframe_insert(data_path="location", frame=frame_end)
         camera.keyframe_insert(data_path="rotation_euler", frame=frame_end)
+
     animation_data = getattr(camera, "animation_data", None)
     action = getattr(animation_data, "action", None)
     fcurves = getattr(action, "fcurves", None) if action else None
@@ -1530,7 +1596,10 @@ def _apply_shot_camera(
     else:
         for fcurve in list(fcurves):
             for kp in fcurve.keyframe_points:
-                if kp.co.x <= overshoot:
+                if kp.co.x <= ease_end:
+                    kp.interpolation = "BEZIER"
+                    kp.easing = "EASE_IN"
+                elif kp.co.x <= overshoot:
                     kp.interpolation = "LINEAR"
                 elif kp.co.x <= settle:
                     kp.interpolation = "BEZIER"
@@ -2488,11 +2557,13 @@ def main() -> None:
         scene.frame_start = shot_start
         scene.frame_end = shot_end
         if camera_obj:
-            _apply_shot_camera(scene, camera_obj, subject_obj, shot)
+            _apply_shot_camera(scene, camera_obj, subject_obj, shot, next_shot=shot_plan[idx] if idx < len(shot_plan) else None)
         _apply_lighting_preset(scene, str(shot.get("lighting_preset", "DARK_CONTRAST")))
+        print(f"[LIGHTING] preset = {shot.get('lighting_preset', 'DARK_CONTRAST')} shot={idx}/{len(shot_plan)}")
         _apply_impact_vfx(scene, shot, args.vfx_emission_strength)
         print(
-            f"[SHOT {idx}/{len(shot_plan)}] preset={shot.get('camera_preset')} "
+            f"[SHOT {idx}/{len(shot_plan)}] pre-hold={shot.get('pre_hold_frames', 0)} "
+            f"post-ease={shot.get('post_ease_frames', 0)} preset={shot.get('camera_preset')} "
             f"frames={shot_start}-{shot_end} impact_hold={shot.get('hold_frames', 0)}"
         )
         bpy.ops.render.render(animation=True, write_still=False)

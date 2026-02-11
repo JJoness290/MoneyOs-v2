@@ -98,6 +98,7 @@
       <div><span class="label">Progress:</span> <span id="progressText">0%</span></div>
       <div><span class="label">ETA:</span> <span id="etaText">--:--</span></div>
       <div><span class="label">Shot:</span> <span id="shotText">-</span></div>
+      <div><span class="label">Smoothing:</span> <span id="smoothingText">-</span></div>
       <div class="progress-bar"><span id="progressBar"></span></div>
       <div class="output"><span class="label">Output:</span> <span id="outputPath">-</span></div>
       <div><span class="label">Duration:</span> <span id="outputDuration">-</span></div>
@@ -126,6 +127,7 @@
     const etaText = document.getElementById('etaText');
     const progressBar = document.getElementById('progressBar');
     const shotText = document.getElementById('shotText');
+    const smoothingText = document.getElementById('smoothingText');
     const outputPath = document.getElementById('outputPath');
     const outputDuration = document.getElementById('outputDuration');
     const downloadLink = document.getElementById('downloadLink');
@@ -158,8 +160,12 @@
       if (data.shot_index && data.shot_total) {
         const preset = data.shot_preset ? ` (${data.shot_preset})` : '';
         shotText.textContent = `${data.shot_index}/${data.shot_total}${preset}`;
+        if (typeof data.pre_hold_frames === 'number' && typeof data.post_ease_frames === 'number') {
+          smoothingText.textContent = `pre-hold=${data.pre_hold_frames} post-ease=${data.post_ease_frames}`;
+        }
       } else {
         shotText.textContent = '-';
+        smoothingText.textContent = '-';
       }
       appendLog(data.status || 'Status update');
 
