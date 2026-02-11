@@ -23,6 +23,14 @@ SMOOTHING_PRESET_DEFAULTS: dict[str, tuple[int, int]] = {
 }
 
 
+ANIME_TEXTURE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "base": ("*_base.png", "*albedo*.png", "*diffuse*.png"),
+    "normal": ("*_normal.png", "*normal*.png"),
+    "spec": ("*_spec.png", "*spec*.png", "*rough*.png"),
+    "detail": ("*_detail.png", "*stripe*.png", "*fold*.png", "*highlight*.png"),
+}
+
+
 def _parse_args() -> argparse.Namespace:
     argv = sys.argv
     if "--" in argv:
@@ -747,13 +755,15 @@ def _ensure_character(
 
 def _apply_outlines(scene: bpy.types.Scene, mode: str) -> None:
     mode = mode.strip().lower()
+    thickness = float(os.getenv("MONEYOS_ANIME3D_OUTLINE_THICKNESS", "1.5"))
+    thickness = max(0.2, min(thickness, 6.0))
     if mode == "off":
         scene.render.use_freestyle = False
         return
     if mode == "freestyle":
         scene.render.use_freestyle = True
         if hasattr(scene.render, "line_thickness"):
-            scene.render.line_thickness = 1.5
+            scene.render.line_thickness = thickness
         return
     scene.render.use_freestyle = False
 
@@ -845,7 +855,100 @@ def _find_armature(collections: list[bpy.types.Collection]) -> bpy.types.Object 
     return None
 
 
-def _apply_toon_material(obj: bpy.types.Object, outline_material: bpy.types.Material) -> None:
+def _ensure_toon_node_group() -> bpy.types.NodeTree:
+    group_name = "MO_ToonRamp"
+    existing = bpy.data.node_groups.get(group_name)
+    if existing:
+        return existing
+    group = bpy.data.node_groups.new(group_name, "ShaderNodeTree")
+    group.interface.new_socket(name="Color", in_out="INPUT", socket_type="NodeSocketColor")
+    group.interface.new_socket(name="Shaded Color", in_out="OUTPUT", socket_type="NodeSocketColor")
+    group.interface.new_socket(name="Normal", in_out="INPUT", socket_type="NodeSocketVector")
+    group.interface.new_socket(name="Light", in_out="INPUT", socket_type="NodeSocketVector")
+    group.interface.new_socket(name="Hardness", in_out="INPUT", socket_type="NodeSocketFloat")
+    nodes = group.nodes
+    links = group.links
+    input_node = nodes.new(type="NodeGroupInput")
+    output_node = nodes.new(type="NodeGroupOutput")
+    dot = nodes.new(type="ShaderNodeVectorMath")
+    dot.operation = "DOT_PRODUCT"
+    multiply = nodes.new(type="ShaderNodeMath")
+    multiply.operation = "MULTIPLY"
+    add = nodes.new(type="ShaderNodeMath")
+    add.operation = "ADD"
+    ramp = nodes.new(type="ShaderNodeValToRGB")
+    ramp.color_ramp.interpolation = "CONSTANT"
+    ramp.color_ramp.elements[0].position = 0.38
+    ramp.color_ramp.elements[0].color = (0.58, 0.58, 0.58, 1.0)
+    ramp.color_ramp.elements[1].position = 0.68
+    ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
+    mult_color = nodes.new(type="ShaderNodeMixRGB")
+    mult_color.blend_type = "MULTIPLY"
+    mult_color.inputs[0].default_value = 1.0
+    links.new(input_node.outputs["Normal"], dot.inputs[0])
+    links.new(input_node.outputs["Light"], dot.inputs[1])
+    links.new(dot.outputs[0], multiply.inputs[0])
+    links.new(input_node.outputs["Hardness"], multiply.inputs[1])
+    add.inputs[1].default_value = 0.5
+    links.new(multiply.outputs[0], add.inputs[0])
+    links.new(add.outputs[0], ramp.inputs["Fac"])
+    links.new(input_node.outputs["Color"], mult_color.inputs[1])
+    links.new(ramp.outputs["Color"], mult_color.inputs[2])
+    links.new(mult_color.outputs["Color"], output_node.inputs["Shaded Color"])
+    return group
+
+
+def _ensure_rim_node_group() -> bpy.types.NodeTree:
+    group_name = "MO_RimBoost"
+    existing = bpy.data.node_groups.get(group_name)
+    if existing:
+        return existing
+    group = bpy.data.node_groups.new(group_name, "ShaderNodeTree")
+    group.interface.new_socket(name="Color", in_out="INPUT", socket_type="NodeSocketColor")
+    group.interface.new_socket(name="Rim Color", in_out="INPUT", socket_type="NodeSocketColor")
+    group.interface.new_socket(name="Boost", in_out="INPUT", socket_type="NodeSocketFloat")
+    group.interface.new_socket(name="Final", in_out="OUTPUT", socket_type="NodeSocketColor")
+    nodes = group.nodes
+    links = group.links
+    input_node = nodes.new(type="NodeGroupInput")
+    output_node = nodes.new(type="NodeGroupOutput")
+    fresnel = nodes.new(type="ShaderNodeFresnel")
+    fresnel.inputs["IOR"].default_value = 1.2
+    boost_mult = nodes.new(type="ShaderNodeMath")
+    boost_mult.operation = "MULTIPLY"
+    mix = nodes.new(type="ShaderNodeMixRGB")
+    links.new(fresnel.outputs["Fac"], boost_mult.inputs[0])
+    links.new(input_node.outputs["Boost"], boost_mult.inputs[1])
+    links.new(boost_mult.outputs[0], mix.inputs[0])
+    links.new(input_node.outputs["Color"], mix.inputs[1])
+    links.new(input_node.outputs["Rim Color"], mix.inputs[2])
+    links.new(mix.outputs["Color"], output_node.inputs["Final"])
+    return group
+
+
+def _resolve_texture_bundle(textures_dir: Path, object_name: str) -> dict[str, Path]:
+    bundle: dict[str, Path] = {}
+    prefix = "hero" if any(tag in object_name.lower() for tag in ("hero", "head", "body", "arm", "leg")) else "env"
+    for key, patterns in ANIME_TEXTURE_PATTERNS.items():
+        matches: list[Path] = []
+        for pattern in patterns:
+            matches.extend(sorted(textures_dir.glob(f"{prefix}{pattern[1:]}")))
+            matches.extend(sorted(textures_dir.glob(pattern)))
+        for match in matches:
+            if match.exists():
+                bundle[key] = match
+                break
+    return bundle
+
+
+def _apply_toon_material(
+    obj: bpy.types.Object,
+    outline_material: bpy.types.Material,
+    texture_bundle: dict[str, Path] | None = None,
+    *,
+    hardness: float = 1.35,
+    outline_thickness: float = 0.02,
+) -> None:
     if obj.type != "MESH":
         return
     material = bpy.data.materials.new(name="ToonMaterial")
@@ -853,19 +956,74 @@ def _apply_toon_material(obj: bpy.types.Object, outline_material: bpy.types.Mate
     nodes = material.node_tree.nodes
     nodes.clear()
     output = nodes.new(type="ShaderNodeOutputMaterial")
-    toon = nodes.new(type="ShaderNodeBsdfToon")
-    toon.inputs["Size"].default_value = 0.7
-    toon.inputs["Smooth"].default_value = 0.05
-    rim = nodes.new(type="ShaderNodeFresnel")
-    rim.inputs["IOR"].default_value = 1.3
-    mix = nodes.new(type="ShaderNodeMixShader")
-    emission = nodes.new(type="ShaderNodeEmission")
-    emission.inputs["Color"].default_value = (0.4, 0.6, 1.0, 1.0)
-    emission.inputs["Strength"].default_value = 0.6
-    material.node_tree.links.new(toon.outputs["BSDF"], mix.inputs[1])
-    material.node_tree.links.new(emission.outputs["Emission"], mix.inputs[2])
-    material.node_tree.links.new(rim.outputs["Fac"], mix.inputs[0])
-    material.node_tree.links.new(mix.outputs["Shader"], output.inputs["Surface"])
+    links = material.node_tree.links
+    principled = nodes.new(type="ShaderNodeBsdfPrincipled")
+    principled.inputs["Roughness"].default_value = 0.62
+    _set_principled_input(principled, ["Specular IOR Level", "Specular"], 0.08, "anime_visual_spec")
+    geometry = nodes.new(type="ShaderNodeNewGeometry")
+    normalize = nodes.new(type="ShaderNodeVectorMath")
+    normalize.operation = "NORMALIZE"
+    normal_map = nodes.new(type="ShaderNodeNormalMap")
+    light_vector = nodes.new(type="ShaderNodeCombineXYZ")
+    light_vector.inputs[0].default_value = 0.2
+    light_vector.inputs[1].default_value = 0.6
+    light_vector.inputs[2].default_value = 1.0
+    toon_group = nodes.new(type="ShaderNodeGroup")
+    toon_group.node_tree = _ensure_toon_node_group()
+    toon_group.inputs["Hardness"].default_value = float(hardness)
+    rim_group = nodes.new(type="ShaderNodeGroup")
+    rim_group.node_tree = _ensure_rim_node_group()
+    rim_group.inputs["Boost"].default_value = 0.35
+    rim_group.inputs["Rim Color"].default_value = (0.84, 0.9, 1.0, 1.0)
+    base_rgb = nodes.new(type="ShaderNodeRGB")
+    base_rgb.outputs[0].default_value = (0.72, 0.68, 0.64, 1.0)
+    links.new(geometry.outputs["Normal"], normalize.inputs[0])
+    links.new(normalize.outputs[0], toon_group.inputs["Normal"])
+    links.new(light_vector.outputs["Vector"], toon_group.inputs["Light"])
+    links.new(base_rgb.outputs["Color"], toon_group.inputs["Color"])
+    links.new(toon_group.outputs["Shaded Color"], rim_group.inputs["Color"])
+    links.new(rim_group.outputs["Final"], principled.inputs["Base Color"])
+    if texture_bundle:
+        base_map = texture_bundle.get("base")
+        normal = texture_bundle.get("normal")
+        spec = texture_bundle.get("spec")
+        detail = texture_bundle.get("detail")
+        tex_coord = nodes.new(type="ShaderNodeTexCoord")
+        mapping = nodes.new(type="ShaderNodeMapping")
+        links.new(tex_coord.outputs["UV"], mapping.inputs["Vector"])
+        if base_map and base_map.exists():
+            tex_base = nodes.new(type="ShaderNodeTexImage")
+            tex_base.image = bpy.data.images.load(str(base_map), check_existing=True)
+            tex_base.interpolation = "Closest"
+            tex_base.extension = "REPEAT"
+            links.new(mapping.outputs["Vector"], tex_base.inputs["Vector"])
+            links.new(tex_base.outputs["Color"], toon_group.inputs["Color"])
+        if detail and detail.exists():
+            tex_detail = nodes.new(type="ShaderNodeTexImage")
+            tex_detail.image = bpy.data.images.load(str(detail), check_existing=True)
+            tex_detail.interpolation = "Closest"
+            detail_mix = nodes.new(type="ShaderNodeMixRGB")
+            detail_mix.blend_type = "MULTIPLY"
+            detail_mix.inputs[0].default_value = 0.2
+            links.new(mapping.outputs["Vector"], tex_detail.inputs["Vector"])
+            links.new(toon_group.outputs["Shaded Color"], detail_mix.inputs[1])
+            links.new(tex_detail.outputs["Color"], detail_mix.inputs[2])
+            links.new(detail_mix.outputs["Color"], rim_group.inputs["Color"])
+        if normal and normal.exists():
+            tex_normal = nodes.new(type="ShaderNodeTexImage")
+            tex_normal.image = bpy.data.images.load(str(normal), check_existing=True)
+            tex_normal.colorspace_settings.name = "Non-Color"
+            links.new(mapping.outputs["Vector"], tex_normal.inputs["Vector"])
+            links.new(tex_normal.outputs["Color"], normal_map.inputs["Color"])
+            links.new(normal_map.outputs["Normal"], principled.inputs["Normal"])
+        if spec and spec.exists():
+            tex_spec = nodes.new(type="ShaderNodeTexImage")
+            tex_spec.image = bpy.data.images.load(str(spec), check_existing=True)
+            tex_spec.colorspace_settings.name = "Non-Color"
+            links.new(mapping.outputs["Vector"], tex_spec.inputs["Vector"])
+            _set_principled_input(principled, ["Specular IOR Level", "Specular"], 0.2, "anime_visual_spec_map")
+            links.new(tex_spec.outputs["Color"], principled.inputs["Roughness"])
+    links.new(principled.outputs["BSDF"], output.inputs["Surface"])
     if obj.data.materials:
         obj.data.materials[0] = material
     else:
@@ -873,7 +1031,7 @@ def _apply_toon_material(obj: bpy.types.Object, outline_material: bpy.types.Mate
     _ensure_material(obj.data.materials, outline_material)
     print("[MAT] applied outline material to", obj.name)
     modifier = obj.modifiers.new(name="Outline", type="SOLIDIFY")
-    modifier.thickness = 0.02
+    modifier.thickness = max(0.002, float(outline_thickness))
     modifier.use_flip_normals = True
     modifier.material_offset = len(obj.data.materials) - 1
 
@@ -978,19 +1136,41 @@ def _anime_assets_dir(assets_dir: Path) -> Path:
 
 def _apply_anime_visual_style(scene: bpy.types.Scene, assets_dir: Path, outline_mode: str) -> dict[str, int]:
     outline_material = _create_outline_material()
+    anime_assets = _anime_assets_dir(assets_dir)
+    textures_dir = anime_assets / "textures"
+    imported_chars = 0
+    imported_props = 0
+    chars_dir = anime_assets / "characters"
+    props_dir = anime_assets / "props"
+    if chars_dir.exists():
+        for char_model in sorted(chars_dir.glob("*.obj")):
+            before = {obj.name_full for obj in scene.objects}
+            bpy.ops.wm.obj_import(filepath=str(char_model))
+            after = [obj for obj in scene.objects if obj.name_full not in before]
+            if any(obj.type == "MESH" for obj in after):
+                imported_chars += 1
+            for obj in after:
+                if obj.type == "MESH":
+                    obj["mo_role"] = "subject"
+    if props_dir.exists():
+        for prop_model in sorted(props_dir.glob("*.obj")):
+            before = {obj.name_full for obj in scene.objects}
+            bpy.ops.wm.obj_import(filepath=str(prop_model))
+            after = [obj for obj in scene.objects if obj.name_full not in before]
+            if any(obj.type == "MESH" for obj in after):
+                imported_props += 1
     mesh_count = 0
+    outline_thickness = float(os.getenv("MONEYOS_ANIME3D_OUTLINE_GEOM", "0.018"))
     for obj in scene.objects:
         if obj.type != "MESH":
             continue
         mesh_count += 1
-        _apply_toon_material(obj, outline_material)
+        texture_bundle = _resolve_texture_bundle(textures_dir, obj.name)
+        _apply_toon_material(obj, outline_material, texture_bundle, hardness=1.5, outline_thickness=outline_thickness)
     _apply_outlines(scene, outline_mode)
-    anime_assets = _anime_assets_dir(assets_dir)
-    characters = sorted((anime_assets / "characters").glob("*.obj")) if (anime_assets / "characters").exists() else []
-    props = sorted((anime_assets / "props").glob("*.obj")) if (anime_assets / "props").exists() else []
     print("[STYLE] applied anime toon shaders")
-    print(f"[ASSETS] loaded characters={len(characters)} props={len(props)}")
-    return {"characters": len(characters), "props": len(props), "meshes_styled": mesh_count}
+    print(f"[ASSETS] loaded characters={imported_chars} props={imported_props}")
+    return {"characters": imported_chars, "props": imported_props, "meshes_styled": mesh_count}
 
 
 def _create_scene(
@@ -1468,6 +1648,8 @@ def _build_shot_plan(
     "DRAMATIC_KEY",
     "SILHOUETTE_BACKLIGHT",
 ]),
+            "lighting_intensity": round(rng.uniform(0.85, 1.35), 2),
+            "lighting_color": rng.choice(["#9BB8FF", "#FFD9B3", "#FFFFFF", "#FFB8CC"]),
             "impact": impact,
         }
         if impact and shot["lighting_preset"] == "DARK_CONTRAST":
@@ -1488,29 +1670,70 @@ def _apply_lighting_preset(scene: bpy.types.Scene, preset: str) -> None:
     key = lights.get("key")
     fill = lights.get("fill")
     rim = lights.get("rim")
+    intensity_mult = 1.0
+    color = (1.0, 1.0, 1.0)
+    if "|" in preset:
+        segments = preset.split("|")
+        preset = segments[0]
+        for token in segments[1:]:
+            if token.startswith("intensity="):
+                try:
+                    intensity_mult = max(0.2, min(3.0, float(token.split("=", 1)[1])))
+                except ValueError:
+                    pass
+            if token.startswith("color="):
+                raw = token.split("=", 1)[1].strip()
+                if raw.startswith("#") and len(raw) == 7:
+                    color = (
+                        int(raw[1:3], 16) / 255.0,
+                        int(raw[3:5], 16) / 255.0,
+                        int(raw[5:7], 16) / 255.0,
+                    )
     if preset == "RIM_HEAVY":
         if key and key.data:
-            key.data.energy = 1800
+            key.data.energy = 1800 * intensity_mult
         if fill and fill.data:
-            fill.data.energy = 250
+            fill.data.energy = 250 * intensity_mult
         if rim and rim.data:
-            rim.data.energy = 1450
+            rim.data.energy = 1450 * intensity_mult
+            rim.data.color = color
         _set_world_strength(scene, 0.05)
+    elif preset == "DRAMATIC_KEY":
+        if key and key.data:
+            key.data.energy = 2800 * intensity_mult
+            key.data.color = color
+        if fill and fill.data:
+            fill.data.energy = 140 * intensity_mult
+        if rim and rim.data:
+            rim.data.energy = 1000 * intensity_mult
+        _set_world_strength(scene, 0.02)
+    elif preset == "SILHOUETTE_BACKLIGHT":
+        if key and key.data:
+            key.data.energy = 400 * intensity_mult
+            key.data.color = (0.85, 0.88, 1.0)
+        if fill and fill.data:
+            fill.data.energy = 60 * intensity_mult
+        if rim and rim.data:
+            rim.data.energy = 2600 * intensity_mult
+            rim.data.color = color
+        _set_world_strength(scene, 0.01)
     elif preset == "DARK_CONTRAST":
         if key and key.data:
-            key.data.energy = 2200
+            key.data.energy = 2200 * intensity_mult
         if fill and fill.data:
-            fill.data.energy = 160
+            fill.data.energy = 160 * intensity_mult
         if rim and rim.data:
-            rim.data.energy = 900
+            rim.data.energy = 900 * intensity_mult
+            rim.data.color = color
         _set_world_strength(scene, 0.03)
     elif preset == "EXPLOSION_FLASH":
         if key and key.data:
-            key.data.energy = 2600
+            key.data.energy = 2600 * intensity_mult
         if fill and fill.data:
-            fill.data.energy = 1400
+            fill.data.energy = 1400 * intensity_mult
         if rim and rim.data:
-            rim.data.energy = 1800
+            rim.data.energy = 1800 * intensity_mult
+            rim.data.color = color
         _set_world_strength(scene, 0.35)
 
 
@@ -2550,8 +2773,11 @@ def main() -> None:
         scene.frame_end = shot_end
         if camera_obj:
             _apply_shot_camera(scene, camera_obj, subject_obj, shot, next_shot=shot_plan[idx] if idx < len(shot_plan) else None)
-        _apply_lighting_preset(scene, str(shot.get("lighting_preset", "DARK_CONTRAST")))
-        print(f"[LIGHTING] preset = {shot.get('lighting_preset', 'DARK_CONTRAST')} shot={idx}/{len(shot_plan)}")
+        lighting_preset = str(shot.get("lighting_preset", "DARK_CONTRAST"))
+        lighting_intensity = float(shot.get("lighting_intensity", 1.0))
+        lighting_color = str(shot.get("lighting_color", "#FFFFFF"))
+        _apply_lighting_preset(scene, f"{lighting_preset}|intensity={lighting_intensity}|color={lighting_color}")
+        print(f"[LIGHTING] preset = {lighting_preset} shot={idx}/{len(shot_plan)}")
         _apply_impact_vfx(scene, shot, args.vfx_emission_strength)
         print(
             f"[SHOT {idx}/{len(shot_plan)}] pre-hold={shot.get('pre_hold_frames', 0)} "
@@ -2621,5 +2847,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
