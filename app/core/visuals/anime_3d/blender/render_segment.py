@@ -52,6 +52,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--environment", default="room")
     parser.add_argument("--beat-plan", default="")
     parser.add_argument("--character-asset", default="")
+    parser.add_argument("--character-variation", default="")
     parser.add_argument("--mode", default="default")
     parser.add_argument("--style-preset", default="default")
     parser.add_argument("--outline-mode", default="freestyle")
@@ -556,74 +557,11 @@ def _select_animation_assets(anim_candidates: list[Path]) -> dict[str, Path | No
     return selections
 
 def _create_procedural_humanoid(name: str, location: tuple[float, float, float]) -> tuple[bpy.types.Object, int]:
-    print(f"[ANIME3D_CHAR] source=generated name={name}")
-    bpy.ops.object.empty_add(type="PLAIN_AXES", location=location)
-    root = bpy.context.active_object
-    root.name = name
-    material = bpy.data.materials.new(name=f"{name}_ProceduralMaterial")
-    material.use_nodes = True
-    nodes = material.node_tree.nodes
-    principled = nodes.get("Principled BSDF")
-    if principled:
-        principled.inputs["Base Color"].default_value = (0.78, 0.7, 0.66, 1.0)
-        principled.inputs["Roughness"].default_value = 0.25
-        principled.inputs["Emission"].default_value = (0.08, 0.06, 0.05, 1.0)
-        principled.inputs["Emission Strength"].default_value = 0.08
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.35, depth=1.1, location=(location[0], location[1], 0.95))
-    torso = bpy.context.active_object
-    torso.name = f"{name}_Torso"
-    torso.scale.x = 0.85
-    torso.scale.y = 0.6
-    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.25, location=(location[0], location[1], 1.7))
-    head = bpy.context.active_object
-    head.name = f"{name}_Head"
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.08, depth=0.7, location=(location[0] + 0.45, location[1], 1.2))
-    arm_r = bpy.context.active_object
-    arm_r.name = f"{name}_Arm_R"
-    arm_r.rotation_euler = (0.0, math.radians(90), 0.0)
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.08, depth=0.7, location=(location[0] - 0.45, location[1], 1.2))
-    arm_l = bpy.context.active_object
-    arm_l.name = f"{name}_Arm_L"
-    arm_l.rotation_euler = (0.0, math.radians(90), 0.0)
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.1, depth=0.8, location=(location[0] + 0.18, location[1], 0.35))
-    leg_r = bpy.context.active_object
-    leg_r.name = f"{name}_Leg_R"
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.1, depth=0.8, location=(location[0] - 0.18, location[1], 0.35))
-    leg_l = bpy.context.active_object
-    leg_l.name = f"{name}_Leg_L"
-    for obj in (torso, head, arm_r, arm_l, leg_r, leg_l):
-        obj.parent = root
-        if obj.data.materials:
-            obj.data.materials[0] = material
-        else:
-            obj.data.materials.append(material)
-    if name.lower() == "hero":
-        for obj in (torso, head, arm_r, arm_l, leg_r, leg_l):
-            obj["mo_role"] = "subject"
-    return root, 6
+    raise RuntimeError("Procedural primitive humanoids are disabled for anime pipeline.")
 
 
 def _animate_procedural_humanoid(root: bpy.types.Object, total_frames: int) -> None:
-    if total_frames <= 1:
-        return
-    start = 1
-    mid = max(2, total_frames // 2)
-    end = total_frames
-    root.location.y = root.location.y
-    root.keyframe_insert(data_path="location", frame=start)
-    root.location.y += 0.05
-    root.keyframe_insert(data_path="location", frame=mid)
-    root.location.y -= 0.05
-    root.keyframe_insert(data_path="location", frame=end)
-    for child in root.children:
-        if "Arm_" not in child.name:
-            continue
-        child.rotation_euler.z = 0.0
-        child.keyframe_insert(data_path="rotation_euler", frame=start)
-        child.rotation_euler.z = math.radians(4)
-        child.keyframe_insert(data_path="rotation_euler", frame=mid)
-        child.rotation_euler.z = math.radians(-4)
-        child.keyframe_insert(data_path="rotation_euler", frame=end)
+    del root, total_frames
 
 
 def _build_procedural_scene(
@@ -631,50 +569,8 @@ def _build_procedural_scene(
     total_frames: int,
     force_procedural_humanoid: bool,
 ) -> bool:
-    bpy.ops.mesh.primitive_plane_add(size=10, location=(0, 0, 0))
-    floor = bpy.context.active_object
-    floor.name = "Floor"
-    bpy.ops.object.light_add(type="AREA", location=(0, -3, 4))
-    light = bpy.context.active_object
-    light.data.energy = 600
-    bpy.ops.object.camera_add(location=(0, -6, 2), rotation=(1.3, 0, 0))
-    camera = bpy.context.active_object
-    scene.camera = camera
-    scene.frame_start = 1
-    scene.frame_end = total_frames
-    procedural_humanoid = False
-    if force_procedural_humanoid:
-        procedural_humanoid = True
-        hero, hero_parts = _create_procedural_humanoid("Hero", (-1.5, 0, 0))
-        enemy, enemy_parts = _create_procedural_humanoid("Enemy", (1.5, 0, 0))
-        print(
-            "[ANIME3D_CHAR] "
-            f"procedural_humanoid=1 created=Hero parts={hero_parts} "
-            f"created=Enemy parts={enemy_parts}"
-        )
-    else:
-        bpy.ops.mesh.primitive_cube_add(size=1.0, location=(-1.5, 0, 0.5))
-        hero = bpy.context.active_object
-        hero.name = "Hero"
-        hero["mo_role"] = "subject"
-        bpy.ops.mesh.primitive_cube_add(size=1.0, location=(1.5, 0, 0.5))
-        enemy = bpy.context.active_object
-        enemy.name = "Enemy"
-    _animate_procedural_humanoid(hero, total_frames)
-    _animate_procedural_humanoid(enemy, total_frames)
-    hero.location = (-1.5, 0, 0)
-    hero.keyframe_insert(data_path="location", frame=1)
-    hero.location = (-0.4, 0.0, 0)
-    hero.keyframe_insert(data_path="location", frame=total_frames)
-    enemy.location = (1.5, 0, 0)
-    enemy.keyframe_insert(data_path="location", frame=1)
-    enemy.location = (0.4, 0.0, 0)
-    enemy.keyframe_insert(data_path="location", frame=total_frames)
-    camera.location = (0, -6, 2)
-    camera.keyframe_insert(data_path="location", frame=1)
-    camera.location = (0, -5, 2.5)
-    camera.keyframe_insert(data_path="location", frame=total_frames)
-    return procedural_humanoid
+    del scene, total_frames, force_procedural_humanoid
+    raise RuntimeError("Procedural primitive scenes are disabled for anime pipeline.")
 
 
 def _find_character_asset(workdir: Path) -> Path | None:
@@ -698,7 +594,10 @@ def _import_character_asset(asset_path: Path) -> tuple[bpy.types.Object | None, 
     elif ext == ".fbx":
         bpy.ops.import_scene.fbx(filepath=str(asset_path))
     elif ext == ".vrm":
-        return None, "vrm_unsupported"
+        if hasattr(bpy.ops.import_scene, "vrm"):
+            bpy.ops.import_scene.vrm(filepath=str(asset_path))
+        else:
+            raise RuntimeError("VRM importer add-on is not enabled; run VRM add-on installer first.")
     meshes = [obj for obj in bpy.context.selected_objects if obj.type == "MESH"]
     if not meshes:
         meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
@@ -746,11 +645,9 @@ def _ensure_character(
         if subject:
             print(f"[ANIME3D_CHAR] source=asset_lib name={subject.name} format={fmt}")
             return subject, "asset_lib", fmt
-    _create_procedural_humanoid("Hero", (0.0, 0.0, 0.0))
-    subject = _get_subject_object(scene)
-    if subject is None:
-        raise RuntimeError("Unable to generate procedural character")
-    return subject, "generated", "procedural"
+    raise RuntimeError(
+        "Anime character asset was not available. Automatic fallback to primitive humanoids is disabled."
+    )
 
 
 def _apply_outlines(scene: bpy.types.Scene, mode: str) -> None:
@@ -941,6 +838,36 @@ def _resolve_texture_bundle(textures_dir: Path, object_name: str) -> dict[str, P
     return bundle
 
 
+def _apply_character_variation(scene: bpy.types.Scene, variation: dict[str, object]) -> None:
+    hair_color = tuple(variation.get("hair_color", (0.16, 0.2, 0.42, 1.0)))
+    eye_color = tuple(variation.get("eye_color", (0.23, 0.72, 0.52, 1.0)))
+    clothing_color = tuple(variation.get("clothing_color", (0.18, 0.21, 0.55, 1.0)))
+    skin_shift = float(variation.get("skin_tone_shift", 0.0))
+    for obj in scene.objects:
+        if obj.type != "MESH":
+            continue
+        for slot in obj.material_slots:
+            mat = slot.material
+            if mat is None or not mat.use_nodes or not mat.node_tree:
+                continue
+            principled = mat.node_tree.nodes.get("Principled BSDF")
+            if principled is None:
+                continue
+            name = f"{obj.name}_{mat.name}".lower()
+            if "hair" in name:
+                principled.inputs["Base Color"].default_value = hair_color
+            elif any(tag in name for tag in ("eye", "iris", "pupil")):
+                principled.inputs["Base Color"].default_value = eye_color
+            elif any(tag in name for tag in ("cloth", "shirt", "jacket", "skirt", "pant")):
+                principled.inputs["Base Color"].default_value = clothing_color
+            elif any(tag in name for tag in ("skin", "face", "body", "arm", "leg")):
+                base = list(principled.inputs["Base Color"].default_value)
+                base[0] = min(1.0, max(0.0, base[0] + skin_shift))
+                base[1] = min(1.0, max(0.0, base[1] + (skin_shift * 0.6)))
+                base[2] = min(1.0, max(0.0, base[2] + (skin_shift * 0.4)))
+                principled.inputs["Base Color"].default_value = tuple(base)
+
+
 def _apply_toon_material(
     obj: bpy.types.Object,
     outline_material: bpy.types.Material,
@@ -1057,25 +984,8 @@ def _create_city_env(outline_material: bpy.types.Material) -> None:
 
 
 def _create_character(name: str, location: tuple[float, float, float]) -> dict[str, bpy.types.Object]:
-    bpy.ops.mesh.primitive_cylinder_add(radius=0.4, depth=1.2, location=(location[0], location[1], location[2] + 1.2))
-    body = bpy.context.active_object
-    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.45, location=(location[0], location[1], location[2] + 2.2))
-    head = bpy.context.active_object
-    bpy.ops.mesh.primitive_cube_add(size=0.25, location=(location[0], location[1] + 0.35, location[2] + 2.0))
-    jaw = bpy.context.active_object
-    if name == "hero":
-        body["mo_role"] = "subject"
-        head["mo_role"] = "subject"
-        jaw["mo_role"] = "subject"
-    for offset in (-0.5, 0.5):
-        bpy.ops.mesh.primitive_cylinder_add(radius=0.15, depth=0.8, location=(location[0] + offset, location[1], location[2] + 0.6))
-        leg = bpy.context.active_object
-        leg.rotation_euler.x = math.radians(90)
-    for offset in (-0.6, 0.6):
-        bpy.ops.mesh.primitive_cylinder_add(radius=0.12, depth=0.9, location=(location[0] + offset, location[1], location[2] + 1.6))
-        arm = bpy.context.active_object
-        arm.rotation_euler.y = math.radians(90)
-    return {"body": body, "head": head, "jaw": jaw}
+    del name, location
+    raise RuntimeError("Primitive character template generation is disabled.")
 
 
 def _create_outline_material() -> bpy.types.Material:
@@ -1142,7 +1052,7 @@ def _apply_anime_visual_style(scene: bpy.types.Scene, assets_dir: Path, outline_
     imported_props = 0
     chars_dir = anime_assets / "characters"
     props_dir = anime_assets / "props"
-    if chars_dir.exists():
+    if chars_dir.exists() and _get_subject_object(scene) is None:
         for char_model in sorted(chars_dir.glob("*.obj")):
             before = {obj.name_full for obj in scene.objects}
             bpy.ops.wm.obj_import(filepath=str(char_model))
@@ -1180,6 +1090,7 @@ def _create_scene(
     hero_asset: Path | None,
     enemy_asset: Path | None,
     default_env: str,
+    style_preset: str = "default",
 ) -> dict[str, bpy.types.Object | None]:
     scene = bpy.context.scene
     outline_material = _create_outline_material()
@@ -1188,7 +1099,9 @@ def _create_scene(
     enemy_armature = None
     hero_jaw = None
     hero_body = None
-    if asset_mode == "local":
+    if str(style_preset).strip().lower() == "anime_visual":
+        _build_environment_template(default_env)
+    elif asset_mode == "local":
         asset_dirs = _resolve_asset_dirs(assets_dir)
         env_path = env_blend or (
             (asset_dirs["envs"] / "city.blend") if asset_dirs["envs"] else None
@@ -1224,19 +1137,13 @@ def _create_scene(
                 if child.type == "MESH":
                     child["mo_role"] = "subject"
         elif hero_path is None or not hero_path.exists():
-            hero_root, _ = _create_procedural_humanoid("hero", (0, 0, 0))
-            hero_body = hero_root
+            raise RuntimeError("Character asset missing; primitive fallback is disabled.")
         if enemy_armature:
             enemy_armature.location = (3, -2, 0)
         elif enemy_path is None or not enemy_path.exists():
-            _create_procedural_humanoid("enemy", (3, -2, 0))
+            raise RuntimeError("Enemy asset missing; primitive fallback is disabled.")
     else:
-        hero = _create_character("hero", (0, 0, 0))
-        enemy = _create_character("enemy", (2.5, -2.0, 0))
-        hero_jaw = hero["jaw"]
-        hero_body = hero["body"]
-        for obj in (hero["body"], hero["head"], hero["jaw"], enemy["body"], enemy["head"], enemy["jaw"]):
-            _apply_toon_material(obj, outline_material)
+        raise RuntimeError("Auto primitive character generation is disabled. Provide an anime character asset.")
 
     bpy.ops.object.camera_add(location=(4, -6, 2.5), rotation=(math.radians(75), 0, math.radians(35)))
     camera = bpy.context.active_object
@@ -1894,7 +1801,11 @@ def _load_character_asset(assets_dir: Path, character_asset: str, warnings: list
             objects.extend(list(collection.all_objects))
         return _normalize_character(objects)
     if asset_path.suffix.lower() == ".vrm":
-        raise RuntimeError("VRM import not installed; use .blend character assets instead.")
+        if not hasattr(bpy.ops.import_scene, "vrm"):
+            raise RuntimeError("VRM importer add-on is not enabled")
+        bpy.ops.import_scene.vrm(filepath=str(asset_path))
+        meshes = [obj for obj in bpy.context.selected_objects if obj.type == "MESH"]
+        return _normalize_character(meshes)
     warnings.append("character_asset_unsupported")
     print(f"[PHASE2] unsupported character asset: {asset_path}")
     return []
@@ -2657,15 +2568,36 @@ def main() -> None:
         if beat_plan and env_candidates:
             selected_env = _apply_environment_schedule_local(beat_plan, args.fps, env_candidates, selected_env)
     print(f"[PHASE2] env={selected_env} character={args.character_asset or 'none'} preset={preset}")
-    objects = _create_scene(assets_dir, args.asset_mode, env_blend, hero_asset, enemy_asset, selected_env)
-    style_counts = {"characters": 0, "props": 0, "meshes_styled": 0}
-    if str(args.style_preset).strip().lower() == "anime_visual":
-        style_counts = _apply_anime_visual_style(scene, assets_dir, args.outline_mode)
-    _ensure_visual_density(scene, args.duration, args.fps)
+    objects = _create_scene(
+        assets_dir,
+        args.asset_mode,
+        env_blend,
+        hero_asset,
+        enemy_asset,
+        selected_env,
+        style_preset=args.style_preset,
+    )
     character_meshes = _load_character_asset(assets_dir, args.character_asset, warnings)
     if character_meshes:
         for obj in character_meshes:
             obj["mo_role"] = "subject"
+    style_counts = {"characters": 0, "props": 0, "meshes_styled": 0}
+    if str(args.style_preset).strip().lower() == "anime_visual":
+        style_counts = _apply_anime_visual_style(scene, assets_dir, args.outline_mode)
+    _ensure_visual_density(scene, args.duration, args.fps)
+    if args.character_variation:
+        try:
+            variation = json.loads(args.character_variation)
+        except json.JSONDecodeError:
+            variation = {}
+        _apply_character_variation(scene, variation)
+    if str(args.style_preset).strip().lower() == "anime_visual":
+        try:
+            from app.core.validators.anime_character_validator import validate_anime_character_scene
+
+            validate_anime_character_scene(scene)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Anime character validation failed: {exc}") from exc
     visibility_info = _setup_visibility_scene(scene, objects.get("camera"), rng)
     _add_vfx(
         assets_dir,

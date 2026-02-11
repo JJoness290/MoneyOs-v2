@@ -49,6 +49,9 @@ from app.core.visuals.anime_3d.storage import (
 )
 from src.utils.cli_args import add_opt, validate_no_empty_value_flags
 from app.core.visuals.anime_3d.validators import validate_episode
+from app.core.visuals.anime_3d.assets.character_loader import ensure_characters, pick_character
+from app.core.visuals.anime_3d.assets.character_variation import build_character_variation
+from app.core.visuals.anime_3d.blender.install_vrm_addon import ensure_vrm_addon_ready
 from app.core.visuals.ffmpeg_utils import has_nvenc, run_ffmpeg, _fallback_to_x264, _uses_nvenc
 from src.utils.win_paths import planned_paths_preflight
 from src.moneyos.auto_assets.cc0_bootstrap_anime3d import ensure_cc0_anime3d_assets
@@ -726,6 +729,8 @@ def render_anime_3d_60s(
         mode = str(overrides["mode"]).strip().lower()
     if overrides.get("seed") is not None:
         seed_value = int(overrides["seed"])
+    if seed_value is None:
+        seed_value = int(hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:8], 16)
     if overrides.get("enable_sfx") is not None:
         enable_sfx = bool(overrides["enable_sfx"])
     if overrides.get("enable_lipsync") is not None:
@@ -761,6 +766,15 @@ def render_anime_3d_60s(
         style_preset = str(overrides["style_preset"])
         if style_preset == "key_art":
             style_preset = "default"
+    selected_character = None
+    character_variation = build_character_variation(seed_value)
+    if str(style_preset).strip().lower() == "anime_visual":
+        assets_root = get_assets_root()
+        cache_root = (get_output_root() / "cache").resolve()
+        characters = ensure_characters(assets_root, cache_root)
+        selected_character = pick_character(seed_value, characters)
+        character_asset = str(selected_character.local_path)
+        ensure_vrm_addon_ready(Path(ensure_blender_path()), cache_root, selected_character.local_path)
     if overrides.get("outline_mode"):
         outline_mode = str(overrides["outline_mode"])
     if overrides.get("postfx") is not None:
@@ -881,11 +895,12 @@ def render_anime_3d_60s(
     add_opt(blender_args, "--asset-mode", asset_mode)
     add_opt(blender_args, "--strict-assets", strict_assets)
     add_opt(blender_args, "--beat-plan", output_dir / "script_plan.json")
-    if phase15:
+    if phase15 or str(style_preset).strip().lower() == "anime_visual":
         add_opt(blender_args, "--engine", "cycles")
     add_opt(blender_args, "--render-preset", render_preset)
     add_opt(blender_args, "--environment", environment)
     add_opt(blender_args, "--character-asset", character_asset)
+    add_opt(blender_args, "--character-variation", character_variation.to_json())
     add_opt(blender_args, "--mode", mode)
     add_opt(blender_args, "--seed", seed_value)
     add_opt(blender_args, "--fingerprint", fingerprint)
