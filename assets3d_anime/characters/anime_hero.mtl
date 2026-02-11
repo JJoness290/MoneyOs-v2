@@ -1,0 +1,5 @@
+newmtl hero_base
+Kd 0.82 0.74 0.88
+map_Kd ../textures/hero_base.png
+map_Bump ../textures/hero_normal.png
+map_Ks ../textures/hero_spec.png

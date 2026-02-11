@@ -1,0 +1,13 @@
+{
+  "name": "anime_hero_basic_rig",
+  "bones": [
+    {"name": "root", "parent": null},
+    {"name": "spine", "parent": "root"},
+    {"name": "neck", "parent": "spine"},
+    {"name": "head", "parent": "neck"},
+    {"name": "arm.L", "parent": "spine"},
+    {"name": "arm.R", "parent": "spine"},
+    {"name": "leg.L", "parent": "root"},
+    {"name": "leg.R", "parent": "root"}
+  ]
+}

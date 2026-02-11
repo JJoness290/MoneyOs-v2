@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MoneyOS – Video Generator</title>
+  <style>
+    body {
+      font-family: "Segoe UI", sans-serif;
+      background: #0f1115;
+      color: #f5f6f7;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+    }
+    .panel {
+      background: #1a1d24;
+      padding: 32px;
+      border-radius: 16px;
+      width: 460px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    }
+    h1 {
+      font-size: 24px;
+      margin-bottom: 24px;
+    }
+    button {
+      width: 100%;
+      padding: 14px;
+      background: #4d7cff;
+      border: none;
+      color: #fff;
+      font-size: 16px;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .status {
+      margin-top: 24px;
+      padding: 12px;
+      background: #12141a;
+      border-radius: 10px;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+    .label {
+      font-weight: 600;
+      color: #9bb2ff;
+    }
+    .output {
+      margin-top: 12px;
+      word-break: break-all;
+    }
+    .progress-bar {
+      margin-top: 8px;
+      height: 8px;
+      background: #2a2f3a;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .progress-bar span {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, #4d7cff, #77a1ff);
+      width: 0%;
+      transition: width 0.3s ease;
+    }
+    .logs {
+      margin-top: 12px;
+      max-height: 140px;
+      overflow-y: auto;
+      background: #0f1115;
+      padding: 8px;
+      border-radius: 8px;
+      font-size: 12px;
+    }
+    .logs div {
+      padding: 2px 0;
+    }
+    a {
+      color: #9bb2ff;
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <h1>MoneyOS – Video Generator</h1>
+    <label class="label" for="stylePreset">Style preset</label>
+    <select id="stylePreset" style="width:100%;margin:8px 0 14px 0;padding:10px;border-radius:8px;background:#12141a;color:#f5f6f7;border:1px solid #2a2f3a;">
+      <option value="default">default</option>
+      <option value="balanced">balanced</option>
+      <option value="anime_visual">anime_visual</option>
+    </select>
+    <button id="generateButton">Start anime_3d 60s</button>
+    <div class="status">
+      <div><span class="label">Endpoint:</span> <span id="endpointText">POST /jobs/anime-episode-60s-3d</span></div>
+      <div><span class="label">Stage:</span> <span id="stageText">Idle</span></div>
+      <div><span class="label">Status:</span> <span id="statusText">Idle</span></div>
+      <div><span class="label">Progress:</span> <span id="progressText">0%</span></div>
+      <div><span class="label">ETA:</span> <span id="etaText">--:--</span></div>
+      <div><span class="label">Shot:</span> <span id="shotText">-</span></div>
+      <div><span class="label">Smoothing:</span> <span id="smoothingText">-</span></div>
+      <div class="progress-bar"><span id="progressBar"></span></div>
+      <div class="output"><span class="label">Output:</span> <span id="outputPath">-</span></div>
+      <div><span class="label">Duration:</span> <span id="outputDuration">-</span></div>
+      <div><span class="label">Download:</span> <span id="downloadLink">-</span></div>
+      <div><span class="label">STATUS:</span> <span id="finalStatus">Idle</span></div>
+      <div class="logs" id="logTail"></div>
+    </div>
+    <div class="status">
+      <div><span class="label">CPU:</span> <span id="cpuSpec">-</span></div>
+      <div><span class="label">RAM:</span> <span id="ramSpec">-</span></div>
+      <div><span class="label">GPU:</span> <span id="gpuSpec">-</span></div>
+      <div><span class="label">Caps:</span> <span id="capSpec">-</span></div>
+    </div>
+    <div class="status">
+      <div><span class="label">Backend:</span> <span id="backendStatus">-</span></div>
+      <div><span class="label">Blender:</span> <span id="blenderStatus">-</span></div>
+      <div><span class="label">GPU Flags:</span> <span id="gpuFlags">-</span></div>
+    </div>
+  </div>
+
+  <script>
+    const generateButton = document.getElementById('generateButton');
+    const statusText = document.getElementById('statusText');
+    const stageText = document.getElementById('stageText');
+    const progressText = document.getElementById('progressText');
+    const etaText = document.getElementById('etaText');
+    const progressBar = document.getElementById('progressBar');
+    const shotText = document.getElementById('shotText');
+    const smoothingText = document.getElementById('smoothingText');
+    const stylePreset = document.getElementById('stylePreset');
+    const outputPath = document.getElementById('outputPath');
+    const outputDuration = document.getElementById('outputDuration');
+    const downloadLink = document.getElementById('downloadLink');
+    const finalStatus = document.getElementById('finalStatus');
+    const logTail = document.getElementById('logTail');
+    const endpointText = document.getElementById('endpointText');
+    const cpuSpec = document.getElementById('cpuSpec');
+    const ramSpec = document.getElementById('ramSpec');
+    const gpuSpec = document.getElementById('gpuSpec');
+    const capSpec = document.getElementById('capSpec');
+    const backendStatus = document.getElementById('backendStatus');
+    const blenderStatus = document.getElementById('blenderStatus');
+    const gpuFlags = document.getElementById('gpuFlags');
+    let polling = null;
+    let eventSource = null;
+
+    function appendLog(message) {
+      const line = document.createElement('div');
+      line.textContent = message;
+      logTail.appendChild(line);
+      logTail.scrollTop = logTail.scrollHeight;
+    }
+
+    function updateStatus(data) {
+      statusText.textContent = data.status || 'Idle';
+      stageText.textContent = data.stage || data.status || 'Idle';
+      progressText.textContent = data.progress_pct ? `${data.progress_pct}%` : '0%';
+      etaText.textContent = data.eta_mmss || '--:--';
+      progressBar.style.width = data.progress_pct ? `${data.progress_pct}%` : '0%';
+      if (data.shot_index && data.shot_total) {
+        const preset = data.shot_preset ? ` (${data.shot_preset})` : '';
+        shotText.textContent = `${data.shot_index}/${data.shot_total}${preset}`;
+        if (typeof data.pre_hold_frames === 'number' && typeof data.post_ease_frames === 'number') {
+          smoothingText.textContent = `pre-hold=${data.pre_hold_frames} post-ease=${data.post_ease_frames}`;
+        }
+      } else {
+        shotText.textContent = '-';
+        smoothingText.textContent = '-';
+      }
+      appendLog(data.status || 'Status update');
+
+      if (data.success) {
+        outputPath.textContent = data.video_path || '-';
+        outputDuration.textContent = data.duration ? `${data.duration.toFixed(2)}s` : '-';
+        finalStatus.textContent = 'SUCCESS';
+        if (data.video_path) {
+          const filename = data.video_path.split('\\').pop().split('/').pop();
+          downloadLink.innerHTML = `<a href="/videos/${filename}" target="_blank">Download</a>`;
+        }
+        generateButton.disabled = false;
+        if (eventSource) {
+          eventSource.close();
+        }
+        if (polling) {
+          clearInterval(polling);
+        }
+      } else if (data.status && data.status.startsWith('Error')) {
+        finalStatus.textContent = 'FAILED';
+        generateButton.disabled = false;
+        if (eventSource) {
+          eventSource.close();
+        }
+        if (polling) {
+          clearInterval(polling);
+        }
+      }
+    }
+
+    async function loadSystemSpecs() {
+      try {
+        const response = await fetch('/api/system/specs');
+        if (!response.ok) {
+          throw new Error('Specs unavailable');
+        }
+        const data = await response.json();
+        const cpu = data.cpu_model ? `${data.cpu_model} (${data.physical_cores}C/${data.logical_threads}T)` : '-';
+        const ram = data.total_ram_gb ? `${data.total_ram_gb} GB` : '-';
+        const gpus = Array.isArray(data.gpus) && data.gpus.length ? data.gpus.join(', ') : 'Unavailable';
+        const caps = data.caps
+          ? `CPU ${data.caps.cpu_percent}% / RAM ${data.caps.ram_percent}% / GPU ${data.caps.gpu_percent}%`
+          : '-';
+        cpuSpec.textContent = cpu;
+        ramSpec.textContent = ram;
+        gpuSpec.textContent = gpus;
+        capSpec.textContent = caps;
+      } catch (error) {
+        console.error(error);
+        cpuSpec.textContent = 'Unavailable';
+        ramSpec.textContent = 'Unavailable';
+        gpuSpec.textContent = 'Unavailable';
+        capSpec.textContent = '-';
+      }
+    }
+
+    async function loadDoctorStatus() {
+      try {
+        const healthResponse = await fetch('/health');
+        const health = await healthResponse.json();
+        backendStatus.textContent = healthResponse.ok ? `OK (${health.version})` : 'Unavailable';
+        const envFlags = health.env_flags || {};
+        gpuFlags.textContent = `USE_GPU=${envFlags.MONEYOS_USE_GPU || 'auto'} FORCE_GPU=${envFlags.MONEYOS_ANIME3D_FORCE_GPU || '1'}`;
+      } catch (error) {
+        backendStatus.textContent = 'Unavailable';
+        gpuFlags.textContent = '-';
+      }
+      try {
+        const debugResponse = await fetch('/debug/status');
+        const debug = await debugResponse.json();
+        if (debug.blender && debug.blender.found) {
+          blenderStatus.textContent = `${debug.blender.version || 'found'} @ ${debug.blender.path || 'unknown'}`;
+        } else if (debug.blender && debug.blender.error) {
+          blenderStatus.textContent = `Unavailable (${debug.blender.error})`;
+        } else {
+          blenderStatus.textContent = 'Unavailable';
+        }
+      } catch (error) {
+        blenderStatus.textContent = 'Unavailable';
+      }
+    }
+
+    async function pollStatus(jobId) {
+      try {
+        const response = await fetch(`/status/${jobId}`);
+        if (!response.ok) {
+          throw new Error('Status unavailable');
+        }
+        const data = await response.json();
+        updateStatus(data);
+      } catch (error) {
+        console.error(error);
+        generateButton.disabled = false;
+        if (polling) {
+          clearInterval(polling);
+        }
+      }
+    }
+
+    function subscribeEvents(jobId) {
+      if (eventSource) {
+        eventSource.close();
+      }
+      eventSource = new EventSource(`/events/${jobId}`);
+      eventSource.addEventListener('status', (event) => {
+        const data = JSON.parse(event.data);
+        updateStatus(data);
+      });
+      eventSource.addEventListener('error', () => {
+        if (!polling) {
+          polling = setInterval(() => pollStatus(jobId), 1000);
+        }
+      });
+    }
+
+    generateButton.addEventListener('click', async () => {
+      generateButton.disabled = true;
+      statusText.textContent = 'Generating script...';
+      stageText.textContent = 'Starting';
+      progressText.textContent = '0%';
+      etaText.textContent = '--:--';
+      progressBar.style.width = '0%';
+      outputPath.textContent = '-';
+      outputDuration.textContent = '-';
+      downloadLink.textContent = '-';
+      finalStatus.textContent = 'In Progress';
+      logTail.innerHTML = '';
+
+      const response = await fetch('/jobs/anime-episode-60s-3d', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ style_preset: stylePreset.value }),
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        finalStatus.textContent = 'FAILED';
+        generateButton.disabled = false;
+        appendLog(`Request failed (${response.status}): ${errorText}`);
+        return;
+      }
+      const data = await response.json();
+      const jobId = data.job_id;
+      if (!jobId) {
+        finalStatus.textContent = 'FAILED';
+        generateButton.disabled = false;
+        appendLog('Job id missing from response.');
+        return;
+      }
+
+      subscribeEvents(jobId);
+      polling = setInterval(() => pollStatus(jobId), 2000);
+    });
+
+    loadSystemSpecs();
+    loadDoctorStatus();
+  </script>
+</body>
+</html>

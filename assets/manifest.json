@@ -1,0 +1,228 @@
+{
+  "assets": {
+    "pinned_asset": {
+      "asset_id": "pinned_asset",
+      "type": "character",
+      "source_url": "local",
+      "license_name": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_proof_path": "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\selftest_pinned.asset",
+      "size_bytes": 4,
+      "score_total": 95,
+      "score_breakdown": {
+        "armature": 40
+      },
+      "pinned": true,
+      "last_used_at": "2026-02-08T22:18:55.127437",
+      "in_use_by_job_ids": [],
+      "local_paths": [
+        "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\selftest_pinned.asset"
+      ]
+    },
+    "inuse_asset": {
+      "asset_id": "inuse_asset",
+      "type": "environment",
+      "source_url": "local",
+      "license_name": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_proof_path": "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\selftest_inuse.asset",
+      "size_bytes": 4,
+      "score_total": 90,
+      "score_breakdown": {
+        "detail": 40
+      },
+      "pinned": false,
+      "last_used_at": "2026-02-08T22:18:55.141594",
+      "in_use_by_job_ids": [
+        "job123"
+      ],
+      "local_paths": [
+        "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\selftest_inuse.asset"
+      ]
+    },
+    "normal_asset": {
+      "asset_id": "normal_asset",
+      "type": "sfx",
+      "source_url": "local",
+      "license_name": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_proof_path": "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\selftest_normal.asset",
+      "size_bytes": 4,
+      "score_total": 10,
+      "score_breakdown": {
+        "license": 40
+      },
+      "pinned": false,
+      "last_used_at": "2026-02-08T22:18:55.153442",
+      "in_use_by_job_ids": [],
+      "local_paths": [
+        "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\selftest_normal.asset"
+      ]
+    },
+    "hero": {
+      "asset_id": "hero",
+      "type": "character",
+      "source_url": "local://generated",
+      "license_name": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_proof_path": "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\licenses\\hero.txt",
+      "size_bytes": 0,
+      "score_total": 90,
+      "score_breakdown": {
+        "armature": 40,
+        "visemes": 20,
+        "textures": 10,
+        "quality": 20
+      },
+      "pinned": false,
+      "last_used_at": "2026-02-09T22:25:35.311759",
+      "in_use_by_job_ids": [],
+      "local_paths": [
+        "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\generated\\hero.blend"
+      ]
+    },
+    "enemy": {
+      "asset_id": "enemy",
+      "type": "character",
+      "source_url": "local://generated",
+      "license_name": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_proof_path": "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\licenses\\enemy.txt",
+      "size_bytes": 0,
+      "score_total": 90,
+      "score_breakdown": {
+        "armature": 40,
+        "visemes": 20,
+        "textures": 10,
+        "quality": 20
+      },
+      "pinned": false,
+      "last_used_at": "2026-02-09T22:25:35.342848",
+      "in_use_by_job_ids": [],
+      "local_paths": [
+        "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\generated\\enemy.blend"
+      ]
+    },
+    "city": {
+      "asset_id": "city",
+      "type": "environment",
+      "source_url": "local://generated",
+      "license_name": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_proof_path": "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\licenses\\city.txt",
+      "size_bytes": 0,
+      "score_total": 80,
+      "score_breakdown": {
+        "detail": 40,
+        "textures": 40
+      },
+      "pinned": false,
+      "last_used_at": "2026-02-09T22:25:35.371161",
+      "in_use_by_job_ids": [],
+      "local_paths": [
+        "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\generated\\city.blend"
+      ]
+    },
+    "street": {
+      "asset_id": "street",
+      "type": "environment",
+      "source_url": "local://generated",
+      "license_name": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_proof_path": "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\licenses\\street.txt",
+      "size_bytes": 0,
+      "score_total": 80,
+      "score_breakdown": {
+        "detail": 40,
+        "textures": 40
+      },
+      "pinned": false,
+      "last_used_at": "2026-02-09T22:25:35.400208",
+      "in_use_by_job_ids": [],
+      "local_paths": [
+        "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\generated\\street.blend"
+      ]
+    },
+    "studio": {
+      "asset_id": "studio",
+      "type": "environment",
+      "source_url": "local://generated",
+      "license_name": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_proof_path": "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\licenses\\studio.txt",
+      "size_bytes": 0,
+      "score_total": 80,
+      "score_breakdown": {
+        "detail": 40,
+        "textures": 40
+      },
+      "pinned": false,
+      "last_used_at": "2026-02-09T22:25:35.431507",
+      "in_use_by_job_ids": [],
+      "local_paths": [
+        "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\generated\\studio.blend"
+      ]
+    },
+    "impact": {
+      "asset_id": "impact",
+      "type": "sfx",
+      "source_url": "local://generated",
+      "license_name": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_proof_path": "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\licenses\\impact.txt",
+      "size_bytes": 132344,
+      "score_total": 70,
+      "score_breakdown": {
+        "license": 40,
+        "sample_rate": 30
+      },
+      "pinned": false,
+      "last_used_at": "2026-02-09T22:25:35.463700",
+      "in_use_by_job_ids": [],
+      "local_paths": [
+        "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\sfx\\impact.wav"
+      ]
+    },
+    "bed": {
+      "asset_id": "bed",
+      "type": "music",
+      "source_url": "local://generated",
+      "license_name": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_proof_path": "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\licenses\\bed.txt",
+      "size_bytes": 132344,
+      "score_total": 70,
+      "score_breakdown": {
+        "license": 40,
+        "sample_rate": 30
+      },
+      "pinned": false,
+      "last_used_at": "2026-02-09T22:25:35.492374",
+      "in_use_by_job_ids": [],
+      "local_paths": [
+        "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\music\\bed.wav"
+      ]
+    },
+    "burst": {
+      "asset_id": "burst",
+      "type": "vfx",
+      "source_url": "local://generated",
+      "license_name": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "license_proof_path": "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\licenses\\burst.txt",
+      "size_bytes": 10910,
+      "score_total": 70,
+      "score_breakdown": {
+        "license": 40,
+        "sample_rate": 30
+      },
+      "pinned": false,
+      "last_used_at": "2026-02-09T22:25:35.521175",
+      "in_use_by_job_ids": [],
+      "local_paths": [
+        "C:\\Users\\joshu\\Documents\\MoneyOs\\assets\\vfx\\burst.png"
+      ]
+    }
+  },
+  "updated_at": "2026-02-09T22:49:54.142322"
+}

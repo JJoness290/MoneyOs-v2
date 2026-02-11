@@ -1,0 +1,25 @@
+{
+  "timestamp": 1770674740.5588474,
+  "stage": "render",
+  "missing_before": [
+    "characters/hero.blend",
+    "characters/enemy.blend",
+    "envs/city.blend",
+    "anims/idle.fbx",
+    "anims/run.fbx",
+    "anims/punch.fbx"
+  ],
+  "installed_files": [],
+  "sources": [],
+  "procedural": [
+    "anims/idle.fbx",
+    "anims/punch.fbx",
+    "anims/run.fbx",
+    "characters/enemy.blend",
+    "characters/hero.blend",
+    "envs/city.blend"
+  ],
+  "errors": [
+    "non-vfx assets require procedural Blender generation"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "installed": [
+    "anims/idle.fbx",
+    "anims/punch.fbx",
+    "anims/run.fbx",
+    "characters/enemy.blend",
+    "characters/hero.blend",
+    "envs/city.blend"
+  ],
+  "file_hashes": {
+    "characters/hero.blend": "6ffdf7b8a269c7d214c7775c01808b2cd6e780c8fb44b8fa3a3abb03858487f7",
+    "characters/enemy.blend": "3e71af42d4e0f4a91be191b98047c6557f9919149cce3d1ffe5c6c397a8eb449",
+    "anims/idle.fbx": "14d15aff9180b766a437126dde7c0297b814b6d0115ce535f2d3391d7811a78f",
+    "anims/run.fbx": "7c3f29e3af0aec02b32eeb044c0eb2ff3639dc9fc0424493135a21f0ad9c82d7",
+    "anims/punch.fbx": "7e74ec4fa094bccf1f044141ebdc1f0e0e02dfe09cd44e33e79588a4769bee70",
+    "envs/city.blend": "1884c35166ed4d6137ab56f37020fcd01b39599bfb78fc6c937e9f777ed136c3"
+  },
+  "sources": [
+    "https://opengameart.org/sites/default/files/Animated%20Human%20by%20%40Quaternius_0.zip",
+    "https://opengameart.org/sites/default/files/Street%20Pack%20by%20%40Quaternius.zip"
+  ],
+  "errors": [],
+  "duration_seconds": 13.73
+}

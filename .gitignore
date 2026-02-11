@@ -1,0 +1,36 @@
+# --- Python / venv ---
+.venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Jupyter / tooling caches ---
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- OS / editor ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- MoneyOS outputs (IMPORTANT) ---
+output/
+work/
+cache/
+logs/
+tmp/
+renders/
+exports/
+
+# --- Large model / asset caches (often huge) ---
+**/huggingface/
+**/.cache/
+**/torch_cache/
+**/pip-wheel-metadata/

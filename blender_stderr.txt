@@ -1,0 +1,11 @@
+C:\Users\joshu\Documents\MoneyOs\app\core\assets3d\blender\procedural_assets.py:41: DeprecationWarning: 'Material.use_nodes' is expected to be removed in Blender 6.0
+  mat.use_nodes = True
+Traceback (most recent call last):
+  File "C:\Users\joshu\Documents\MoneyOs\app\core\assets3d\blender\procedural_assets.py", line 242, in <module>
+    main()
+  File "C:\Users\joshu\Documents\MoneyOs\app\core\assets3d\blender\procedural_assets.py", line 218, in main
+    _create_city(assets_dir)
+  File "C:\Users\joshu\Documents\MoneyOs\app\core\assets3d\blender\procedural_assets.py", line 67, in _create_city
+    mat.node_tree.nodes["Principled BSDF"].inputs["Emission"].default_value = (
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'bpy_prop_collection[key]: key "Emission" not found'
