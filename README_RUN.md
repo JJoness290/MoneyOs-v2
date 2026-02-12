@@ -33,6 +33,7 @@ Phase 3 debug variables:
 - `MONEYOS_PHASE3_DARK_PCT_MAX` controls silhouette detector maximum dark pixel ratio.
 - `MONEYOS_AUTO_INSTALL_STARTER_CHARACTERS=1` auto-installs starter characters into `${MONEYOS_ASSETS_ROOT}\characters\starter_pack` when none are usable.
 - Optional: `MONEYOS_STARTER_CHAR_PACK_SHA256` enforces pack integrity if provided.
+- Receipt is written to `${MONEYOS_ASSETS_ROOT}\characters\.starter_pack.json`.
 
 Persist the storage roots (PowerShell):
 

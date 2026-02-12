@@ -33,7 +33,7 @@ from app.config import (
     VIDEO_DIR,
     VISUAL_MODE,
 )
-from app.core.paths import get_assets_root, get_output_root, get_repo_root
+from app.core.paths import get_assets_root, get_characters_dir, get_output_root, get_repo_root
 from app.core.assets.harvester.cache import get_cache_paths
 from app.core.assets.harvester.harvester import harvest_assets
 from app.core.assets.starter_characters import ensure_starter_characters_installed, list_character_assets
@@ -1244,7 +1244,10 @@ async def harvest_report() -> JSONResponse:
 
 @app.get("/assets/characters/auto")
 async def auto_characters() -> JSONResponse:
-    result = ensure_starter_characters_installed(CHARACTERS_DIR, strict=False)
+    runtime_char_dir = get_characters_dir()
+    result = ensure_starter_characters_installed(runtime_char_dir, strict=False)
+    inventory = list_character_assets(runtime_char_dir)
+    result["usable"] = inventory.get("usable", 0)
     if AUTO_CHARACTERS_DIR.exists():
         result["auto_characters"] = [path.name for path in AUTO_CHARACTERS_DIR.iterdir() if path.is_dir()]
     return JSONResponse(result)
@@ -1252,8 +1255,8 @@ async def auto_characters() -> JSONResponse:
 
 @app.post("/assets/characters/auto")
 async def install_auto_characters() -> JSONResponse:
-    result = ensure_starter_characters_installed(CHARACTERS_DIR, strict=False)
-    inventory = list_character_assets(CHARACTERS_DIR)
+    result = ensure_starter_characters_installed(get_characters_dir(), strict=False)
+    inventory = list_character_assets(get_characters_dir())
     result["usable"] = inventory.get("usable", 0)
     return JSONResponse(result)
 

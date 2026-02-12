@@ -34,7 +34,7 @@ from app.config import (
     VFX_SCALE,
     VFX_SCREEN_COVERAGE,
 )
-from app.core.paths import get_assets_root, get_output_root
+from app.core.paths import get_assets_root, get_characters_dir, get_output_root
 from app.core.tts import generate_tts
 from app.core.assets3d.auto_assets import ensure_anime3d_assets_auto
 from app.core.assets3d.bootstrapper import ensure_minimum_assets
@@ -685,7 +685,7 @@ def _render_anime_3d_60s_impl(
     ensure_blender_path()
     ensure_minimum_assets(job_id)
     trace_event(phase3_trace, "PHASE3_CHARPACK_CHECK", stage="start")
-    char_pack_result = ensure_starter_characters_installed(get_assets_root() / "characters", strict=False)
+    char_pack_result = ensure_starter_characters_installed(get_characters_dir(), strict=False)
     phase3_logger.info(
         "PHASE3_CHARPACK_CHECK "
         f"stage=ok installed={char_pack_result.get('installed')} counts={char_pack_result.get('counts', {})}"

@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from app.core.paths import get_assets_root, get_output_root, get_repo_root
+from app.core.paths import get_assets_root, get_characters_dir, get_output_root, get_repo_root
 from src.utils.phase import normalize_phase
 
 BASE_DIR = get_repo_root()
@@ -10,7 +10,7 @@ VIDEO_DIR = OUTPUT_DIR / "videos"
 AUDIO_DIR = OUTPUT_DIR / "audio"
 BROLL_DIR = OUTPUT_DIR / "broll"
 ASSETS_DIR = get_assets_root()
-CHARACTERS_DIR = BASE_DIR / os.getenv("MONEYOS_CHARACTERS_DIR", "assets/characters_3d")
+CHARACTERS_DIR = get_characters_dir()
 ANIMATIONS_DIR = BASE_DIR / os.getenv("MONEYOS_ANIMATIONS_DIR", "assets/animations")
 ANIMATION_PACKS_DIR = BASE_DIR / "assets" / "animation_packs"
 VFX_DIR = BASE_DIR / os.getenv("MONEYOS_VFX_DIR", "assets/vfx")

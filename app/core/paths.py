@@ -63,3 +63,9 @@ def get_assets_root() -> Path:
     path = repo_root.resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def get_characters_dir() -> Path:
+    path = (get_assets_root() / "characters").resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return path

@@ -12,6 +12,8 @@ from typing import Any
 from urllib.request import urlopen
 import zipfile
 
+from app.core.paths import get_characters_dir, get_repo_root
+
 STARTER_PACK_DEFAULT_URL = (
     "https://kenney.nl/media/pages/assets/animated-characters-3/df080ca4ab-1694862585/"
     "kenney_animated-characters-3.zip"
@@ -124,6 +126,43 @@ def _receipt_path(char_dir: Path) -> Path:
     return char_dir / ".starter_pack.json"
 
 
+def _legacy_candidate_dirs() -> list[Path]:
+    repo_root = get_repo_root()
+    candidates = [
+        (repo_root / "assets" / "characters_3d").resolve(),
+        (repo_root / "assets" / "characters").resolve(),
+    ]
+    env_char_dir = os.getenv("MONEYOS_CHARACTERS_DIR")
+    if env_char_dir:
+        candidates.append((repo_root / env_char_dir).resolve())
+    unique: list[Path] = []
+    for item in candidates:
+        if item not in unique:
+            unique.append(item)
+    return unique
+
+
+def _migrate_legacy_if_needed(runtime_char_dir: Path) -> int:
+    runtime_inventory = list_character_assets(runtime_char_dir)
+    if int(runtime_inventory.get("usable", 0)) >= _min_required_files():
+        return 0
+    copied_total = 0
+    for legacy_dir in _legacy_candidate_dirs():
+        if legacy_dir == runtime_char_dir or not legacy_dir.exists():
+            continue
+        legacy_inventory = list_character_assets(legacy_dir)
+        if int(legacy_inventory.get("usable", 0)) <= 0:
+            continue
+        target = runtime_char_dir / "starter_pack"
+        copied = _copy_tree(legacy_dir, target)
+        if copied > 0:
+            copied_total += copied
+            print(
+                f"PHASE3_CHARPACK_MIGRATED from={legacy_dir} to={runtime_char_dir} copied={copied}"
+            )
+    return copied_total
+
+
 def _write_receipt(
     char_dir: Path,
     *,
@@ -154,23 +193,30 @@ def _write_receipt(
     return receipt_path
 
 
-def ensure_starter_characters_installed(char_dir: Path, strict: bool = False) -> dict[str, Any]:
+def ensure_starter_characters_installed(char_dir: Path | None = None, strict: bool = False) -> dict[str, Any]:
+    runtime_char_dir = (char_dir or get_characters_dir()).resolve()
+    if _debug_enabled():
+        print(f"PHASE3_CHARPACK_TARGET char_dir={runtime_char_dir}")
     provider = os.getenv("MONEYOS_STARTER_CHAR_PACK_PROVIDER", "kenney_animated_characters_3").strip()
     pack_url = os.getenv("MONEYOS_STARTER_CHAR_PACK_URL", STARTER_PACK_DEFAULT_URL).strip()
     expected_sha = os.getenv("MONEYOS_STARTER_CHAR_PACK_SHA256", "").strip().lower()
     auto_install = os.getenv("MONEYOS_AUTO_INSTALL_STARTER_CHARACTERS", "1") == "1"
 
-    char_dir.mkdir(parents=True, exist_ok=True)
-    pre = list_character_assets(char_dir)
+    runtime_char_dir.mkdir(parents=True, exist_ok=True)
+    migrated_files = _migrate_legacy_if_needed(runtime_char_dir)
+    pre = list_character_assets(runtime_char_dir)
     if int(pre.get("usable", 0)) >= _min_required_files():
-        receipt = _receipt_path(char_dir)
+        receipt = _receipt_path(runtime_char_dir)
+        if _debug_enabled():
+            print(f"PHASE3_CHARPACK_RECEIPT receipt_path={receipt}")
         return {
             "ok": True,
             "installed": False,
             "provider": provider,
             "counts": pre.get("counts", {}),
-            "receipt_path": str(receipt),
+            "receipt_path": str(receipt.resolve()),
             "message": "starter characters already available",
+            "migrated_files": migrated_files,
         }
 
     if not auto_install:
@@ -185,7 +231,7 @@ def ensure_starter_characters_installed(char_dir: Path, strict: bool = False) ->
             "installed": False,
             "provider": provider,
             "counts": pre.get("counts", {}),
-            "receipt_path": str(_receipt_path(char_dir)),
+            "receipt_path": str(_receipt_path(runtime_char_dir).resolve()),
             "message": message,
         }
 
@@ -207,7 +253,7 @@ def ensure_starter_characters_installed(char_dir: Path, strict: bool = False) ->
             archive.extractall(extract_path)
         flattened = _flatten_root(extract_path)
 
-        target_pack_root = char_dir / "starter_pack"
+        target_pack_root = runtime_char_dir / "starter_pack"
         installed_files = _copy_tree(flattened, target_pack_root)
 
         # promote license/readme if available
@@ -225,13 +271,15 @@ def ensure_starter_characters_installed(char_dir: Path, strict: bool = False) ->
                     shutil.copy2(candidate, readme_target)
 
     receipt = _write_receipt(
-        char_dir,
+        runtime_char_dir,
         provider=provider,
         url=pack_url,
         archive_sha256=archive_sha,
         files_installed=installed_files,
     )
-    post = list_character_assets(char_dir)
+    if _debug_enabled():
+        print(f"PHASE3_CHARPACK_RECEIPT receipt_path={receipt}")
+    post = list_character_assets(runtime_char_dir)
     if int(post.get("usable", 0)) < _min_required_files():
         raise RuntimeError(
             "Starter character pack installed but no usable assets were found. "
@@ -243,6 +291,7 @@ def ensure_starter_characters_installed(char_dir: Path, strict: bool = False) ->
         "installed": True,
         "provider": provider,
         "counts": post.get("counts", {}),
-        "receipt_path": str(receipt),
+        "receipt_path": str(receipt.resolve()),
         "message": "starter characters installed",
+        "migrated_files": migrated_files,
     }
