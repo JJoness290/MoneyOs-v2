@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
 from fastapi import Body, FastAPI, HTTPException
+from fastapi.routing import APIRoute
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -1255,3 +1256,36 @@ async def assets_status() -> JSONResponse:
             "missing_categories": missing,
         }
     )
+
+
+def _register_api_jobs_aliases() -> None:
+    """Expose /api/jobs/* aliases without duplicating handler implementations."""
+    existing_paths = {route.path for route in app.routes if isinstance(route, APIRoute)}
+    for route in list(app.routes):
+        if not isinstance(route, APIRoute):
+            continue
+        if not route.path.startswith("/jobs/"):
+            continue
+        alias_path = f"/api{route.path}"
+        if alias_path in existing_paths:
+            continue
+        app.add_api_route(
+            alias_path,
+            route.endpoint,
+            methods=list(route.methods or []),
+            response_model=route.response_model,
+            status_code=route.status_code,
+            tags=list(route.tags),
+            summary=route.summary,
+            description=route.description,
+            response_description=route.response_description,
+            responses=route.responses,
+            deprecated=route.deprecated,
+            name=f"api_alias_{route.name}",
+            operation_id=f"api_alias_{route.operation_id}" if route.operation_id else None,
+            include_in_schema=True,
+        )
+        existing_paths.add(alias_path)
+
+
+_register_api_jobs_aliases()
