@@ -828,24 +828,35 @@ def _render_anime_3d_60s_impl(
         raise RuntimeError("Duration must be provided from audio beats and be > 0 seconds.")
     missing_assets = _missing_required_assets()
     if missing_assets:
-        _emit_status(
-            status_callback,
-            stage_key="assets",
-            status="Bootstrapping CC0 assets...",
-            progress_pct=2,
-        )
-        cache_root = get_output_root() / "auto_assets"
-        allow_network = os.getenv("MONEYOS_DISABLE_NET") != "1"
-        try:
-            ensure_cc0_anime3d_assets(
-                get_assets_root(),
-                cache_root,
-                ensure_blender_path(),
-                allow_network=allow_network,
+        cc0_disabled = os.getenv("MONEYOS_DISABLE_CC0_BOOTSTRAP") == "1"
+        no_network = os.getenv("MONEYOS_NO_NETWORK") == "1"
+        if cc0_disabled or no_network:
+            phase3_logger.info("[BOOTSTRAP] CC0 bootstrap disabled")
+            phase3_logger.info("[BOOTSTRAP] Using local assets only")
+            trace_event(
+                phase3_trace,
+                "PHASE3_CC0_BOOTSTRAP_SKIPPED",
+                reason="disabled" if cc0_disabled else "no_network",
             )
-        except Exception as exc:  # noqa: BLE001
-            phase3_logger.warning("CC0 bootstrap warning (continuing): %s", exc)
-            trace_event(phase3_trace, "PHASE3_CC0_BOOTSTRAP_WARNING", error=str(exc))
+        else:
+            _emit_status(
+                status_callback,
+                stage_key="assets",
+                status="Bootstrapping CC0 assets...",
+                progress_pct=2,
+            )
+            cache_root = get_output_root() / "auto_assets"
+            allow_network = os.getenv("MONEYOS_DISABLE_NET") != "1"
+            try:
+                ensure_cc0_anime3d_assets(
+                    get_assets_root(),
+                    cache_root,
+                    ensure_blender_path(),
+                    allow_network=allow_network,
+                )
+            except Exception as exc:  # noqa: BLE001
+                phase3_logger.warning("CC0 bootstrap skipped: %s", exc)
+                trace_event(phase3_trace, "PHASE3_CC0_BOOTSTRAP_WARNING", error=str(exc))
         missing_assets = _missing_required_assets()
     if asset_mode == "auto" or missing_assets:
         ensure_anime3d_assets_auto(get_assets_root(), "render", strict_assets == 1)

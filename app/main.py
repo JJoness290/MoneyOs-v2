@@ -205,6 +205,10 @@ def bootstrap_dependencies() -> None:
         else:
             web_url = "http://127.0.0.1:8000"
     print(f"[WEB] MoneyOS web running on {web_url}")
+    if os.getenv("MONEYOS_DISABLE_CC0_BOOTSTRAP", "1") == "1":
+        print("[BOOTSTRAP] CC0 bootstrap disabled")
+    if os.getenv("MONEYOS_NO_NETWORK") == "1":
+        print("[BOOTSTRAP] Using local assets only")
 
 
 def _format_mmss(seconds: float) -> str:

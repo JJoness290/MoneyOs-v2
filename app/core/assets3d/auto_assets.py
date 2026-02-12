@@ -259,17 +259,22 @@ def ensure_anime3d_assets_auto(assets_root: Path, stage: str, strict_assets: boo
         if not missing:
             return
         allow_network = os.getenv("MONEYOS_DISABLE_NET") != "1"
-        try:
-            ensure_cc0_anime3d_assets(
-                assets_root,
-                cache_root,
-                ensure_blender_path(),
-                allow_network=allow_network,
-            )
-        except Exception as exc:  # noqa: BLE001
-            warning = f"cc0 bootstrap failed (continuing with local/procedural assets): {exc}"
-            errors.append(warning)
-            _log(warning, quiet)
+        cc0_disabled = os.getenv("MONEYOS_DISABLE_CC0_BOOTSTRAP") == "1"
+        no_network = os.getenv("MONEYOS_NO_NETWORK") == "1"
+        if cc0_disabled or no_network:
+            _log("[BOOTSTRAP] Using local assets only", quiet)
+        else:
+            try:
+                ensure_cc0_anime3d_assets(
+                    assets_root,
+                    cache_root,
+                    ensure_blender_path(),
+                    allow_network=allow_network,
+                )
+            except Exception as exc:  # noqa: BLE001
+                warning = f"cc0 bootstrap failed (continuing with local/procedural assets): {exc}"
+                errors.append(warning)
+                _log(warning, quiet)
         missing = missing_required_assets(assets_root)
         missing_set = set(missing)
         if any(path.startswith("vfx/") for path in missing_set):

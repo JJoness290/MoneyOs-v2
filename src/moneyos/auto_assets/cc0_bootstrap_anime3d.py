@@ -317,6 +317,8 @@ def _network_disabled_by_env() -> tuple[bool, str]:
 def _write_report(report_path: Path, report: dict) -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+
 def ensure_cc0_anime3d_assets(
     assets_root: Path,
     cache_root: Path,
@@ -324,9 +326,33 @@ def ensure_cc0_anime3d_assets(
     allow_network: bool = True,
 ) -> dict:
     start = time.time()
+    report_path = cache_root / "cc0_bootstrap_report.json"
+    if os.getenv("MONEYOS_DISABLE_CC0_BOOTSTRAP") == "1":
+        report = {
+            "status": "skipped",
+            "reason": "disabled_by_env",
+            "missing": [],
+            "installed": [],
+            "sources": [],
+            "errors": [],
+            "duration_seconds": round(time.time() - start, 2),
+        }
+        _write_report(report_path, report)
+        return report
+    if os.getenv("MONEYOS_NO_NETWORK") == "1":
+        report = {
+            "status": "skipped",
+            "reason": "network_disabled",
+            "missing": [],
+            "installed": [],
+            "sources": [],
+            "errors": [],
+            "duration_seconds": round(time.time() - start, 2),
+        }
+        _write_report(report_path, report)
+        return report
     required = [rel for rel in get_required_anime3d_assets() if rel in CC0_REQUIRED_ASSETS]
     missing = [rel for rel in required if not (assets_root / rel).exists()]
-    report_path = cache_root / "cc0_bootstrap_report.json"
     if not missing:
         report = {
             "status": "ok",
