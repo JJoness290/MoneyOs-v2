@@ -19,6 +19,20 @@ from urllib.request import Request, urlopen
 
 BASE = "http://127.0.0.1:8000"
 
+REQUIRED_ALIAS_PATHS = (
+    '/api/status/test',
+    '/api/events/test',
+    '/api/videos/test',
+    '/api/generate',
+    '/api/jobs/anime-episode-60s-3d',
+)
+
+
+def print_alias_targets() -> None:
+    print('Expected non-404 alias paths:')
+    for path in REQUIRED_ALIAS_PATHS:
+        print(f' - {BASE}{path}')
+
 
 def _post(path: str) -> tuple[int, dict]:
     req = Request(
@@ -41,4 +55,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    print_alias_targets()
     main()

@@ -1258,13 +1258,33 @@ async def assets_status() -> JSONResponse:
     )
 
 
-def _register_api_jobs_aliases() -> None:
-    """Expose /api/jobs/* aliases without duplicating handler implementations."""
+def _register_api_aliases() -> None:
+    """Expose /api/* aliases for public UI endpoints without duplicating handlers."""
+    alias_prefix_paths = (
+        "/jobs/",
+        "/status/",
+        "/events/",
+        "/videos/",
+        "/assets/",
+    )
+    alias_exact_paths = {
+        "/generate",
+        "/health",
+        "/debug/status",
+    }
+
+    def _should_alias(path: str) -> bool:
+        if path.startswith("/api/"):
+            return False
+        if path in alias_exact_paths:
+            return True
+        return path.startswith(alias_prefix_paths)
+
     existing_paths = {route.path for route in app.routes if isinstance(route, APIRoute)}
     for route in list(app.routes):
         if not isinstance(route, APIRoute):
             continue
-        if not route.path.startswith("/jobs/"):
+        if not _should_alias(route.path):
             continue
         alias_path = f"/api{route.path}"
         if alias_path in existing_paths:
@@ -1288,4 +1308,4 @@ def _register_api_jobs_aliases() -> None:
         existing_paths.add(alias_path)
 
 
-_register_api_jobs_aliases()
+_register_api_aliases()
