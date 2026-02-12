@@ -25,6 +25,8 @@ $env:MONEYOS_AUTO_INSTALL_STARTER_CHARACTERS = "1"
 $env:MONEYOS_STARTER_CHAR_PACK_URL = "https://kenney.nl/media/pages/assets/animated-characters-3/df080ca4ab-1694862585/kenney_animated-characters-3.zip"
 $env:MONEYOS_STARTER_CHAR_PACK_PROVIDER = "kenney_animated_characters_3"
 $env:MONEYOS_STARTER_CHAR_MIN_FILES = "1"
+$env:MONEYOS_STARTER_CHAR_MIN_RIGGED = "1"
+$env:MONEYOS_STARTER_CHAR_FORCE = "0"
 ```
 
 Phase 3 debug variables:
@@ -33,6 +35,8 @@ Phase 3 debug variables:
 - `MONEYOS_PHASE3_DARK_PCT_MAX` controls silhouette detector maximum dark pixel ratio.
 - `MONEYOS_AUTO_INSTALL_STARTER_CHARACTERS=1` auto-installs starter characters into `${MONEYOS_ASSETS_ROOT}\characters\starter_pack` when none are usable.
 - Optional: `MONEYOS_STARTER_CHAR_PACK_SHA256` enforces pack integrity if provided.
+- `MONEYOS_STARTER_CHAR_MIN_RIGGED` controls minimum required rigged assets (`.fbx/.glb/.gltf`) before install is skipped.
+- `MONEYOS_STARTER_CHAR_FORCE=1` forces reinstall/check even when rigged assets are present.
 - Receipt is written to `${MONEYOS_ASSETS_ROOT}\characters\.starter_pack.json`.
 
 Persist the storage roots (PowerShell):

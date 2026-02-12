@@ -20,6 +20,7 @@ STARTER_PACK_DEFAULT_URL = (
 )
 
 USABLE_EXTENSIONS = {".blend", ".fbx", ".glb", ".gltf", ".obj"}
+RIGGED_EXTENSIONS = {".fbx", ".glb", ".gltf"}
 
 
 @dataclass(frozen=True)
@@ -54,17 +55,41 @@ def sha256_file(path: Path) -> str:
 
 def list_character_assets(char_dir: Path) -> dict[str, Any]:
     counts: dict[str, int] = {}
+    rigged_counts: dict[str, int] = {}
     candidates: list[str] = []
+    rigged_candidates: list[str] = []
+    starter_blend_count = 0
     if not char_dir.exists():
-        return {"counts": counts, "candidates": candidates, "usable": 0}
+        return {
+            "counts": counts,
+            "rigged_counts": rigged_counts,
+            "candidates": candidates,
+            "rigged_candidates": rigged_candidates,
+            "usable": 0,
+            "rigged_usable": 0,
+            "starter_blend_count": starter_blend_count,
+        }
     for path in char_dir.rglob("*"):
         if not path.is_file():
             continue
         ext = path.suffix.lower()
         counts[ext] = counts.get(ext, 0) + 1
+        if ext in RIGGED_EXTENSIONS:
+            rigged_counts[ext] = rigged_counts.get(ext, 0) + 1
+            rigged_candidates.append(str(path))
         if ext in USABLE_EXTENSIONS:
             candidates.append(str(path))
-    return {"counts": counts, "candidates": candidates, "usable": len(candidates)}
+        if ext == ".blend" and "starter_pack" in {part.lower() for part in path.parts}:
+            starter_blend_count += 1
+    return {
+        "counts": counts,
+        "rigged_counts": rigged_counts,
+        "candidates": candidates,
+        "rigged_candidates": rigged_candidates,
+        "usable": len(candidates),
+        "rigged_usable": len(rigged_candidates),
+        "starter_blend_count": starter_blend_count,
+    }
 
 
 def _min_required_files() -> int:
@@ -74,9 +99,22 @@ def _min_required_files() -> int:
         return 1
 
 
+def _min_required_rigged() -> int:
+    try:
+        return max(1, int(os.getenv("MONEYOS_STARTER_CHAR_MIN_RIGGED", "1")))
+    except ValueError:
+        return 1
+
+
+def _force_install() -> bool:
+    return os.getenv("MONEYOS_STARTER_CHAR_FORCE", "0") == "1"
+
+
 def needs_install(char_dir: Path) -> bool:
     inventory = list_character_assets(char_dir)
-    return int(inventory.get("usable", 0)) < _min_required_files()
+    if _force_install():
+        return True
+    return int(inventory.get("rigged_usable", 0)) < _min_required_rigged()
 
 
 def download_zip(url: str, dest_zip: Path, timeout: tuple[int, int] = (10, 120)) -> None:
@@ -144,14 +182,14 @@ def _legacy_candidate_dirs() -> list[Path]:
 
 def _migrate_legacy_if_needed(runtime_char_dir: Path) -> int:
     runtime_inventory = list_character_assets(runtime_char_dir)
-    if int(runtime_inventory.get("usable", 0)) >= _min_required_files():
+    if int(runtime_inventory.get("rigged_usable", 0)) >= _min_required_rigged() and not _force_install():
         return 0
     copied_total = 0
     for legacy_dir in _legacy_candidate_dirs():
         if legacy_dir == runtime_char_dir or not legacy_dir.exists():
             continue
         legacy_inventory = list_character_assets(legacy_dir)
-        if int(legacy_inventory.get("usable", 0)) <= 0:
+        if int(legacy_inventory.get("rigged_usable", 0)) <= 0:
             continue
         target = runtime_char_dir / "starter_pack"
         copied = _copy_tree(legacy_dir, target)
@@ -205,7 +243,8 @@ def ensure_starter_characters_installed(char_dir: Path | None = None, strict: bo
     runtime_char_dir.mkdir(parents=True, exist_ok=True)
     migrated_files = _migrate_legacy_if_needed(runtime_char_dir)
     pre = list_character_assets(runtime_char_dir)
-    if int(pre.get("usable", 0)) >= _min_required_files():
+    min_rigged = _min_required_rigged()
+    if int(pre.get("rigged_usable", 0)) >= min_rigged and not _force_install():
         receipt = _receipt_path(runtime_char_dir)
         if _debug_enabled():
             print(f"PHASE3_CHARPACK_RECEIPT receipt_path={receipt}")
@@ -214,7 +253,10 @@ def ensure_starter_characters_installed(char_dir: Path | None = None, strict: bo
             "installed": False,
             "provider": provider,
             "counts": pre.get("counts", {}),
+            "rigged_count": pre.get("rigged_usable", 0),
+            "required_min_rigged": min_rigged,
             "receipt_path": str(receipt.resolve()),
+            "reason": "rigged assets already present",
             "message": "starter characters already available",
             "migrated_files": migrated_files,
         }
@@ -231,7 +273,10 @@ def ensure_starter_characters_installed(char_dir: Path | None = None, strict: bo
             "installed": False,
             "provider": provider,
             "counts": pre.get("counts", {}),
+            "rigged_count": pre.get("rigged_usable", 0),
+            "required_min_rigged": min_rigged,
             "receipt_path": str(_receipt_path(runtime_char_dir).resolve()),
+            "reason": "auto-install disabled and insufficient rigged assets",
             "message": message,
         }
 
@@ -280,10 +325,10 @@ def ensure_starter_characters_installed(char_dir: Path | None = None, strict: bo
     if _debug_enabled():
         print(f"PHASE3_CHARPACK_RECEIPT receipt_path={receipt}")
     post = list_character_assets(runtime_char_dir)
-    if int(post.get("usable", 0)) < _min_required_files():
+    if int(post.get("rigged_usable", 0)) < min_rigged:
         raise RuntimeError(
-            "Starter character pack installed but no usable assets were found. "
-            f"usable={post.get('usable', 0)} required={_min_required_files()}"
+            "Starter character pack installed but insufficient rigged assets were found. "
+            f"rigged={post.get('rigged_usable', 0)} required={min_rigged}"
         )
 
     return {
@@ -291,7 +336,10 @@ def ensure_starter_characters_installed(char_dir: Path | None = None, strict: bo
         "installed": True,
         "provider": provider,
         "counts": post.get("counts", {}),
+        "rigged_count": post.get("rigged_usable", 0),
+        "required_min_rigged": min_rigged,
         "receipt_path": str(receipt.resolve()),
+        "reason": "installed starter pack due to missing rigged assets",
         "message": "starter characters installed",
         "migrated_files": migrated_files,
     }

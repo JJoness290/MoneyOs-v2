@@ -570,10 +570,21 @@ def _resolve_asset_dirs(assets_dir: Path) -> dict[str, Path | None]:
     }
 
 
+def _character_sort_key(candidate: Path) -> tuple[int, int, str]:
+    parts = {part.lower() for part in candidate.parts}
+    in_starter_pack = 0 if "starter_pack" in parts else 1
+    ext_priority = 0 if candidate.suffix.lower() in {".fbx", ".glb", ".gltf"} else 1
+    return (in_starter_pack, ext_priority, candidate.name.lower())
+
+
 def _discover_assets(assets_dir: Path) -> dict[str, list[Path]]:
     asset_dirs = _resolve_asset_dirs(assets_dir)
     envs = sorted(asset_dirs["envs"].glob("*.blend")) if asset_dirs["envs"] else []
-    characters = sorted(asset_dirs["characters"].glob("*.blend")) if asset_dirs["characters"] else []
+    characters: list[Path] = []
+    if asset_dirs["characters"]:
+        for ext in (".fbx", ".glb", ".gltf", ".blend"):
+            characters.extend(asset_dirs["characters"].rglob(f"*{ext}"))
+        characters = sorted({path for path in characters}, key=_character_sort_key)
     anims = sorted(asset_dirs["anims"].glob("*.fbx")) if asset_dirs["anims"] else []
     vfx = sorted(asset_dirs["vfx"].glob("*.*")) if asset_dirs["vfx"] else []
     return {
@@ -615,18 +626,19 @@ def _select_env_blend(env_candidates: list[Path]) -> Path | None:
 
 
 def _select_character_assets(char_candidates: list[Path]) -> tuple[Path | None, Path | None]:
+    ordered = sorted(char_candidates, key=_character_sort_key)
     hero = None
     enemy = None
-    for candidate in char_candidates:
+    for candidate in ordered:
         name = candidate.name.lower()
-        if name == "hero.blend":
+        if hero is None and ("hero" in name or "player" in name):
             hero = candidate
-        elif name == "enemy.blend":
+        elif enemy is None and ("enemy" in name or "npc" in name or "monster" in name):
             enemy = candidate
-    if hero is None and char_candidates:
-        hero = char_candidates[0]
+    if hero is None and ordered:
+        hero = ordered[0]
     if enemy is None:
-        for candidate in char_candidates:
+        for candidate in ordered:
             if candidate != hero:
                 enemy = candidate
                 break
@@ -713,11 +725,11 @@ def _ensure_character(
     asset_path = None
     chars_dir = assets_dir / "characters"
     if chars_dir.exists():
-        for ext in (".blend", ".fbx", ".glb", ".gltf"):
-            matches = sorted(chars_dir.glob(f"*{ext}"))
-            if matches:
-                asset_path = matches[0]
-                break
+        discovered: list[Path] = []
+        for ext in (".fbx", ".glb", ".gltf", ".blend"):
+            discovered.extend(chars_dir.rglob(f"*{ext}"))
+        if discovered:
+            asset_path = sorted({path for path in discovered}, key=_character_sort_key)[0]
     if asset_path and asset_path.suffix.lower() == ".blend":
         with bpy.data.libraries.load(str(asset_path), link=False) as (data_from, data_to):
             data_to.objects = list(data_from.objects)
