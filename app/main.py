@@ -36,6 +36,7 @@ from app.config import (
 from app.core.paths import get_assets_root, get_output_root, get_repo_root
 from app.core.assets.harvester.cache import get_cache_paths
 from app.core.assets.harvester.harvester import harvest_assets
+from app.core.assets.starter_characters import ensure_starter_characters_installed, list_character_assets
 from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, status as autopilot_status
 from app.core.bootstrap import ensure_dependencies
 from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
@@ -1243,10 +1244,18 @@ async def harvest_report() -> JSONResponse:
 
 @app.get("/assets/characters/auto")
 async def auto_characters() -> JSONResponse:
-    if not AUTO_CHARACTERS_DIR.exists():
-        return JSONResponse({"characters": []})
-    characters = [path.name for path in AUTO_CHARACTERS_DIR.iterdir() if path.is_dir()]
-    return JSONResponse({"characters": characters})
+    result = ensure_starter_characters_installed(CHARACTERS_DIR, strict=False)
+    if AUTO_CHARACTERS_DIR.exists():
+        result["auto_characters"] = [path.name for path in AUTO_CHARACTERS_DIR.iterdir() if path.is_dir()]
+    return JSONResponse(result)
+
+
+@app.post("/assets/characters/auto")
+async def install_auto_characters() -> JSONResponse:
+    result = ensure_starter_characters_installed(CHARACTERS_DIR, strict=False)
+    inventory = list_character_assets(CHARACTERS_DIR)
+    result["usable"] = inventory.get("usable", 0)
+    return JSONResponse(result)
 
 
 class UseCharactersRequest(BaseModel):

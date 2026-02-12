@@ -21,12 +21,18 @@ $env:MONEYOS_ANIME3D_SFX_MODE = "auto"
 $env:MONEYOS_DEBUG_PHASE3 = "1"
 $env:MONEYOS_PHASE3_LUMA_MIN = "25"
 $env:MONEYOS_PHASE3_DARK_PCT_MAX = "0.85"
+$env:MONEYOS_AUTO_INSTALL_STARTER_CHARACTERS = "1"
+$env:MONEYOS_STARTER_CHAR_PACK_URL = "https://kenney.nl/media/pages/assets/animated-characters-3/df080ca4ab-1694862585/kenney_animated-characters-3.zip"
+$env:MONEYOS_STARTER_CHAR_PACK_PROVIDER = "kenney_animated_characters_3"
+$env:MONEYOS_STARTER_CHAR_MIN_FILES = "1"
 ```
 
 Phase 3 debug variables:
 - `MONEYOS_DEBUG_PHASE3=1` enables detailed runtime checks and traces (`moneyos.phase3` logger).
 - `MONEYOS_PHASE3_LUMA_MIN` controls silhouette detector minimum mean luma threshold.
 - `MONEYOS_PHASE3_DARK_PCT_MAX` controls silhouette detector maximum dark pixel ratio.
+- `MONEYOS_AUTO_INSTALL_STARTER_CHARACTERS=1` auto-installs starter characters into `${MONEYOS_ASSETS_ROOT}\characters\starter_pack` when none are usable.
+- Optional: `MONEYOS_STARTER_CHAR_PACK_SHA256` enforces pack integrity if provided.
 
 Persist the storage roots (PowerShell):
 

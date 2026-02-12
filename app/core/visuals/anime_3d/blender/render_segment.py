@@ -2543,6 +2543,8 @@ def main() -> None:
         f"found_env={len(env_candidates)} found_chars={len(char_candidates)} "
         f"found_anims={len(anim_candidates)} found_vfx={len(vfx_candidates)}"
     )
+    char_preview = [path.name for path in char_candidates[:5]]
+    assets_log += f" char_preview={char_preview}"
     selected_log = (
         "[ASSETS] selected_env="
         f"{env_blend.name if env_blend else 'none'} "
