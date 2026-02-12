@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.routing import APIRoute
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -51,6 +51,19 @@ from app.core.system_specs import get_system_specs
 from src.utils.phase import is_phase2_or_higher, normalize_phase
 
 app = FastAPI()
+
+
+@app.middleware("http")
+async def log_404_requests(request: Request, call_next):
+    response = await call_next(request)
+    if response.status_code == 404:
+        print(
+            "[HTTP_404] "
+            f"method={request.method} path={request.url.path} "
+            f"origin={request.headers.get('origin', '-')} "
+            f"referer={request.headers.get('referer', '-')}"
+        )
+    return response
 
 STATUS_IDLE = "Idle"
 STATUS_SCRIPT = "Generating script..."
@@ -985,6 +998,8 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
 
 
 @app.post("/generate")
+@app.post("/generate-audio")
+@app.post("/api/generate-audio")
 async def generate() -> JSONResponse:
     job_id = uuid.uuid4().hex
     _set_status(job_id, STATUS_SCRIPT)
