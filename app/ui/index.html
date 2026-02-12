@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="moneyos-api-base" content="" />
   <title>MoneyOS – Video Generator</title>
   <style>
     body {
@@ -151,6 +152,35 @@
     let polling = null;
     let eventSource = null;
 
+    function resolveApiBase() {
+      const windowBase = window.__MONEYOS_API_BASE__;
+      if (windowBase && String(windowBase).trim()) {
+        return String(windowBase).trim();
+      }
+      const metaBase = document.querySelector('meta[name="moneyos-api-base"]')?.content;
+      if (metaBase && String(metaBase).trim()) {
+        return String(metaBase).trim();
+      }
+      const envLike = window.VITE_API_BASE || window.NEXT_PUBLIC_API_BASE || window.MONEYOS_API_BASE || window.__API_BASE__;
+      if (envLike && String(envLike).trim()) {
+        return String(envLike).trim();
+      }
+      return 'http://127.0.0.1:8000';
+    }
+
+    const API_BASE = resolveApiBase();
+
+    function apiUrl(path) {
+      return new URL(path, API_BASE).toString();
+    }
+
+    async function apiFetch(path, options) {
+      const url = apiUrl(path);
+      return fetch(url, options);
+    }
+
+    endpointText.textContent = `POST ${apiUrl('/jobs/anime-episode-60s-3d')}`;
+
     function appendLog(message) {
       const line = document.createElement('div');
       line.textContent = message;
@@ -205,7 +235,7 @@
 
     async function loadSystemSpecs() {
       try {
-        const response = await fetch('/api/system/specs');
+        const response = await apiFetch('/api/system/specs');
         if (!response.ok) {
           throw new Error('Specs unavailable');
         }
@@ -231,7 +261,7 @@
 
     async function loadDoctorStatus() {
       try {
-        const healthResponse = await fetch('/health');
+        const healthResponse = await apiFetch('/health');
         const health = await healthResponse.json();
         backendStatus.textContent = healthResponse.ok ? `OK (${health.version})` : 'Unavailable';
         const envFlags = health.env_flags || {};
@@ -241,7 +271,7 @@
         gpuFlags.textContent = '-';
       }
       try {
-        const debugResponse = await fetch('/debug/status');
+        const debugResponse = await apiFetch('/debug/status');
         const debug = await debugResponse.json();
         if (debug.blender && debug.blender.found) {
           blenderStatus.textContent = `${debug.blender.version || 'found'} @ ${debug.blender.path || 'unknown'}`;
@@ -257,7 +287,7 @@
 
     async function pollStatus(jobId) {
       try {
-        const response = await fetch(`/status/${jobId}`);
+        const response = await apiFetch(`/status/${jobId}`);
         if (!response.ok) {
           throw new Error('Status unavailable');
         }
@@ -276,7 +306,7 @@
       if (eventSource) {
         eventSource.close();
       }
-      eventSource = new EventSource(`/events/${jobId}`);
+      eventSource = new EventSource(apiUrl(`/events/${jobId}`));
       eventSource.addEventListener('status', (event) => {
         const data = JSON.parse(event.data);
         updateStatus(data);
@@ -301,8 +331,11 @@
       finalStatus.textContent = 'In Progress';
       logTail.innerHTML = '';
 
-      const response = await fetch('/jobs/anime-episode-60s-3d', {
-        method: 'POST',
+      const requestPath = '/jobs/anime-episode-60s-3d';
+      const requestMethod = 'POST';
+      const requestUrl = apiUrl(requestPath);
+      const response = await apiFetch(requestPath, {
+        method: requestMethod,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ style_preset: stylePreset.value }),
       });
@@ -310,7 +343,7 @@
         const errorText = await response.text();
         finalStatus.textContent = 'FAILED';
         generateButton.disabled = false;
-        appendLog(`Request failed (${response.status}): ${errorText}`);
+        appendLog(`${requestMethod} ${requestUrl} -> ${response.status} ${response.statusText}: ${errorText}`);
         return;
       }
       const data = await response.json();
