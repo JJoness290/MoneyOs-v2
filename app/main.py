@@ -57,11 +57,14 @@ app = FastAPI()
 async def log_404_requests(request: Request, call_next):
     response = await call_next(request)
     if response.status_code == 404:
+        query = request.url.query or "-"
         print(
-            "[HTTP_404] "
-            f"method={request.method} path={request.url.path} "
-            f"origin={request.headers.get('origin', '-')} "
-            f"referer={request.headers.get('referer', '-')}"
+            "[404] "
+            f"METHOD={request.method} "
+            f"PATH={request.url.path} "
+            f"QUERY={query} "
+            f"ORIGIN={request.headers.get('origin', '-')} "
+            f"REFERER={request.headers.get('referer', '-')}"
         )
     return response
 
