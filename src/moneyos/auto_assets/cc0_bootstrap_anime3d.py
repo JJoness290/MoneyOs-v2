@@ -288,6 +288,35 @@ def _ensure_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+
+
+def _env_truthy(name: str) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _network_disabled_by_env() -> tuple[bool, str]:
+    if _env_truthy("MONEYOS_NO_NETWORK"):
+        return True, "MONEYOS_NO_NETWORK=1"
+    if _env_truthy("MONEYOS_DISABLE_CC0_BOOTSTRAP"):
+        return True, "MONEYOS_DISABLE_CC0_BOOTSTRAP=1"
+    providers = (os.getenv("MONEYOS_ASSET_PROVIDERS") or "").strip().lower()
+    if providers in {"none", "off", "disabled", "false", "0"}:
+        return True, f"MONEYOS_ASSET_PROVIDERS={providers}"
+    try:
+        max_downloads = int((os.getenv("MONEYOS_ASSET_MAX_DOWNLOADS_PER_RUN") or "").strip() or "-1")
+    except ValueError:
+        max_downloads = -1
+    if max_downloads == 0:
+        return True, "MONEYOS_ASSET_MAX_DOWNLOADS_PER_RUN=0"
+    return False, ""
+
+
+def _write_report(report_path: Path, report: dict) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 def ensure_cc0_anime3d_assets(
     assets_root: Path,
     cache_root: Path,
@@ -297,11 +326,37 @@ def ensure_cc0_anime3d_assets(
     start = time.time()
     required = [rel for rel in get_required_anime3d_assets() if rel in CC0_REQUIRED_ASSETS]
     missing = [rel for rel in required if not (assets_root / rel).exists()]
+    report_path = cache_root / "cc0_bootstrap_report.json"
     if not missing:
-        return {"missing": [], "installed": [], "sources": []}
+        report = {
+            "status": "ok",
+            "reason": "all required assets already present",
+            "missing": [],
+            "installed": [],
+            "sources": [],
+            "errors": [],
+            "duration_seconds": round(time.time() - start, 2),
+        }
+        _write_report(report_path, report)
+        return report
+
     _log(f"missing={missing}")
+    network_disabled, network_reason = _network_disabled_by_env()
     if not allow_network:
-        raise CC0BootstrapError("Network access disabled; cannot download CC0 assets.")
+        network_disabled = True
+        network_reason = network_reason or "allow_network=False"
+    if network_disabled:
+        report = {
+            "status": "skipped",
+            "reason": f"CC0 bootstrap skipped: {network_reason}",
+            "missing": missing,
+            "installed": [],
+            "sources": [],
+            "errors": [],
+            "duration_seconds": round(time.time() - start, 2),
+        }
+        _write_report(report_path, report)
+        return report
 
     cache_root.mkdir(parents=True, exist_ok=True)
     for subdir in ("characters", "envs", "anims", "vfx"):
@@ -367,13 +422,7 @@ def ensure_cc0_anime3d_assets(
                 _log("installed => animations from Blender export")
         finally:
             shutil.rmtree(extract_dir, ignore_errors=True)
-    except Exception as exc:  # noqa: BLE001
-        errors.append(str(exc))
-        raise
-    finally:
-        pass
 
-    try:
         html = _fetch_html(STREET_PACK_MIRROR_URL)
         if not verify_cc0_in_html(html):
             raise CC0BootstrapError("Street pack license verification failed (CC0 not found).")
@@ -407,36 +456,50 @@ def ensure_cc0_anime3d_assets(
                 _log(f"installed => {env_dest}")
         finally:
             shutil.rmtree(extract_dir, ignore_errors=True)
+
+        remaining = [rel for rel in required if not (assets_root / rel).exists()]
+        if remaining:
+            raise CC0BootstrapError(
+                "CC0 bootstrap incomplete. Missing: "
+                + ", ".join(remaining)
+                + f". Errors: {errors}"
+            )
+
+        file_hashes = {}
+        for rel in installed:
+            file_path = assets_root / rel
+            if file_path.exists():
+                file_hashes[rel] = _sha256(file_path)
+        report = {
+            "status": "ok",
+            "reason": "downloaded and installed",
+            "installed": sorted(set(installed)),
+            "file_hashes": file_hashes,
+            "sources": sources,
+            "missing": [],
+            "errors": errors,
+            "duration_seconds": round(time.time() - start, 2),
+        }
+        manifest_path = assets_root / "cc0_manifest.json"
+        manifest_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        _write_report(report_path, report)
+        _log(f"ready in {report['duration_seconds']}s")
+        return report
     except Exception as exc:  # noqa: BLE001
         errors.append(str(exc))
+        remaining = [rel for rel in required if not (assets_root / rel).exists()]
+        report = {
+            "status": "failed",
+            "reason": str(exc),
+            "installed": sorted(set(installed)),
+            "sources": sources,
+            "missing": remaining,
+            "errors": errors,
+            "duration_seconds": round(time.time() - start, 2),
+        }
+        _write_report(report_path, report)
         raise
 
-    remaining = [rel for rel in required if not (assets_root / rel).exists()]
-    if remaining:
-        raise CC0BootstrapError(
-            "CC0 bootstrap incomplete. Missing: "
-            + ", ".join(remaining)
-            + f". Errors: {errors}"
-        )
-
-    file_hashes = {}
-    for rel in installed:
-        file_path = assets_root / rel
-        if file_path.exists():
-            file_hashes[rel] = _sha256(file_path)
-    report = {
-        "installed": sorted(set(installed)),
-        "file_hashes": file_hashes,
-        "sources": sources,
-        "errors": errors,
-        "duration_seconds": round(time.time() - start, 2),
-    }
-    manifest_path = assets_root / "cc0_manifest.json"
-    manifest_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    report_path = cache_root / "cc0_bootstrap_report.json"
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    _log(f"ready in {report['duration_seconds']}s")
-    return report
 
 
 if __name__ == "__main__":
