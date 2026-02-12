@@ -18,7 +18,15 @@ $env:MONEYOS_ANIME3D_STYLE_PRESET = "key_art"
 $env:MONEYOS_ANIME3D_OUTLINE_MODE = "freestyle"
 $env:MONEYOS_ANIME3D_POSTFX = "on"
 $env:MONEYOS_ANIME3D_SFX_MODE = "auto"
+$env:MONEYOS_DEBUG_PHASE3 = "1"
+$env:MONEYOS_PHASE3_LUMA_MIN = "25"
+$env:MONEYOS_PHASE3_DARK_PCT_MAX = "0.85"
 ```
+
+Phase 3 debug variables:
+- `MONEYOS_DEBUG_PHASE3=1` enables detailed runtime checks and traces (`moneyos.phase3` logger).
+- `MONEYOS_PHASE3_LUMA_MIN` controls silhouette detector minimum mean luma threshold.
+- `MONEYOS_PHASE3_DARK_PCT_MAX` controls silhouette detector maximum dark pixel ratio.
 
 Persist the storage roots (PowerShell):
 

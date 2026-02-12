@@ -55,6 +55,14 @@ from app.core.visuals.anime_3d.blender.install_vrm_addon import ensure_vrm_addon
 from app.core.visuals.ffmpeg_utils import has_nvenc, run_ffmpeg, _fallback_to_x264, _uses_nvenc
 from src.utils.win_paths import planned_paths_preflight
 from src.moneyos.auto_assets.cc0_bootstrap_anime3d import ensure_cc0_anime3d_assets
+from app.core.debug.phase3_checks import (
+    append_debug_to_report,
+    compute_luma_metrics,
+    get_phase3_logger,
+    is_phase3_debug_enabled,
+    read_tail_lines,
+    trace_event,
+)
 
 
 @dataclass(frozen=True)
@@ -664,11 +672,14 @@ def _generate_audio(
     return final_path
 
 
-def render_anime_3d_60s(
+def _render_anime_3d_60s_impl(
     job_id: str,
     status_callback: StatusCallback = None,
     overrides: dict | None = None,
 ) -> Anime3DResult:
+    phase3_logger = get_phase3_logger()
+    phase3_debug = is_phase3_debug_enabled()
+    phase3_trace: list[dict[str, object]] = []
     warnings: list[str] = []
     ensure_blender_path()
     ensure_minimum_assets(job_id)
@@ -852,6 +863,24 @@ def render_anime_3d_60s(
         "assets_dir": str(get_assets_root()),
         "asset_mode": asset_mode,
     }
+    phase3_logger.info(
+        "PHASE3_PIPELINE_ENTER "
+        f"job_id={job_id} render_preset={render_preset} engine={BLENDER_ENGINE} "
+        f"gpu={BLENDER_GPU} use_gpu={os.getenv('MONEYOS_USE_GPU', '-')} "
+        f"nvenc_quality={os.getenv('MONEYOS_NVENC_QUALITY', '-')} "
+        f"assets_root={get_assets_root()} output_path={output_dir / 'final.mp4'}"
+    )
+    trace_event(
+        phase3_trace,
+        "PHASE3_PIPELINE_ENTER",
+        job_id=job_id,
+        render_preset=render_preset,
+        engine=BLENDER_ENGINE,
+        gpu=BLENDER_GPU,
+        use_gpu=os.getenv("MONEYOS_USE_GPU", "-"),
+        assets_root=str(get_assets_root()),
+        output_path=str(output_dir / "final.mp4"),
+    )
     fingerprint = _build_fingerprint(fingerprint_payload)
     planned_paths = [
         output_dir / "render_report.json",
@@ -1006,6 +1035,7 @@ def render_anime_3d_60s(
             warnings=warnings,
         )
     cmd = build_blender_command(script_path, blender_args)
+    trace_event(phase3_trace, "PHASE3_BLENDER_CMD_READY", cmd=" ".join(str(part) for part in cmd))
     _assert_seed_fingerprint_in_cmd(cmd)
     blender_cmd_path.write_text(_format_cmd(cmd), encoding="utf-8")
     cmd_text = blender_cmd_path.read_text(encoding="utf-8")
@@ -1084,6 +1114,23 @@ def render_anime_3d_60s(
             f"Stdout (tail):\n{tail_stdout}\n"
             f"Stderr (tail):\n{tail_stderr}"
         )
+    phase3_metrics: dict[str, object] | None = None
+    if frame_list:
+        sample_index = max(0, len(frame_list) // 2)
+        sample_frame = frame_list[sample_index]
+        metrics = compute_luma_metrics(sample_frame)
+        if metrics is not None:
+            phase3_metrics = metrics
+            luma_min = float(os.getenv("MONEYOS_PHASE3_LUMA_MIN", "25"))
+            dark_pct_max = float(os.getenv("MONEYOS_PHASE3_DARK_PCT_MAX", "0.85"))
+            if metrics["mean_luma"] < luma_min or metrics["dark_pixel_ratio"] > dark_pct_max:
+                warning_msg = (
+                    "PHASE3_SILHOUETTE_WARNING "
+                    f"mean_luma={metrics['mean_luma']} dark_ratio={metrics['dark_pixel_ratio']} "
+                    f"resolution={metrics['resolution']}"
+                )
+                phase3_logger.warning(warning_msg)
+                warnings.append(warning_msg)
     _proof_static_frames(frames_dir, report_path)
     _validate_blender_artifacts(
         output_dir,
@@ -1134,7 +1181,23 @@ def render_anime_3d_60s(
         if not fast_proof:
             raise RuntimeError(validation.message)
     _update_report_warnings(report_path, warnings)
+    if phase3_debug:
+        append_debug_to_report(
+            report_path,
+            {
+                "phase3_trace": phase3_trace,
+                "blender_tail": {
+                    "stdout": read_tail_lines(blender_stdout_path, 100),
+                    "stderr": read_tail_lines(blender_stderr_path, 100),
+                },
+                "phase3_metrics": phase3_metrics,
+            },
+        )
     clear_in_use(job_id)
+    phase3_logger.info(
+        "PHASE3_PIPELINE_EXIT "
+        f"success=1 duration={duration_s:.3f} output_file={final_path}"
+    )
     return Anime3DResult(
         output_dir=output_dir,
         final_video=final_path,
@@ -1142,6 +1205,24 @@ def render_anime_3d_60s(
         duration_seconds=duration_s,
         warnings=warnings,
     )
+
+
+def render_anime_3d_60s(
+    job_id: str,
+    status_callback: StatusCallback = None,
+    overrides: dict | None = None,
+) -> Anime3DResult:
+    phase3_logger = get_phase3_logger()
+    started = time.time()
+    try:
+        result = _render_anime_3d_60s_impl(job_id, status_callback=status_callback, overrides=overrides)
+        return result
+    except Exception as exc:  # noqa: BLE001
+        phase3_logger.error(
+            "PHASE3_PIPELINE_EXIT "
+            f"success=0 duration={time.time() - started:.3f} output_file=- error={exc}"
+        )
+        raise
 
 
 def finalize_anime_3d(job_id: str, status_callback: StatusCallback = None) -> Anime3DResult:

@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import logging
 import math
 import os
 import random
@@ -12,6 +13,94 @@ from pathlib import Path
 
 import bpy
 from mathutils import Vector
+
+
+PHASE3_DEBUG = os.getenv("MONEYOS_DEBUG_PHASE3", "0") == "1"
+PHASE3_LOGGER = logging.getLogger("moneyos.phase3")
+if not PHASE3_LOGGER.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    PHASE3_LOGGER.addHandler(_handler)
+PHASE3_LOGGER.setLevel(logging.DEBUG if PHASE3_DEBUG else logging.INFO)
+PHASE3_LOGGER.propagate = False
+
+
+def _phase3_log(message: str) -> None:
+    if not PHASE3_DEBUG and not ("ENTER" in message or "EXIT" in message):
+        return
+    PHASE3_LOGGER.info(message)
+
+
+def _phase3_validate_materials(scene: bpy.types.Scene) -> list[dict[str, object]]:
+    issues: list[dict[str, object]] = []
+    for obj in scene.objects:
+        if obj.type != "MESH":
+            continue
+        if not obj.material_slots:
+            issues.append({"object": obj.name, "reason": "no_material_slots"})
+            continue
+        for slot in obj.material_slots:
+            material = slot.material
+            if material is None:
+                issues.append({"object": obj.name, "reason": "empty_material_slot"})
+                continue
+            if not material.node_tree:
+                issues.append({"object": obj.name, "material": material.name, "reason": "missing_node_tree"})
+                continue
+            has_output = any(node.type == "OUTPUT_MATERIAL" for node in material.node_tree.nodes)
+            if not has_output:
+                issues.append({"object": obj.name, "material": material.name, "reason": "missing_material_output"})
+    return issues
+
+
+def _phase3_character_style_check(scene: bpy.types.Scene) -> dict[str, object]:
+    armatures = [obj for obj in bpy.data.objects if obj.type == "ARMATURE"]
+    candidates = [
+        obj
+        for obj in bpy.data.objects
+        if obj.type == "MESH"
+        and (
+            "hero" in obj.name.lower()
+            or "character" in obj.name.lower()
+            or (obj.parent is not None and obj.parent.type == "ARMATURE")
+        )
+    ]
+    material_count = 0
+    toon_hits = 0
+    for obj in candidates:
+        for slot in obj.material_slots:
+            mat = slot.material
+            if mat is None or mat.node_tree is None:
+                continue
+            material_count += 1
+            for node in mat.node_tree.nodes:
+                if node.type == "VALTORGB":
+                    toon_hits += 1
+                if node.type == "GROUP" and getattr(getattr(node, "node_tree", None), "name", "").lower().find("toon") >= 0:
+                    toon_hits += 1
+                if node.type == "GROUP" and getattr(getattr(node, "node_tree", None), "name", "").lower().find("anime") >= 0:
+                    toon_hits += 1
+    passed = bool(armatures) and bool(candidates) and material_count > 0 and toon_hits > 0
+    result = {
+        "armature_count": len(armatures),
+        "mesh_count": len(candidates),
+        "materials_detected": material_count,
+        "toon_nodegroups_detected": toon_hits,
+        "passed": passed,
+    }
+    if passed:
+        _phase3_log(
+            "PHASE3_CHARACTER_STYLE_CHECK_PASS "
+            f"armature_count={len(armatures)} mesh_count={len(candidates)} "
+            f"materials_detected={material_count} toon_nodegroups_detected={toon_hits}"
+        )
+    else:
+        _phase3_log(
+            "PHASE3_CHARACTER_STYLE_CHECK_FAIL "
+            f"armature_count={len(armatures)} mesh_count={len(candidates)} "
+            f"materials_detected={material_count} nodegroups_detected={toon_hits}"
+        )
+    return result
 
 
 SMOOTHING_PRESET_DEFAULTS: dict[str, tuple[int, int]] = {
@@ -2390,6 +2479,11 @@ def _write_report(report_path: Path, payload: dict[str, object]) -> None:
 
 def main() -> None:
     args = _parse_args()
+    _phase3_log(
+        "PHASE3_BLENDER_RENDER_SEGMENT_ENTER "
+        f"segment={Path(args.output).stem} preset={args.render_preset} "
+        f"engine={args.engine} device={args.gpu} frame_range=1-{int(max(1, (args.duration or 0) * args.fps) or args.fps)}"
+    )
     print(bpy.app.version_string)
     print(f"Render engine: {args.engine}")
     output_path = Path(args.output)
@@ -2461,6 +2555,7 @@ def main() -> None:
     )
     print(assets_log)
     print(selected_log)
+    _phase3_log("PHASE3_ASSET_LOADING_DONE")
 
     _clear_scene()
     scene = bpy.context.scene
@@ -2577,13 +2672,22 @@ def main() -> None:
         selected_env,
         style_preset=args.style_preset,
     )
+    _phase3_log("PHASE3_CHARACTER_IMPORT_DONE")
     character_meshes = _load_character_asset(assets_dir, args.character_asset, warnings)
     if character_meshes:
         for obj in character_meshes:
             obj["mo_role"] = "subject"
     style_counts = {"characters": 0, "props": 0, "meshes_styled": 0}
     if str(args.style_preset).strip().lower() == "anime_visual":
+        _phase3_log("PHASE3_SHADER_APPLY_START")
         style_counts = _apply_anime_visual_style(scene, assets_dir, args.outline_mode)
+        _phase3_log("PHASE3_SHADER_APPLY_DONE")
+    material_issues = _phase3_validate_materials(scene)
+    if material_issues:
+        _phase3_log(
+            "PHASE3_SHADER_MISSING_OR_INVALID "
+            f"count={len(material_issues)} sample={material_issues[:5]}"
+        )
     _ensure_visual_density(scene, args.duration, args.fps)
     if args.character_variation:
         try:
@@ -2598,7 +2702,9 @@ def main() -> None:
             validate_anime_character_scene(scene)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Anime character validation failed: {exc}") from exc
+    phase3_character_check = _phase3_character_style_check(scene)
     visibility_info = _setup_visibility_scene(scene, objects.get("camera"), rng)
+    _phase3_log("PHASE3_CAMERA_SETUP_DONE")
     _add_vfx(
         assets_dir,
         scene,
@@ -2710,6 +2816,8 @@ def main() -> None:
         lighting_color = str(shot.get("lighting_color", "#FFFFFF"))
         _apply_lighting_preset(scene, f"{lighting_preset}|intensity={lighting_intensity}|color={lighting_color}")
         print(f"[LIGHTING] preset = {lighting_preset} shot={idx}/{len(shot_plan)}")
+        if idx == 1:
+            _phase3_log("PHASE3_LIGHTING_SETUP_DONE")
         _apply_impact_vfx(scene, shot, args.vfx_emission_strength)
         print(
             f"[SHOT {idx}/{len(shot_plan)}] pre-hold={shot.get('pre_hold_frames', 0)} "
@@ -2773,8 +2881,16 @@ def main() -> None:
         "missing_assets": missing_assets,
         "used_assets": used_assets,
         "procedural_fallback": False,
+        "debug": {
+            "phase3_character_check": phase3_character_check,
+            "phase3_material_issues": material_issues,
+        },
     }
     report_path.write_text(json.dumps(render_report, indent=2), encoding="utf-8")
+    _phase3_log(
+        "PHASE3_BLENDER_RENDER_SEGMENT_EXIT "
+        f"success=1 output={output_path} frames={scene.frame_end}"
+    )
 
 
 if __name__ == "__main__":

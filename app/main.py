@@ -8,6 +8,7 @@ import uuid
 import hashlib
 import shutil
 import time
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
@@ -49,14 +50,22 @@ from app.core.visuals.anime_3d.render_pipeline import (
 from app.core.pipeline import PipelineResult, run_pipeline
 from app.core.system_specs import get_system_specs
 from src.utils.phase import is_phase2_or_higher, normalize_phase
+from app.core.debug.phase3_checks import get_phase3_logger, is_phase3_debug_enabled
 
 app = FastAPI()
+_phase3_logger = get_phase3_logger()
+_phase3_debug = is_phase3_debug_enabled()
 
 
 @app.middleware("http")
 async def log_404_requests(request: Request, call_next):
+    if _phase3_debug:
+        _phase3_logger.info(f"PHASE3_REQUEST method={request.method} path={request.url.path}")
+        if request.url.path == "/jobs/anime-episode-60s-3d":
+            job_hint = request.query_params.get("job_id") or request.headers.get("x-job-id") or "-"
+            _phase3_logger.info(f"PHASE3_ROUTE_HIT job={job_hint}")
     response = await call_next(request)
-    if response.status_code == 404:
+    if _phase3_debug and response.status_code == 404:
         query = request.url.query or "-"
         print(
             "[404] "
@@ -1327,3 +1336,11 @@ def _register_api_aliases() -> None:
 
 
 _register_api_aliases()
+
+if _phase3_debug:
+    registered_paths = {route.path for route in app.routes if hasattr(route, "path")}
+    for required in ("/jobs/anime-episode-60s-3d", "/jobs/anime-episode-60s-3d/finalize"):
+        if required in registered_paths:
+            _phase3_logger.info(f"PHASE3_ROUTE_REGISTERED {required}")
+        else:
+            _phase3_logger.error(f"PHASE3_ROUTE_MISSING {required}")
