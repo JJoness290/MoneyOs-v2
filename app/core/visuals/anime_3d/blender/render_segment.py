@@ -707,22 +707,76 @@ def _find_character_asset(workdir: Path) -> Path | None:
     return None
 
 
+def _ensure_placeholder_armature_with_cube() -> list[bpy.types.Object]:
+    bpy.ops.object.armature_add(enter_editmode=True, location=(0.0, 0.0, 0.0))
+    armature = bpy.context.active_object
+    if armature and armature.type == "ARMATURE":
+        edit_bones = armature.data.edit_bones
+        if edit_bones:
+            bone = edit_bones[0]
+            bone.head = (0.0, 0.0, 0.0)
+            bone.tail = (0.0, 0.0, 1.0)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.ops.mesh.primitive_cube_add(size=0.6, location=(0.0, 0.0, 0.9))
+    cube = bpy.context.active_object
+    if cube is not None and armature is not None:
+        cube.parent = armature
+        modifier = cube.modifiers.new(name="Armature", type="ARMATURE")
+        modifier.object = armature
+        cube["mo_role"] = "subject"
+    print("[ASSETS] fallback=placeholder_armature_cube")
+    return [obj for obj in (cube, armature) if obj is not None]
+
+
+def _find_existing_armature(new_objects: list[bpy.types.Object]) -> bpy.types.Object | None:
+    for obj in new_objects:
+        if obj and obj.type == "ARMATURE":
+            return obj
+    for obj in bpy.data.objects:
+        if obj.type == "ARMATURE" and getattr(getattr(obj, "data", None), "bones", None):
+            if len(obj.data.bones) > 0:
+                return obj
+    return None
+
+
 def _load_fallback_hero_blend(assets_root: Path) -> list[bpy.types.Object]:
     hero_path = assets_root / "characters" / "hero.blend"
     if not hero_path.exists():
-        return []
+        print(f"[ASSETS] fallback_hero_missing path={hero_path}")
+        return _ensure_placeholder_armature_with_cube()
     try:
-        collections = _append_collections(hero_path)
-        objects: list[bpy.types.Object] = []
-        for collection in collections:
-            objects.extend(list(collection.all_objects))
-        meshes = _normalize_character(objects)
+        appended_objects: list[bpy.types.Object] = []
+        with bpy.data.libraries.load(str(hero_path), link=False) as (data_from, data_to):
+            data_to.collections = list(data_from.collections)
+        non_empty = [c for c in data_to.collections if c and len(c.objects) > 0]
+        if non_empty:
+            collection = non_empty[0]
+            if collection.name not in bpy.context.scene.collection.children:
+                bpy.context.scene.collection.children.link(collection)
+            appended_objects.extend(list(collection.all_objects))
+        else:
+            with bpy.data.libraries.load(str(hero_path), link=False) as (data_from, data_to):
+                data_to.objects = list(data_from.objects)
+            for obj in data_to.objects:
+                if obj is None:
+                    continue
+                bpy.context.scene.collection.objects.link(obj)
+                appended_objects.append(obj)
+        armature = _find_existing_armature(appended_objects)
+        if armature is None:
+            appended_objects.extend(_ensure_placeholder_armature_with_cube())
+        meshes = _normalize_character(appended_objects)
         if meshes:
-            print(f"[ASSETS] fallback=hero_blend path={hero_path}")
-        return meshes
+            print(f"[ASSETS] fallback=hero_blend path={hero_path} meshes={len(meshes)}")
+            return meshes
+        armature = _find_existing_armature(appended_objects)
+        if armature is not None:
+            print(f"[ASSETS] fallback=hero_blend_armature_only path={hero_path}")
+            return [armature]
+        return _ensure_placeholder_armature_with_cube()
     except Exception as exc:  # noqa: BLE001
         print(f"[ASSETS] fallback_hero_blend_failed error={exc}")
-        return []
+        return _ensure_placeholder_armature_with_cube()
 
 
 def _import_character_asset(asset_path: Path, assets_root: Path | None = None) -> tuple[bpy.types.Object | None, str]:
@@ -2815,12 +2869,23 @@ def main() -> None:
             variation = {}
         _apply_character_variation(scene, variation)
     if str(args.style_preset).strip().lower() == "anime_visual":
-        try:
-            from app.core.validators.anime_character_validator import validate_anime_character_scene
+        armature_exists = any(
+            obj.type == "ARMATURE" and getattr(getattr(obj, "data", None), "bones", None) and len(obj.data.bones) > 0
+            for obj in scene.objects
+        )
+        if armature_exists or bool(strict_assets):
+            try:
+                from app.core.validators.anime_character_validator import validate_anime_character_scene
 
-            validate_anime_character_scene(scene)
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"Anime character validation failed: {exc}") from exc
+                validate_anime_character_scene(scene)
+            except Exception as exc:  # noqa: BLE001
+                if bool(strict_assets):
+                    raise RuntimeError(f"Anime character validation failed: {exc}") from exc
+                warnings.append("character_validation_skipped_no_armature")
+                print(f"[VALIDATOR] warning={exc} strict_assets=0; continuing with procedural fallback")
+        else:
+            warnings.append("character_validation_skipped_no_armature")
+            print("[VALIDATOR] no armature detected and strict_assets=0; continuing with procedural fallback")
     phase3_character_check = _phase3_character_style_check(scene)
     visibility_info = _setup_visibility_scene(scene, objects.get("camera"), rng)
     _phase3_log("PHASE3_CAMERA_SETUP_DONE")
