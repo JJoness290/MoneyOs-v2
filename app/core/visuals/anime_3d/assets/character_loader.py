@@ -20,6 +20,33 @@ class CharacterAsset:
     sha256: str
 
 
+def _local_fallback_characters(assets_root: Path) -> list[CharacterAsset]:
+    char_root = assets_root / "characters"
+    candidates: list[Path] = []
+    for rel in ("", "starter_pack", "kenney_animated_characters_3"):
+        root = (char_root / rel) if rel else char_root
+        if not root.exists():
+            continue
+        for pattern in ("*.blend", "*.fbx", "*.glb", "*.gltf"):
+            candidates.extend(sorted(path for path in root.rglob(pattern) if path.is_file()))
+    seen: set[Path] = set()
+    assets: list[CharacterAsset] = []
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        assets.append(
+            CharacterAsset(
+                name=path.stem,
+                local_path=path,
+                source_url="local://starter_charpack",
+                license="local",
+                sha256="",
+            )
+        )
+    return assets
+
+
 def ensure_characters(assets_root: Path, cache_root: Path) -> list[CharacterAsset]:
     provisioned = load_provisioned_characters(assets_root)
     if not provisioned:
@@ -36,7 +63,7 @@ def ensure_characters(assets_root: Path, cache_root: Path) -> list[CharacterAsse
             )
         )
     if not assets:
-        raise RuntimeError("No anime characters are available after provisioning")
+        assets = _local_fallback_characters(assets_root)
     return assets
 
 

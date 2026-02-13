@@ -814,10 +814,21 @@ def _render_anime_3d_60s_impl(
     if str(style_preset).strip().lower() == "anime_visual":
         assets_root = get_assets_root()
         cache_root = (get_output_root() / "cache").resolve()
-        characters = ensure_characters(assets_root, cache_root)
-        selected_character = pick_character(seed_value, characters)
-        character_asset = str(selected_character.local_path)
-        ensure_vrm_addon_ready(Path(ensure_blender_path()), cache_root, selected_character.local_path)
+        try:
+            characters = ensure_characters(assets_root, cache_root)
+            selected_character = pick_character(seed_value, characters)
+            character_asset = str(selected_character.local_path)
+            if selected_character.local_path.suffix.lower() == ".vrm":
+                ensure_vrm_addon_ready(Path(ensure_blender_path()), cache_root, selected_character.local_path)
+            else:
+                phase3_logger.warning(
+                    "PHASE3_CHARACTER_FALLBACK character=%s path=%s",
+                    selected_character.name,
+                    selected_character.local_path,
+                )
+        except Exception as exc:  # noqa: BLE001
+            phase3_logger.warning("PHASE3_CHARACTER_PROVISION_WARNING error=%s", exc)
+            trace_event(phase3_trace, "PHASE3_CHARACTER_PROVISION_WARNING", error=str(exc))
     if overrides.get("outline_mode"):
         outline_mode = str(overrides["outline_mode"])
     if overrides.get("postfx") is not None:
