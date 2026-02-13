@@ -614,11 +614,32 @@ def _find_missing_assets(assets_dir: Path) -> list[str]:
 
 
 def _create_procedural_humanoid(name: str, location: tuple[float, float, float]) -> tuple[bpy.types.Object, int]:
-    raise RuntimeError("Procedural primitive humanoids are disabled for anime pipeline.")
+    bpy.ops.object.armature_add(enter_editmode=False, location=location)
+    armature = bpy.context.active_object
+    armature.name = f"{name}_rig"
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.45, location=(location[0], location[1], location[2] + 1.2))
+    body = bpy.context.active_object
+    body.name = f"{name}_body"
+    body["mo_role"] = "subject"
+    modifier = body.modifiers.new(name="Armature", type="ARMATURE")
+    modifier.object = armature
+    body.parent = armature
+    if not body.data.materials:
+        mat = bpy.data.materials.new(name=f"{name}_toon")
+        mat.use_nodes = True
+        body.data.materials.append(mat)
+    return armature, 0
 
 
 def _animate_procedural_humanoid(root: bpy.types.Object, total_frames: int) -> None:
-    del root, total_frames
+    if total_frames <= 1:
+        return
+    root.location.x -= 0.4
+    root.keyframe_insert(data_path="location", frame=1)
+    root.location.x += 0.8
+    root.keyframe_insert(data_path="location", frame=max(2, total_frames // 2))
+    root.location.x -= 0.4
+    root.keyframe_insert(data_path="location", frame=total_frames)
 
 
 def _build_procedural_scene(
@@ -626,8 +647,16 @@ def _build_procedural_scene(
     total_frames: int,
     force_procedural_humanoid: bool,
 ) -> bool:
-    del scene, total_frames, force_procedural_humanoid
-    raise RuntimeError("Procedural primitive scenes are disabled for anime pipeline.")
+    del force_procedural_humanoid
+    _build_environment_template("room")
+    hero_rig, _ = _create_procedural_humanoid("hero", (0.0, 0.0, 0.0))
+    enemy_rig, _ = _create_procedural_humanoid("enemy", (2.4, -1.6, 0.0))
+    _animate_procedural_humanoid(hero_rig, total_frames)
+    _animate_procedural_humanoid(enemy_rig, total_frames)
+    if scene.camera is None:
+        bpy.ops.object.camera_add(location=(4, -6, 2.5), rotation=(math.radians(75), 0, math.radians(35)))
+        scene.camera = bpy.context.active_object
+    return True
 
 
 def _find_character_asset(workdir: Path) -> Path | None:
@@ -1148,6 +1177,7 @@ def _create_scene(
     enemy_asset: Path | None,
     default_env: str,
     style_preset: str = "default",
+    strict_assets: bool = True,
 ) -> dict[str, bpy.types.Object | None]:
     scene = bpy.context.scene
     outline_material = _create_outline_material()
@@ -1194,13 +1224,22 @@ def _create_scene(
                 if child.type == "MESH":
                     child["mo_role"] = "subject"
         elif hero_path is None or not hero_path.exists():
-            raise RuntimeError("Character asset missing; primitive fallback is disabled.")
+            if strict_assets:
+                raise RuntimeError("Character asset missing; strict-assets=1")
+            print("[ASSETS] fallback=primitive_character reason=no_character_assets")
+            hero_armature, _ = _create_procedural_humanoid("hero", (0.0, 0.0, 0.0))
         if enemy_armature:
             enemy_armature.location = (3, -2, 0)
         elif enemy_path is None or not enemy_path.exists():
-            raise RuntimeError("Enemy asset missing; primitive fallback is disabled.")
+            if strict_assets:
+                raise RuntimeError("Enemy asset missing; strict-assets=1")
+            print("[ASSETS] fallback=primitive_character reason=no_enemy_asset")
+            enemy_armature, _ = _create_procedural_humanoid("enemy", (2.4, -1.6, 0.0))
     else:
-        raise RuntimeError("Auto primitive character generation is disabled. Provide an anime character asset.")
+        if strict_assets:
+            raise RuntimeError("Auto primitive character generation is disabled. Provide an anime character asset.")
+        print("[ASSETS] fallback=primitive_character reason=asset_mode_non_local")
+        _build_procedural_scene(scene, int(scene.frame_end), True)
 
     bpy.ops.object.camera_add(location=(4, -6, 2.5), rotation=(math.radians(75), 0, math.radians(35)))
     camera = bpy.context.active_object
@@ -2445,6 +2484,19 @@ def _write_report(report_path: Path, payload: dict[str, object]) -> None:
     report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def phase3_asset_self_test(assets_root: str = "C:/MoneyOS/assets") -> dict[str, int]:
+    root = Path(assets_root)
+    inventory, asset_dirs = discover_assets(root)
+    counts = {
+        "found_env": len(inventory.get("envs", [])),
+        "found_chars": len(inventory.get("characters", [])),
+        "found_anims": len(inventory.get("anims", [])),
+        "found_vfx": len(inventory.get("vfx", [])),
+    }
+    print(f"[ASSET_SELF_TEST] assets_root={root} asset_dirs={asset_dirs} counts={counts}")
+    return counts
+
+
 def main() -> None:
     args = _parse_args()
     _phase3_log(
@@ -2539,6 +2591,22 @@ def main() -> None:
     )
     print(assets_log)
     print(selected_log)
+    print(
+        "[ASSETS] selected_paths "
+        f"env={str(env_blend) if env_blend else 'none'} "
+        f"hero={str(hero_asset) if hero_asset else 'none'} "
+        f"enemy={str(enemy_asset) if enemy_asset else 'none'} "
+        f"idle={str(anim_selections.get('idle')) if anim_selections.get('idle') else 'none'} "
+        f"run={str(anim_selections.get('run')) if anim_selections.get('run') else 'none'} "
+        f"punch={str(anim_selections.get('punch')) if anim_selections.get('punch') else 'none'}"
+    )
+    for key, candidates in (("env", env_candidates), ("chars", char_candidates), ("anims", anim_candidates), ("vfx", vfx_candidates)):
+        if len(candidates) == 0:
+            probe_dir = asset_dirs.get({"env": "envs", "chars": "characters", "anims": "anims", "vfx": "vfx"}[key])
+            if probe_dir and probe_dir.exists():
+                file_count = len([p for p in probe_dir.rglob("*") if p.is_file()])
+                if file_count > 0:
+                    print(f"[ASSETS][DETECTION_BUG] key={key} dir={probe_dir} files={file_count} candidates=0")
     _phase3_log("PHASE3_ASSET_LOADING_DONE")
 
     _clear_scene()
@@ -2615,13 +2683,8 @@ def main() -> None:
         _configure_eevee(scene, args.quality)
 
     procedural_humanoid = False
-    if procedural_fallback:
-        if strict_assets:
-            raise RuntimeError("Missing assets; Blender-only pipeline requires asset packs.")
-        raise RuntimeError(
-            "Missing assets even after auto-install attempt. "
-            "Check server logs and MONEYOS_ASSET_PACK_URLS."
-        )
+    if procedural_fallback and strict_assets:
+        raise RuntimeError("Missing assets; strict-assets=1 requires local asset packs.")
 
     beat_plan = []
     if args.beat_plan:
@@ -2655,6 +2718,7 @@ def main() -> None:
         enemy_asset,
         selected_env,
         style_preset=args.style_preset,
+        strict_assets=bool(strict_assets),
     )
     _phase3_log("PHASE3_CHARACTER_IMPORT_DONE")
     character_meshes = _load_character_asset(assets_dir, args.character_asset, warnings)

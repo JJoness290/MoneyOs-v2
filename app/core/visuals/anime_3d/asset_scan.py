@@ -6,7 +6,7 @@ from typing import Iterable
 
 ASSET_DIR_ALIASES = {
     "envs": ["envs", "environments", "environment"],
-    "characters": ["characters", "chars", "character"],
+    "characters": ["characters", "chars", "character", "anime_characters", "characters_3d"],
     "anims": ["anims", "animations", "anim"],
     "vfx": ["vfx", "sprites", "fx"],
 }
