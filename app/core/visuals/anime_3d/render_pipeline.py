@@ -24,7 +24,6 @@ from app.config import (
     ANIME3D_QUALITY,
     ANIME3D_RESOLUTION,
     ANIME3D_SECONDS,
-    ANIME3D_STYLE_PRESET,
     ANIME3D_OUTLINE_MODE,
     ANIME3D_POSTFX,
     BLENDER_ENGINE,
@@ -33,6 +32,10 @@ from app.config import (
     VFX_EMISSION_STRENGTH,
     VFX_SCALE,
     VFX_SCREEN_COVERAGE,
+    resolve_offline_mode,
+    resolve_sd_disabled,
+    resolve_style_preset,
+    resolve_texture_mode,
 )
 from app.core.paths import get_assets_root, get_characters_dir, get_output_root
 from app.core.tts import generate_tts
@@ -724,7 +727,10 @@ def _render_anime_3d_60s_impl(
     postfx = "on" if ANIME3D_POSTFX else "off"
     outline_mode = ANIME3D_OUTLINE_MODE
     quality = ANIME3D_QUALITY
-    style_preset = ANIME3D_STYLE_PRESET
+    style_preset = resolve_style_preset()
+    texture_mode = resolve_texture_mode()
+    sd_disabled = resolve_sd_disabled()
+    offline_mode = resolve_offline_mode()
     vfx_emission_strength = VFX_EMISSION_STRENGTH
     vfx_scale = VFX_SCALE
     vfx_screen_coverage = VFX_SCREEN_COVERAGE
@@ -793,6 +799,11 @@ def _render_anime_3d_60s_impl(
         style_preset = str(overrides["style_preset"])
         if style_preset == "key_art":
             style_preset = "default"
+    # Re-resolve with offline forcing at runtime.
+    if offline_mode:
+        style_preset = "local"
+    if sd_disabled and texture_mode == "sd_local":
+        texture_mode = "procedural"
     selected_character = None
     character_variation = build_character_variation(seed_value)
     if str(style_preset).strip().lower() == "anime_visual":
@@ -826,6 +837,8 @@ def _render_anime_3d_60s_impl(
         quality = "fast"
     if duration_s <= 0:
         raise RuntimeError("Duration must be provided from audio beats and be > 0 seconds.")
+    if offline_mode or sd_disabled or texture_mode != "sd_local":
+        phase3_logger.info("[TEXTURE] mode=%s (sd_disabled/offline) using procedural textures", texture_mode)
     missing_assets = _missing_required_assets()
     if missing_assets:
         cc0_disabled = os.getenv("MONEYOS_DISABLE_CC0_BOOTSTRAP") == "1"
@@ -885,6 +898,9 @@ def _render_anime_3d_60s_impl(
         "environment": environment,
         "mode": mode,
         "style_preset": style_preset,
+        "texture_mode": texture_mode,
+        "sd_disabled": "1" if sd_disabled else "0",
+        "offline": "1" if offline_mode else "0",
         "outline_mode": outline_mode,
         "postfx": postfx,
         "quality": quality,
@@ -947,6 +963,8 @@ def _render_anime_3d_60s_impl(
     frames_dir = output_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     script_path = (Path(__file__).parent / "blender" / "render_segment.py").resolve()
+    os.environ["MONEYOS_ANIME3D_TEXTURE_MODE"] = texture_mode
+    os.environ["MONEYOS_SD_DISABLE"] = "1" if sd_disabled else os.getenv("MONEYOS_SD_DISABLE", "0")
     blender_args: list[str] = []
     add_opt(blender_args, "--output", video_path)
     add_opt(blender_args, "--audio", audio_path)

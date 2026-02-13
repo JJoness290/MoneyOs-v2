@@ -110,6 +110,15 @@ def _force_install() -> bool:
     return os.getenv("MONEYOS_STARTER_CHAR_FORCE", "0") == "1"
 
 
+def _offline_mode() -> bool:
+    if os.getenv("MONEYOS_NO_NETWORK", "0") == "1" or os.getenv("MONEYOS_DISABLE_NET", "0") == "1":
+        return True
+    providers = (os.getenv("MONEYOS_ASSET_PROVIDERS") or "").strip().lower()
+    if providers in {"none", "off", "disabled", "false", "0"}:
+        return True
+    return False
+
+
 def needs_install(char_dir: Path) -> bool:
     inventory = list_character_assets(char_dir)
     if _force_install():
@@ -239,6 +248,7 @@ def ensure_starter_characters_installed(char_dir: Path | None = None, strict: bo
     pack_url = os.getenv("MONEYOS_STARTER_CHAR_PACK_URL", STARTER_PACK_DEFAULT_URL).strip()
     expected_sha = os.getenv("MONEYOS_STARTER_CHAR_PACK_SHA256", "").strip().lower()
     auto_install = os.getenv("MONEYOS_AUTO_INSTALL_STARTER_CHARACTERS", "1") == "1"
+    offline_mode = _offline_mode()
 
     runtime_char_dir.mkdir(parents=True, exist_ok=True)
     migrated_files = _migrate_legacy_if_needed(runtime_char_dir)
@@ -261,22 +271,25 @@ def ensure_starter_characters_installed(char_dir: Path | None = None, strict: bo
             "migrated_files": migrated_files,
         }
 
-    if not auto_install:
+    if not auto_install or offline_mode:
         message = (
-            "No usable character assets found and auto-install is disabled. "
+            "Starter character auto-install skipped (offline/disabled). "
+            "Using local/procedural assets only."
+            if offline_mode
+            else "No usable character assets found and auto-install is disabled. "
             "Set MONEYOS_AUTO_INSTALL_STARTER_CHARACTERS=1 to install starter characters automatically."
         )
-        if strict:
+        if strict and not offline_mode:
             raise RuntimeError(message)
         return {
-            "ok": False,
+            "ok": True if offline_mode else False,
             "installed": False,
             "provider": provider,
             "counts": pre.get("counts", {}),
             "rigged_count": pre.get("rigged_usable", 0),
             "required_min_rigged": min_rigged,
             "receipt_path": str(_receipt_path(runtime_char_dir).resolve()),
-            "reason": "auto-install disabled and insufficient rigged assets",
+            "reason": "offline_or_auto_install_disabled" if offline_mode else "auto-install disabled and insufficient rigged assets",
             "message": message,
         }
 

@@ -221,3 +221,36 @@ ASSET_REVIEW_MODE = os.getenv("MONEYOS_ASSET_REVIEW_MODE", "0") == "1"
 MONEYOS_DISABLE_CC0_BOOTSTRAP = os.getenv("MONEYOS_DISABLE_CC0_BOOTSTRAP", "1")
 
 SKETCHFAB_API_TOKEN = os.getenv("MONEYOS_SKETCHFAB_API_TOKEN")
+
+
+
+def _env_text(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def resolve_offline_mode() -> bool:
+    return _env_text("MONEYOS_NO_NETWORK") == "1" or _env_text("MONEYOS_DISABLE_NET") == "1"
+
+
+def resolve_sd_disabled() -> bool:
+    return _env_text("MONEYOS_SD_DISABLE") == "1" or resolve_offline_mode()
+
+
+def resolve_texture_mode() -> str:
+    env_texture_mode = _env_text("MONEYOS_TEXTURE_MODE") or _env_text("MONEYOS_ANIME3D_TEXTURE_MODE") or ANIME3D_TEXTURE_MODE
+    mode = env_texture_mode.lower()
+    if mode not in {"sd_local", "procedural", "none"}:
+        mode = ANIME3D_TEXTURE_MODE
+    if resolve_sd_disabled() and mode == "sd_local":
+        return "procedural"
+    if resolve_offline_mode() and mode == "sd_local":
+        return "procedural"
+    return mode
+
+
+def resolve_style_preset() -> str:
+    env_style = _env_text("MONEYOS_STYLE_PRESET") or _env_text("MONEYOS_ANIME3D_STYLE_PRESET") or ANIME3D_STYLE_PRESET
+    style = env_style.lower() if env_style else ANIME3D_STYLE_PRESET
+    if resolve_offline_mode():
+        return "local"
+    return style

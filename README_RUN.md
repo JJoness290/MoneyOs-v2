@@ -93,3 +93,29 @@ Artifacts in the same folder:
 - `render_report.json`
 - `frames/`
 - `blender_stdout.txt` / `blender_stderr.txt`
+
+
+## Offline procedural mode (no HTTP/network)
+
+```powershell
+$env:MONEYOS_TEXTURE_MODE = "procedural"
+$env:MONEYOS_STYLE_PRESET = "local"
+$env:MONEYOS_SD_DISABLE = "1"
+$env:MONEYOS_NO_NETWORK = "1"
+$env:MONEYOS_DISABLE_NET = "1"
+$env:MONEYOS_DISABLE_CC0_BOOTSTRAP = "1"
+$env:MONEYOS_ASSET_PROVIDERS = "none"
+$env:MONEYOS_ASSET_MAX_DOWNLOADS_PER_RUN = "0"
+```
+
+Then verify:
+
+```bash
+curl http://127.0.0.1:8000/debug/status
+```
+
+Expected fields:
+- `"texture_mode": "procedural"`
+- `"style_preset": "local"`
+- `"sd_disabled": true`
+- `"offline": true`

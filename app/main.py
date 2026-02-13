@@ -22,8 +22,6 @@ from app.config import (
     ANIME3D_ASSET_MODE,
     ANIME3D_POSTFX,
     ANIME3D_QUALITY,
-    ANIME3D_STYLE_PRESET,
-    ANIME3D_TEXTURE_MODE,
     ANIME3D_OUTLINE_MODE,
     ANIME3D_RESOLUTION,
     AUTO_CHARACTERS_DIR,
@@ -32,6 +30,10 @@ from app.config import (
     SD_MODEL_PATH,
     VIDEO_DIR,
     VISUAL_MODE,
+    resolve_offline_mode,
+    resolve_sd_disabled,
+    resolve_style_preset,
+    resolve_texture_mode,
 )
 from app.core.paths import get_assets_root, get_characters_dir, get_output_root, get_repo_root
 from app.core.assets.harvester.cache import get_cache_paths
@@ -548,6 +550,10 @@ async def debug_status() -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         last_auto_assets_error = str(exc)
     vram_gb = None
+    resolved_texture_mode = resolve_texture_mode()
+    resolved_style_preset = resolve_style_preset()
+    resolved_sd_disabled = resolve_sd_disabled()
+    resolved_offline = resolve_offline_mode()
     payload = {
         "autopilot": autopilot_status(),
         "visual_mode": VISUAL_MODE,
@@ -564,10 +570,15 @@ async def debug_status() -> JSONResponse:
         "auto_assets_sources_used": auto_assets_payload.get("sources", []),
         "last_auto_assets_error": last_auto_assets_error,
         "asset_mode": ANIME3D_ASSET_MODE,
-        "texture_mode": ANIME3D_TEXTURE_MODE,
+        "texture_mode": resolved_texture_mode,
+        "env_texture_mode": os.getenv("MONEYOS_TEXTURE_MODE") or os.getenv("MONEYOS_ANIME3D_TEXTURE_MODE", ""),
         "sd_model_used": SD_MODEL_PATH,
         "texture_resolution": f"{ANIME3D_RESOLUTION[0]}x{ANIME3D_RESOLUTION[1]}",
-        "style_preset": ANIME3D_STYLE_PRESET,
+        "style_preset": resolved_style_preset,
+        "env_style_preset": os.getenv("MONEYOS_STYLE_PRESET") or os.getenv("MONEYOS_ANIME3D_STYLE_PRESET", ""),
+        "sd_disabled": resolved_sd_disabled,
+        "offline": resolved_offline,
+        "env_sd_disable": os.getenv("MONEYOS_SD_DISABLE", "0"),
         "outline_mode": ANIME3D_OUTLINE_MODE,
         "postfx": ANIME3D_POSTFX,
         "quality": ANIME3D_QUALITY,
@@ -779,7 +790,7 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                     "environment": environment,
                     "mode": mode,
                     "render_preset": os.getenv("MONEYOS_RENDER_PRESET", "fast_proof"),
-                    "model": os.getenv("MONEYOS_ANIME3D_STYLE_PRESET", "key_art"),
+                    "model": resolve_style_preset(),
                     "uniq": f"{job_id}:{index}:{seed_value}",
                 }
                 print(f"[SHOT_UNIQUENESS] payload_keys={sorted(cache_payload.keys())}")
