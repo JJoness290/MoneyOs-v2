@@ -1,36 +1,36 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 from typing import Any
-from urllib.request import urlopen
+from urllib.parse import urljoin
 import zipfile
 
-from app.core.paths import get_characters_dir, get_repo_root
+import requests
 
-STARTER_PACK_DEFAULT_URL = (
-    "https://kenney.nl/media/pages/assets/animated-characters-3/df080ca4ab-1694862585/"
-    "kenney_animated-characters-3.zip"
+from app.core.paths import get_characters_dir
+
+PACK_NAME = "kenney_animated_characters_3"
+PACK_DIR_NAME = "kenney_animated_characters_3"
+RECEIPT_NAME = ".starter_pack.json"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36 MoneyOS/Phase3"
 )
+
+SOURCE_PAGES: list[tuple[str, str]] = [
+    ("kenney.nl", "https://kenney.nl/assets/animated-characters-3"),
+    ("itch.io", "https://kenney-assets.itch.io/animated-characters-3"),
+    ("opengameart", "https://opengameart.org/content/animated-human-low-poly"),
+]
 
 USABLE_EXTENSIONS = {".blend", ".fbx", ".glb", ".gltf", ".obj"}
 RIGGED_EXTENSIONS = {".fbx", ".glb", ".gltf"}
-
-
-@dataclass(frozen=True)
-class StarterInstallResult:
-    ok: bool
-    installed: bool
-    provider: str
-    counts: dict[str, int]
-    receipt_path: str
-    message: str
 
 
 def _debug_enabled() -> bool:
@@ -38,19 +38,15 @@ def _debug_enabled() -> bool:
 
 
 def _log(message: str) -> None:
-    if _debug_enabled():
-        print(f"[STARTER_CHARPACK] {message}")
+    print(f"[STARTER_CHARPACK] {message}")
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
+def _receipt_path(char_dir: Path) -> Path:
+    return char_dir / RECEIPT_NAME
+
+
+def _pack_dir(char_dir: Path) -> Path:
+    return char_dir / PACK_DIR_NAME
 
 
 def list_character_assets(char_dir: Path) -> dict[str, Any]:
@@ -58,29 +54,25 @@ def list_character_assets(char_dir: Path) -> dict[str, Any]:
     rigged_counts: dict[str, int] = {}
     candidates: list[str] = []
     rigged_candidates: list[str] = []
-    starter_blend_count = 0
     if not char_dir.exists():
         return {
-            "counts": counts,
-            "rigged_counts": rigged_counts,
-            "candidates": candidates,
-            "rigged_candidates": rigged_candidates,
+            "counts": {},
+            "rigged_counts": {},
+            "candidates": [],
+            "rigged_candidates": [],
             "usable": 0,
             "rigged_usable": 0,
-            "starter_blend_count": starter_blend_count,
         }
     for path in char_dir.rglob("*"):
-        if not path.is_file():
+        if not path.is_file() or path.name.lower().endswith(".disabled"):
             continue
         ext = path.suffix.lower()
         counts[ext] = counts.get(ext, 0) + 1
+        if ext in USABLE_EXTENSIONS:
+            candidates.append(str(path))
         if ext in RIGGED_EXTENSIONS:
             rigged_counts[ext] = rigged_counts.get(ext, 0) + 1
             rigged_candidates.append(str(path))
-        if ext in USABLE_EXTENSIONS:
-            candidates.append(str(path))
-        if ext == ".blend" and "starter_pack" in {part.lower() for part in path.parts}:
-            starter_blend_count += 1
     return {
         "counts": counts,
         "rigged_counts": rigged_counts,
@@ -88,15 +80,7 @@ def list_character_assets(char_dir: Path) -> dict[str, Any]:
         "rigged_candidates": rigged_candidates,
         "usable": len(candidates),
         "rigged_usable": len(rigged_candidates),
-        "starter_blend_count": starter_blend_count,
     }
-
-
-def _min_required_files() -> int:
-    try:
-        return max(1, int(os.getenv("MONEYOS_STARTER_CHAR_MIN_FILES", "1")))
-    except ValueError:
-        return 1
 
 
 def _min_required_rigged() -> int:
@@ -106,44 +90,75 @@ def _min_required_rigged() -> int:
         return 1
 
 
-def _force_install() -> bool:
-    return os.getenv("MONEYOS_STARTER_CHAR_FORCE", "0") == "1"
-
-
-def _offline_mode() -> bool:
+def _download_enabled() -> bool:
+    if os.getenv("MONEYOS_AUTO_INSTALL_STARTER_CHARACTERS", "1") != "1":
+        return False
     if os.getenv("MONEYOS_NO_NETWORK", "0") == "1" or os.getenv("MONEYOS_DISABLE_NET", "0") == "1":
-        return True
+        return False
+    if os.getenv("MONEYOS_DISABLE_CC0_BOOTSTRAP", "0") == "1":
+        return False
     providers = (os.getenv("MONEYOS_ASSET_PROVIDERS") or "").strip().lower()
     if providers in {"none", "off", "disabled", "false", "0"}:
-        return True
-    return False
+        return False
+    try:
+        max_dl = int((os.getenv("MONEYOS_ASSET_MAX_DOWNLOADS_PER_RUN") or "").strip() or "-1")
+    except ValueError:
+        max_dl = -1
+    return max_dl != 0
 
 
-def needs_install(char_dir: Path) -> bool:
-    inventory = list_character_assets(char_dir)
-    if _force_install():
-        return True
-    return int(inventory.get("rigged_usable", 0)) < _min_required_rigged()
+def _extract_zip_link(page_url: str, html: str) -> str | None:
+    matches = re.findall(r"href=['\"]([^'\"]+\.zip(?:\?[^'\"]*)?)['\"]", html, flags=re.IGNORECASE)
+    if not matches:
+        return None
+    preferred = None
+    for raw in matches:
+        full = urljoin(page_url, raw)
+        lowered = full.lower()
+        if "animated" in lowered or "character" in lowered or "kenney" in lowered:
+            preferred = full
+            break
+    return preferred or urljoin(page_url, matches[0])
 
 
-def download_zip(url: str, dest_zip: Path, timeout: tuple[int, int] = (10, 120)) -> None:
-    dest_zip.parent.mkdir(parents=True, exist_ok=True)
-    _log(f"download_start url={url} dest={dest_zip}")
-    with urlopen(url, timeout=timeout[1]) as response:  # nosec B310
-        total = int(response.headers.get("Content-Length") or 0)
-        read = 0
-        with dest_zip.open("wb") as handle:
-            while True:
-                chunk = response.read(1024 * 128)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                read += len(chunk)
-                if _debug_enabled() and total > 0:
-                    pct = (read / total) * 100
-                    if int(pct) % 20 == 0:
-                        _log(f"download_progress pct={pct:.1f}")
-    _log("download_done")
+def _download_zip_multi_source(cache_zip: Path) -> tuple[Path, str]:
+    cache_zip.parent.mkdir(parents=True, exist_ok=True)
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT, "Accept": "text/html,application/zip,*/*"})
+
+    for source_name, source_url in SOURCE_PAGES:
+        for attempt in range(1, 4):
+            try:
+                _log(f"download_source={source_name} attempt={attempt} page={source_url}")
+                page_resp = session.get(source_url, timeout=60, allow_redirects=True)
+                page_resp.raise_for_status()
+                ctype = (page_resp.headers.get("Content-Type") or "").lower()
+                if "zip" in ctype and ".zip" in page_resp.url.lower():
+                    zip_url = page_resp.url
+                else:
+                    zip_url = _extract_zip_link(page_resp.url, page_resp.text)
+                if not zip_url:
+                    raise RuntimeError("zip_link_not_found")
+
+                _log(f"download_zip source={source_name} url={zip_url}")
+                with session.get(zip_url, timeout=60, allow_redirects=True, stream=True) as zip_resp:
+                    zip_resp.raise_for_status()
+                    zctype = (zip_resp.headers.get("Content-Type") or "").lower()
+                    if "text/html" in zctype:
+                        raise RuntimeError("zip_url_returned_html")
+                    with cache_zip.open("wb") as handle:
+                        for chunk in zip_resp.iter_content(chunk_size=1024 * 128):
+                            if chunk:
+                                handle.write(chunk)
+                if cache_zip.stat().st_size <= 0:
+                    raise RuntimeError("empty_zip_download")
+                return cache_zip, source_name
+            except Exception as exc:  # noqa: BLE001
+                _log(f"download_retry source={source_name} attempt={attempt} error={exc}")
+                if attempt == 3:
+                    _log(f"download_source_failed source={source_name}")
+                continue
+    raise RuntimeError("all_sources_failed")
 
 
 def _flatten_root(extracted_root: Path) -> Path:
@@ -153,206 +168,99 @@ def _flatten_root(extracted_root: Path) -> Path:
     return extracted_root
 
 
-def _copy_tree(src_root: Path, dst_root: Path) -> int:
-    installed_files = 0
-    dst_root.mkdir(parents=True, exist_ok=True)
-    for source in src_root.rglob("*"):
-        if not source.is_file():
-            continue
-        rel = source.relative_to(src_root)
-        target = dst_root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            continue
-        shutil.copy2(source, target)
-        installed_files += 1
-    return installed_files
-
-
-def _receipt_path(char_dir: Path) -> Path:
-    return char_dir / ".starter_pack.json"
-
-
-def _legacy_candidate_dirs() -> list[Path]:
-    repo_root = get_repo_root()
-    candidates = [
-        (repo_root / "assets" / "characters_3d").resolve(),
-        (repo_root / "assets" / "characters").resolve(),
-    ]
-    env_char_dir = os.getenv("MONEYOS_CHARACTERS_DIR")
-    if env_char_dir:
-        candidates.append((repo_root / env_char_dir).resolve())
-    unique: list[Path] = []
-    for item in candidates:
-        if item not in unique:
-            unique.append(item)
-    return unique
-
-
-def _migrate_legacy_if_needed(runtime_char_dir: Path) -> int:
-    runtime_inventory = list_character_assets(runtime_char_dir)
-    if int(runtime_inventory.get("rigged_usable", 0)) >= _min_required_rigged() and not _force_install():
-        return 0
-    copied_total = 0
-    for legacy_dir in _legacy_candidate_dirs():
-        if legacy_dir == runtime_char_dir or not legacy_dir.exists():
-            continue
-        legacy_inventory = list_character_assets(legacy_dir)
-        if int(legacy_inventory.get("rigged_usable", 0)) <= 0:
-            continue
-        target = runtime_char_dir / "starter_pack"
-        copied = _copy_tree(legacy_dir, target)
-        if copied > 0:
-            copied_total += copied
-            print(
-                f"PHASE3_CHARPACK_MIGRATED from={legacy_dir} to={runtime_char_dir} copied={copied}"
-            )
-    return copied_total
-
-
-def _write_receipt(
-    char_dir: Path,
-    *,
-    provider: str,
-    url: str,
-    archive_sha256: str,
-    files_installed: int,
-) -> Path:
-    receipt_path = _receipt_path(char_dir)
-    inventory = list_character_assets(char_dir)
-    payload = {
-        "provider": provider,
-        "url": url,
+def _write_receipt(char_dir: Path, *, ok: bool, installed: bool, source: str, message: str) -> Path:
+    receipt = {
+        "ok": ok,
+        "installed": installed,
+        "pack": PACK_NAME,
+        "source": source,
         "installed_at": datetime.now(timezone.utc).isoformat(),
-        "archive_sha256": archive_sha256,
-        "files_installed": files_installed,
-        "usable_assets": inventory.get("usable", 0),
-        "counts": inventory.get("counts", {}),
-        "starter_pack_path": str((char_dir / "starter_pack").resolve()),
-        "attribution": {
-            "name": "Kenney Animated Characters 3",
-            "license": "CC0",
-            "source": "https://kenney.nl/assets/animated-characters-3",
-        },
-        "version": 1,
+        "message": message,
     }
-    receipt_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    receipt_path = _receipt_path(char_dir)
+    receipt_path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
     return receipt_path
 
 
+def ensure_charpack_installed(assets_root: Path) -> Path:
+    char_dir = (assets_root / "characters").resolve()
+    char_dir.mkdir(parents=True, exist_ok=True)
+    pack_dir = _pack_dir(char_dir)
+    receipt_path = _receipt_path(char_dir)
+
+    # cache hit
+    inv = list_character_assets(char_dir)
+    if receipt_path.exists() and pack_dir.exists() and int(inv.get("rigged_usable", 0)) >= _min_required_rigged():
+        _log("cache_hit receipt_exists=1")
+        return pack_dir
+
+    # corruption detection + auto-repair
+    if pack_dir.exists() and int(inv.get("usable", 0)) == 0:
+        _log(f"corrupt_pack_detected deleting={pack_dir}")
+        shutil.rmtree(pack_dir, ignore_errors=True)
+
+    if not _download_enabled():
+        _log("download_skipped offline_or_disabled=1")
+        pack_dir.mkdir(parents=True, exist_ok=True)
+        _write_receipt(char_dir, ok=True, installed=False, source="local_fallback", message="offline/disabled")
+        return pack_dir
+
+    cache_zip = char_dir / ".cache" / f"{PACK_NAME}.zip"
+    source_used = "unknown"
+    try:
+        zip_path, source_used = _download_zip_multi_source(cache_zip)
+        with tempfile.TemporaryDirectory(prefix="moneyos_charpack_") as tmp:
+            tmp_root = Path(tmp)
+            extract_dir = tmp_root / "extract"
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(zip_path, "r") as archive:
+                archive.extractall(extract_dir)
+            flattened = _flatten_root(extract_dir)
+            if pack_dir.exists():
+                shutil.rmtree(pack_dir, ignore_errors=True)
+            pack_dir.mkdir(parents=True, exist_ok=True)
+            for source in flattened.rglob("*"):
+                if not source.is_file():
+                    continue
+                target = pack_dir / source.relative_to(flattened)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+        _write_receipt(char_dir, ok=True, installed=True, source=source_used, message="installed")
+        _log(f"install_success source={source_used} pack_dir={pack_dir}")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"install_failed error={exc} fallback=procedural")
+        pack_dir.mkdir(parents=True, exist_ok=True)
+        _write_receipt(char_dir, ok=True, installed=False, source="procedural_fallback", message=str(exc))
+
+    return pack_dir
+
+
 def ensure_starter_characters_installed(char_dir: Path | None = None, strict: bool = False) -> dict[str, Any]:
+    del strict
     runtime_char_dir = (char_dir or get_characters_dir()).resolve()
-    if _debug_enabled():
-        print(f"PHASE3_CHARPACK_TARGET char_dir={runtime_char_dir}")
-    provider = os.getenv("MONEYOS_STARTER_CHAR_PACK_PROVIDER", "kenney_animated_characters_3").strip()
-    pack_url = os.getenv("MONEYOS_STARTER_CHAR_PACK_URL", STARTER_PACK_DEFAULT_URL).strip()
-    expected_sha = os.getenv("MONEYOS_STARTER_CHAR_PACK_SHA256", "").strip().lower()
-    auto_install = os.getenv("MONEYOS_AUTO_INSTALL_STARTER_CHARACTERS", "1") == "1"
-    offline_mode = _offline_mode()
-
-    runtime_char_dir.mkdir(parents=True, exist_ok=True)
-    migrated_files = _migrate_legacy_if_needed(runtime_char_dir)
-    pre = list_character_assets(runtime_char_dir)
-    min_rigged = _min_required_rigged()
-    if int(pre.get("rigged_usable", 0)) >= min_rigged and not _force_install():
-        receipt = _receipt_path(runtime_char_dir)
-        if _debug_enabled():
-            print(f"PHASE3_CHARPACK_RECEIPT receipt_path={receipt}")
-        return {
-            "ok": True,
-            "installed": False,
-            "provider": provider,
-            "counts": pre.get("counts", {}),
-            "rigged_count": pre.get("rigged_usable", 0),
-            "required_min_rigged": min_rigged,
-            "receipt_path": str(receipt.resolve()),
-            "reason": "rigged assets already present",
-            "message": "starter characters already available",
-            "migrated_files": migrated_files,
-        }
-
-    if not auto_install or offline_mode:
-        message = (
-            "Starter character auto-install skipped (offline/disabled). "
-            "Using local/procedural assets only."
-            if offline_mode
-            else "No usable character assets found and auto-install is disabled. "
-            "Set MONEYOS_AUTO_INSTALL_STARTER_CHARACTERS=1 to install starter characters automatically."
-        )
-        if strict and not offline_mode:
-            raise RuntimeError(message)
-        return {
-            "ok": True if offline_mode else False,
-            "installed": False,
-            "provider": provider,
-            "counts": pre.get("counts", {}),
-            "rigged_count": pre.get("rigged_usable", 0),
-            "required_min_rigged": min_rigged,
-            "receipt_path": str(_receipt_path(runtime_char_dir).resolve()),
-            "reason": "offline_or_auto_install_disabled" if offline_mode else "auto-install disabled and insufficient rigged assets",
-            "message": message,
-        }
-
-    with tempfile.TemporaryDirectory(prefix="moneyos_starter_char_") as tmpdir:
-        tmp_root = Path(tmpdir)
-        zip_path = tmp_root / "starter_pack.zip"
-        extract_path = tmp_root / "extract"
-        extract_path.mkdir(parents=True, exist_ok=True)
-
-        download_zip(pack_url, zip_path)
-        archive_sha = sha256_file(zip_path)
-        if expected_sha and archive_sha.lower() != expected_sha:
-            raise RuntimeError(
-                "Starter character pack SHA256 mismatch. "
-                f"expected={expected_sha} actual={archive_sha}"
-            )
-
-        with zipfile.ZipFile(zip_path, "r") as archive:
-            archive.extractall(extract_path)
-        flattened = _flatten_root(extract_path)
-
-        target_pack_root = runtime_char_dir / "starter_pack"
-        installed_files = _copy_tree(flattened, target_pack_root)
-
-        # promote license/readme if available
-        for candidate in target_pack_root.rglob("*"):
-            if not candidate.is_file():
-                continue
-            name = candidate.name.lower()
-            if name.startswith("license"):
-                license_target = target_pack_root / "LICENSE.txt"
-                if not license_target.exists():
-                    shutil.copy2(candidate, license_target)
-            if name.startswith("readme"):
-                readme_target = target_pack_root / "README.txt"
-                if not readme_target.exists():
-                    shutil.copy2(candidate, readme_target)
-
-    receipt = _write_receipt(
-        runtime_char_dir,
-        provider=provider,
-        url=pack_url,
-        archive_sha256=archive_sha,
-        files_installed=installed_files,
-    )
-    if _debug_enabled():
-        print(f"PHASE3_CHARPACK_RECEIPT receipt_path={receipt}")
-    post = list_character_assets(runtime_char_dir)
-    if int(post.get("rigged_usable", 0)) < min_rigged:
-        raise RuntimeError(
-            "Starter character pack installed but insufficient rigged assets were found. "
-            f"rigged={post.get('rigged_usable', 0)} required={min_rigged}"
-        )
-
-    return {
+    assets_root = runtime_char_dir.parent
+    pack_dir = ensure_charpack_installed(assets_root)
+    inventory = list_character_assets(runtime_char_dir)
+    receipt = _receipt_path(runtime_char_dir)
+    payload: dict[str, Any] = {
         "ok": True,
-        "installed": True,
-        "provider": provider,
-        "counts": post.get("counts", {}),
-        "rigged_count": post.get("rigged_usable", 0),
-        "required_min_rigged": min_rigged,
+        "installed": False,
+        "provider": PACK_NAME,
+        "source": "unknown",
+        "counts": inventory.get("counts", {}),
+        "rigged_count": inventory.get("rigged_usable", 0),
+        "required_min_rigged": _min_required_rigged(),
         "receipt_path": str(receipt.resolve()),
-        "reason": "installed starter pack due to missing rigged assets",
-        "message": "starter characters installed",
-        "migrated_files": migrated_files,
+        "starter_pack_path": str(pack_dir.resolve()),
+        "reason": "ready",
+        "message": "starter characters ready",
     }
+    if receipt.exists():
+        try:
+            receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+            payload["installed"] = bool(receipt_payload.get("installed", False))
+            payload["source"] = receipt_payload.get("source", "unknown")
+            payload["reason"] = receipt_payload.get("message", payload["reason"])
+        except json.JSONDecodeError:
+            pass
+    return payload

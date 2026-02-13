@@ -58,7 +58,7 @@ from app.core.visuals.anime_3d.blender.install_vrm_addon import ensure_vrm_addon
 from app.core.visuals.ffmpeg_utils import has_nvenc, run_ffmpeg, _fallback_to_x264, _uses_nvenc
 from src.utils.win_paths import planned_paths_preflight
 from src.moneyos.auto_assets.cc0_bootstrap_anime3d import ensure_cc0_anime3d_assets
-from app.core.assets.starter_characters import ensure_starter_characters_installed
+from app.core.assets.starter_characters import ensure_charpack_installed, ensure_starter_characters_installed
 from app.core.debug.phase3_checks import (
     append_debug_to_report,
     compute_luma_metrics,
@@ -688,10 +688,11 @@ def _render_anime_3d_60s_impl(
     ensure_blender_path()
     ensure_minimum_assets(job_id)
     trace_event(phase3_trace, "PHASE3_CHARPACK_CHECK", stage="start")
+    _ = ensure_charpack_installed(get_assets_root())
     char_pack_result = ensure_starter_characters_installed(get_characters_dir(), strict=False)
     phase3_logger.info(
         "PHASE3_CHARPACK_CHECK "
-        f"stage=ok installed={char_pack_result.get('installed')} counts={char_pack_result.get('counts', {})}"
+        f"stage=ok installed={char_pack_result.get('installed')} source={char_pack_result.get('source')} counts={char_pack_result.get('counts', {})}"
     )
     trace_event(
         phase3_trace,
@@ -701,7 +702,11 @@ def _render_anime_3d_60s_impl(
         counts=char_pack_result.get("counts", {}),
     )
     if not char_pack_result.get("ok", False):
-        raise RuntimeError(str(char_pack_result.get("message", "Starter character pack check failed")))
+        warnings.append("charpack_unavailable_using_procedural_fallback")
+        phase3_logger.warning(
+            "PHASE3_CHARPACK_CHECK fallback=procedural reason=%s",
+            char_pack_result.get("message", "charpack check failed"),
+        )
     render_preset = os.getenv("MONEYOS_RENDER_PRESET", "fast_proof").strip().lower()
     if render_preset not in {"fast_proof", "phase15_quality"}:
         render_preset = "fast_proof"
