@@ -8,7 +8,6 @@ import random
 import shutil
 import tempfile
 import time
-import urllib.request
 import zipfile
 
 from PIL import Image, ImageDraw, ImageFilter
@@ -17,6 +16,7 @@ from app.core.assets3d.asset_pack_installer import (
     get_required_anime3d_assets as _get_required_anime3d_assets,
     missing_required_assets as _missing_required_assets,
 )
+from app.core.net.downloads import DirectUrl, download_from_sources
 from app.core.paths import get_output_root
 from app.core.visuals.anime_3d.blender_installer import ensure_blender_path
 from app.core.visuals.anime_3d.blender_runner import BlenderCommand, run_blender
@@ -49,18 +49,17 @@ def _log(message: str, quiet: bool) -> None:
     print(f"[AUTO_ASSETS] {message}", flush=True)
 
 
-def _download_with_retries(url: str, dest: Path, retries: int, timeout: int) -> None:
-    last_error: Exception | None = None
-    for _attempt in range(retries + 1):
-        try:
-            with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310
-                dest.write_bytes(response.read())
-            return
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            time.sleep(1)
-    if last_error:
-        raise last_error
+def _download_with_retries(url: str, dest: Path, retries: int, timeout: int, stage: str) -> None:
+    result, _ = download_from_sources(
+        [DirectUrl(url=url, source="vfx")],
+        dest,
+        timeout=timeout,
+        retries=max(1, retries + 1),
+        pack_id="anime3d_vfx",
+        stage=stage,
+    )
+    if not result.ok:
+        raise RuntimeError(result.error or f"download failed for {url}")
 
 
 def _acquire_lock(lock_path: Path, timeout: int) -> None:
@@ -118,7 +117,7 @@ def _download_vfx_sprites(
         for url in KENNEY_VFX_ZIP_URLS:
             try:
                 _log(f"downloading vfx sprites from {url}", quiet)
-                _download_with_retries(url, zip_path, retries, timeout)
+                _download_with_retries(url, zip_path, retries, timeout, stage="vfx_sprites")
                 sources.append(url)
                 downloaded = True
                 break
@@ -326,11 +325,13 @@ def ensure_anime3d_assets_auto(assets_root: Path, stage: str, strict_assets: boo
             _LAST_AUTO_ASSETS_ERROR = message
             if strict_assets:
                 raise RuntimeError(message)
-            raise RuntimeError(message)
+            _log(f"warning_non_strict {message}", quiet)
         _log("auto assets ready", quiet)
     except Exception as exc:  # noqa: BLE001
         _LAST_AUTO_ASSETS_ERROR = str(exc)
-        raise
+        if strict_assets:
+            raise
+        _log(f"non_strict_continue error={exc}", quiet)
     finally:
         try:
             lock_path.unlink()

@@ -6,10 +6,10 @@ from pathlib import Path
 import shutil
 import tempfile
 import time
-import urllib.request
 import zipfile
 import hashlib
 
+from app.core.net.downloads import DirectUrl, download_from_sources, get_last_download_diagnostics
 from app.core.visuals.anime_3d.storage import compute_required_bytes, ensure_storage_budget
 
 
@@ -55,20 +55,6 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _download_with_retries(url: str, dest: Path, retries: int, timeout: int) -> None:
-    last_error: Exception | None = None
-    for attempt in range(retries + 1):
-        try:
-            with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310
-                dest.write_bytes(response.read())
-            return
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            time.sleep(1)
-    if last_error:
-        raise last_error
 
 
 def _acquire_lock(lock_path: Path, timeout: int) -> None:
@@ -148,7 +134,16 @@ def ensure_anime3d_asset_pack(assets_root: Path, stage: str, strict_assets: bool
             zip_path = work_dir / "asset_pack.zip"
             try:
                 _log(f"downloading {url}", quiet)
-                _download_with_retries(url, zip_path, retries, timeout)
+                result, _source = download_from_sources(
+                    [DirectUrl(url=url, source="asset_pack_url")],
+                    zip_path,
+                    timeout=timeout,
+                    retries=max(1, retries + 1),
+                    pack_id="anime3d_asset_pack",
+                    stage=stage,
+                )
+                if not result.ok:
+                    raise RuntimeError(result.error or f"download failed for {url}")
                 if sha_env:
                     actual = _sha256(zip_path)
                     if actual.lower() != sha_env.lower():
@@ -178,6 +173,7 @@ def ensure_anime3d_asset_pack(assets_root: Path, stage: str, strict_assets: bool
                             "sha256": sha_env,
                             "timestamp": time.time(),
                             "installed_files": installed,
+                            "last_download": get_last_download_diagnostics(),
                         },
                         indent=2,
                     ),
@@ -195,10 +191,13 @@ def ensure_anime3d_asset_pack(assets_root: Path, stage: str, strict_assets: bool
             "Missing assets even after auto-install attempt. "
             "Check server logs and MONEYOS_ASSET_PACK_URLS."
         )
-        _LAST_ASSET_PACK_ERROR = str(exc)
+        diag = get_last_download_diagnostics()
+        _LAST_ASSET_PACK_ERROR = f"{exc}; url={diag.get('url')} status={diag.get('status_code')}"
         if quiet:
             print(f"[ASSET_PACK] failed: {message}", flush=True)
-        raise RuntimeError(message) from exc
+        if strict_assets:
+            raise RuntimeError(message) from exc
+        return
     finally:
         try:
             lock_path.unlink()
@@ -212,4 +211,4 @@ def ensure_anime3d_asset_pack(assets_root: Path, stage: str, strict_assets: bool
         )
         if strict_assets:
             raise RuntimeError(message)
-        raise RuntimeError(message)
+        return

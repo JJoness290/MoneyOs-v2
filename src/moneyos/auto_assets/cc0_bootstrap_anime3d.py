@@ -39,8 +39,11 @@ def _log(message: str) -> None:
 
 def _fetch_html(url: str, timeout: int = 30) -> str:
     request = urllib.request.Request(url, headers={"User-Agent": "MoneyOS-CC0-Downloader/1.0"})  # noqa: S310
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-        return response.read().decode("utf-8", errors="ignore")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+            return response.read().decode("utf-8", errors="ignore")
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"HTTPError while fetching {url} during cc0 bootstrap: {exc}") from exc
 
 
 def verify_cc0_in_html(html: str) -> bool:

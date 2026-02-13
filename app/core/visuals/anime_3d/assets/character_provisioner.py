@@ -6,7 +6,8 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any
-from urllib.request import urlopen
+
+from app.core.net.downloads import DirectUrl, download_from_sources
 
 CURATED_VRM_MODELS: tuple[dict[str, str], ...] = (
     {
@@ -49,10 +50,16 @@ def _sha256(path: Path) -> str:
 
 
 def _download_file(url: str, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with urlopen(url, timeout=120) as response:  # nosec B310
-        data = response.read()
-    target.write_bytes(data)
+    result, _ = download_from_sources(
+        [DirectUrl(url=url, source="vrm")],
+        target,
+        timeout=120,
+        retries=3,
+        pack_id="anime3d_vrm_model",
+        stage="character_provisioner",
+    )
+    if not result.ok:
+        raise RuntimeError(result.error or f"download failed for {url}")
 
 
 def _licenses_manifest_path(assets_root: Path) -> Path:

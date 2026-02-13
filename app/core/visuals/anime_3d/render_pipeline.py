@@ -877,7 +877,13 @@ def _render_anime_3d_60s_impl(
                 trace_event(phase3_trace, "PHASE3_CC0_BOOTSTRAP_WARNING", error=str(exc))
         missing_assets = _missing_required_assets()
     if asset_mode == "auto" or missing_assets:
-        ensure_anime3d_assets_auto(get_assets_root(), "render", strict_assets == 1)
+        try:
+            ensure_anime3d_assets_auto(get_assets_root(), "render", strict_assets == 1)
+        except Exception as exc:  # noqa: BLE001
+            phase3_logger.warning("PHASE3_AUTO_ASSETS_WARNING error=%s", exc)
+            trace_event(phase3_trace, "PHASE3_AUTO_ASSETS_WARNING", error=str(exc))
+            if strict_assets == 1:
+                raise
         missing_assets = _missing_required_assets()
     if asset_mode == "local":
         _ensure_assets(missing_assets, strict_assets == 1)

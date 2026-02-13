@@ -15,7 +15,7 @@ def test_ensure_charpack_uses_receipt_cache(tmp_path: Path, monkeypatch) -> None
     receipt = char_dir / sc.RECEIPT_NAME
     receipt.write_text(json.dumps({"ok": True, "installed": True, "source": "cache"}), encoding="utf-8")
 
-    def _boom(_cache_zip: Path):
+    def _boom(_cache_zip: Path, dry_run: bool = False):
         raise AssertionError("should not download when cache is valid")
 
     monkeypatch.setattr(sc, "_download_zip_multi_source", _boom)
@@ -26,7 +26,7 @@ def test_ensure_charpack_uses_receipt_cache(tmp_path: Path, monkeypatch) -> None
 def test_ensure_charpack_falls_back_without_raise(tmp_path: Path, monkeypatch) -> None:
     assets_root = tmp_path / "assets"
 
-    def _fail(_cache_zip: Path):
+    def _fail(_cache_zip: Path, dry_run: bool = False):
         raise RuntimeError("network down")
 
     monkeypatch.setattr(sc, "_download_enabled", lambda: True)

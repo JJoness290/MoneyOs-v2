@@ -4,29 +4,21 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import tempfile
 from typing import Any
-from urllib.parse import urljoin
 import zipfile
 
-import requests
-
+from app.core.net.downloads import DirectUrl, PageScrapeZip, download_from_sources, get_last_download_diagnostics
 from app.core.paths import get_characters_dir
 
 PACK_NAME = "kenney_animated_characters_3"
 PACK_DIR_NAME = "kenney_animated_characters_3"
 RECEIPT_NAME = ".starter_pack.json"
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36 MoneyOS/Phase3"
-)
-
-SOURCE_PAGES: list[tuple[str, str]] = [
-    ("kenney.nl", "https://kenney.nl/assets/animated-characters-3"),
-    ("itch.io", "https://kenney-assets.itch.io/animated-characters-3"),
-    ("opengameart", "https://opengameart.org/content/animated-human-low-poly"),
+DOWNLOAD_SOURCES: list[DirectUrl | PageScrapeZip] = [
+    PageScrapeZip("https://kenney.nl/assets/animated-characters-3", source="kenney.nl"),
+    PageScrapeZip("https://kenney-assets.itch.io/animated-characters-3", source="itch.io"),
+    PageScrapeZip("https://opengameart.org/content/animated-human-low-poly", source="opengameart"),
 ]
 
 USABLE_EXTENSIONS = {".blend", ".fbx", ".glb", ".gltf", ".obj"}
@@ -107,58 +99,23 @@ def _download_enabled() -> bool:
     return max_dl != 0
 
 
-def _extract_zip_link(page_url: str, html: str) -> str | None:
-    matches = re.findall(r"href=['\"]([^'\"]+\.zip(?:\?[^'\"]*)?)['\"]", html, flags=re.IGNORECASE)
-    if not matches:
-        return None
-    preferred = None
-    for raw in matches:
-        full = urljoin(page_url, raw)
-        lowered = full.lower()
-        if "animated" in lowered or "character" in lowered or "kenney" in lowered:
-            preferred = full
-            break
-    return preferred or urljoin(page_url, matches[0])
-
-
-def _download_zip_multi_source(cache_zip: Path) -> tuple[Path, str]:
+def _download_zip_multi_source(cache_zip: Path, dry_run: bool = False) -> tuple[Path, str]:
     cache_zip.parent.mkdir(parents=True, exist_ok=True)
-    session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENT, "Accept": "text/html,application/zip,*/*"})
-
-    for source_name, source_url in SOURCE_PAGES:
-        for attempt in range(1, 4):
-            try:
-                _log(f"download_source={source_name} attempt={attempt} page={source_url}")
-                page_resp = session.get(source_url, timeout=60, allow_redirects=True)
-                page_resp.raise_for_status()
-                ctype = (page_resp.headers.get("Content-Type") or "").lower()
-                if "zip" in ctype and ".zip" in page_resp.url.lower():
-                    zip_url = page_resp.url
-                else:
-                    zip_url = _extract_zip_link(page_resp.url, page_resp.text)
-                if not zip_url:
-                    raise RuntimeError("zip_link_not_found")
-
-                _log(f"download_zip source={source_name} url={zip_url}")
-                with session.get(zip_url, timeout=60, allow_redirects=True, stream=True) as zip_resp:
-                    zip_resp.raise_for_status()
-                    zctype = (zip_resp.headers.get("Content-Type") or "").lower()
-                    if "text/html" in zctype:
-                        raise RuntimeError("zip_url_returned_html")
-                    with cache_zip.open("wb") as handle:
-                        for chunk in zip_resp.iter_content(chunk_size=1024 * 128):
-                            if chunk:
-                                handle.write(chunk)
-                if cache_zip.stat().st_size <= 0:
-                    raise RuntimeError("empty_zip_download")
-                return cache_zip, source_name
-            except Exception as exc:  # noqa: BLE001
-                _log(f"download_retry source={source_name} attempt={attempt} error={exc}")
-                if attempt == 3:
-                    _log(f"download_source_failed source={source_name}")
-                continue
-    raise RuntimeError("all_sources_failed")
+    result, source_name = download_from_sources(
+        DOWNLOAD_SOURCES,
+        cache_zip,
+        timeout=60,
+        retries=3,
+        allow_redirects=True,
+        pack_id=PACK_NAME,
+        stage="starter_charpack",
+        dry_run=dry_run,
+    )
+    if not result.ok:
+        raise RuntimeError(result.error or "all_sources_failed")
+    if not dry_run and cache_zip.stat().st_size <= 0:
+        raise RuntimeError("empty_zip_download")
+    return cache_zip, source_name or "unknown"
 
 
 def _flatten_root(extracted_root: Path) -> Path:
@@ -169,6 +126,7 @@ def _flatten_root(extracted_root: Path) -> Path:
 
 
 def _write_receipt(char_dir: Path, *, ok: bool, installed: bool, source: str, message: str) -> Path:
+    diag = get_last_download_diagnostics()
     receipt = {
         "ok": ok,
         "installed": installed,
@@ -176,13 +134,16 @@ def _write_receipt(char_dir: Path, *, ok: bool, installed: bool, source: str, me
         "source": source,
         "installed_at": datetime.now(timezone.utc).isoformat(),
         "message": message,
+        "last_download_url": diag.get("url"),
+        "last_download_error": diag.get("error"),
+        "last_download_status_code": diag.get("status_code"),
     }
     receipt_path = _receipt_path(char_dir)
     receipt_path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
     return receipt_path
 
 
-def ensure_charpack_installed(assets_root: Path) -> Path:
+def ensure_charpack_installed(assets_root: Path, dry_run: bool = False) -> Path:
     char_dir = (assets_root / "characters").resolve()
     char_dir.mkdir(parents=True, exist_ok=True)
     pack_dir = _pack_dir(char_dir)
@@ -208,7 +169,10 @@ def ensure_charpack_installed(assets_root: Path) -> Path:
     cache_zip = char_dir / ".cache" / f"{PACK_NAME}.zip"
     source_used = "unknown"
     try:
-        zip_path, source_used = _download_zip_multi_source(cache_zip)
+        zip_path, source_used = _download_zip_multi_source(cache_zip, dry_run=dry_run)
+        if dry_run:
+            _write_receipt(char_dir, ok=True, installed=False, source=source_used, message="dry_run")
+            return pack_dir
         with tempfile.TemporaryDirectory(prefix="moneyos_charpack_") as tmp:
             tmp_root = Path(tmp)
             extract_dir = tmp_root / "extract"

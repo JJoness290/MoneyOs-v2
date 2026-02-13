@@ -3,17 +3,25 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+
+from app.core.net.downloads import DirectUrl, download_from_sources
 import subprocess
 import tempfile
-from urllib.request import urlopen
 
 VRM_ADDON_URL = "https://github.com/saturday06/VRM-Addon-for-Blender/releases/latest/download/VRM_Addon_for_Blender-release.zip"
 
 
 def _download(url: str, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with urlopen(url, timeout=120) as response:  # nosec B310
-        target.write_bytes(response.read())
+    result, _ = download_from_sources(
+        [DirectUrl(url=url, source="vrm_addon")],
+        target,
+        timeout=120,
+        retries=3,
+        pack_id="vrm_addon",
+        stage="install_vrm_addon",
+    )
+    if not result.ok:
+        raise RuntimeError(result.error or f"download failed for {url}")
 
 
 def ensure_vrm_addon_ready(blender_exe: Path, cache_root: Path, sample_vrm: Path) -> Path:

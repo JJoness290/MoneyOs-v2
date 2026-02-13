@@ -39,6 +39,7 @@ from app.core.paths import get_assets_root, get_characters_dir, get_output_root,
 from app.core.assets.harvester.cache import get_cache_paths
 from app.core.assets.harvester.harvester import harvest_assets
 from app.core.assets.starter_characters import ensure_starter_characters_installed, list_character_assets
+from app.core.net.downloads import get_last_download_diagnostics
 from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, status as autopilot_status
 from app.core.bootstrap import ensure_dependencies
 from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
@@ -554,6 +555,13 @@ async def debug_status() -> JSONResponse:
     resolved_style_preset = resolve_style_preset()
     resolved_sd_disabled = resolve_sd_disabled()
     resolved_offline = resolve_offline_mode()
+    starter_receipt = assets_root / "characters" / ".starter_pack.json"
+    starter_payload: dict[str, object] = {}
+    if starter_receipt.exists():
+        try:
+            starter_payload = json.loads(starter_receipt.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            starter_payload = {}
     payload = {
         "autopilot": autopilot_status(),
         "visual_mode": VISUAL_MODE,
@@ -561,6 +569,7 @@ async def debug_status() -> JSONResponse:
         "cwd": str(Path.cwd()),
         "repo_root": str(get_repo_root()),
         "assets_root": str(assets_root),
+        "starter_pack_receipt": starter_payload,
         "output_root": str(get_output_root()),
         "required_assets": {key: path.exists() for key, path in required_assets.items()},
         "assets_ready": {key: path.exists() for key, path in required_assets.items()},
@@ -569,6 +578,7 @@ async def debug_status() -> JSONResponse:
         "auto_assets_last_install_time": auto_assets_payload.get("timestamp"),
         "auto_assets_sources_used": auto_assets_payload.get("sources", []),
         "last_auto_assets_error": last_auto_assets_error,
+        "download_diagnostics": get_last_download_diagnostics(),
         "asset_mode": ANIME3D_ASSET_MODE,
         "texture_mode": resolved_texture_mode,
         "env_texture_mode": os.getenv("MONEYOS_TEXTURE_MODE") or os.getenv("MONEYOS_ANIME3D_TEXTURE_MODE", ""),
@@ -608,6 +618,43 @@ async def debug_status() -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         payload["torch"] = {"error": str(exc)}
     return JSONResponse(payload)
+
+
+@app.get("/debug/downloads")
+async def debug_downloads() -> JSONResponse:
+    assets_root = get_assets_root()
+    starter_receipt = assets_root / "characters" / ".starter_pack.json"
+    starter_payload: dict[str, object] = {}
+    if starter_receipt.exists():
+        try:
+            starter_payload = json.loads(starter_receipt.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            starter_payload = {}
+    asset_pack_marker = assets_root / ".asset_pack_installed.json"
+    asset_pack_payload: dict[str, object] = {}
+    if asset_pack_marker.exists():
+        try:
+            asset_pack_payload = json.loads(asset_pack_marker.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            asset_pack_payload = {}
+    auto_assets_marker = assets_root / ".auto_assets_installed.json"
+    auto_assets_payload: dict[str, object] = {}
+    if auto_assets_marker.exists():
+        try:
+            auto_assets_payload = json.loads(auto_assets_marker.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            auto_assets_payload = {}
+    return JSONResponse(
+        {
+            "ok": True,
+            "packs": {
+                "starter_characters": starter_payload,
+                "anime3d_asset_pack": asset_pack_payload,
+                "auto_assets": auto_assets_payload,
+            },
+            "last_download": get_last_download_diagnostics(),
+        }
+    )
 
 
 def _resolve_phase_target_seconds() -> tuple[str, float, str | None]:
@@ -1325,6 +1372,7 @@ def _register_api_aliases() -> None:
         "/generate",
         "/health",
         "/debug/status",
+        "/debug/downloads",
     }
 
     def _should_alias(path: str) -> bool:
