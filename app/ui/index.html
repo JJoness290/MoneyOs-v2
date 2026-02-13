@@ -103,6 +103,7 @@
       <span>Enable realistic human character fallback</span>
     </div>
     <button id="generateButton">Start anime_3d 60s</button>
+    <button id="generateTrueAiButton" style="margin-top:10px;background:#2bce7b;">TRUE AI VIDEO (60s)</button>
     <div class="status">
       <div><span class="label">Endpoint:</span> <span id="endpointText">POST /jobs/anime-episode-60s-3d</span></div>
       <div><span class="label">Stage:</span> <span id="stageText">Idle</span></div>
@@ -133,6 +134,7 @@
 
   <script>
     const generateButton = document.getElementById('generateButton');
+    const generateTrueAiButton = document.getElementById('generateTrueAiButton');
     const statusText = document.getElementById('statusText');
     const stageText = document.getElementById('stageText');
     const progressText = document.getElementById('progressText');
@@ -323,6 +325,48 @@
         }
       });
     }
+
+
+    generateTrueAiButton.addEventListener('click', async () => {
+      generateTrueAiButton.disabled = true;
+      finalStatus.textContent = 'In Progress';
+      statusText.textContent = 'Planning true text-to-video shots...';
+      stageText.textContent = 'plan';
+      progressText.textContent = '1%';
+      progressBar.style.width = '1%';
+      outputPath.textContent = '-';
+      outputDuration.textContent = '-';
+      downloadLink.textContent = '-';
+      logTail.innerHTML = '';
+
+      const requestPath = '/jobs/anime-trueai-60s';
+      const requestMethod = 'POST';
+      const requestUrl = apiUrl(requestPath);
+      const prompt = `${stylePreset.value} anime story, same protagonist throughout all shots`;
+      const response = await apiFetch(requestPath, {
+        method: requestMethod,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        finalStatus.textContent = 'FAILED';
+        generateTrueAiButton.disabled = false;
+        appendLog(`${requestMethod} ${requestUrl} -> ${response.status} ${response.statusText}: ${errorText}`);
+        return;
+      }
+      const data = await response.json();
+      const jobId = data.job_id;
+      if (!jobId) {
+        finalStatus.textContent = 'FAILED';
+        generateTrueAiButton.disabled = false;
+        appendLog('Job id missing from TRUE AI response.');
+        return;
+      }
+      subscribeEvents(jobId);
+      polling = setInterval(() => pollStatus(jobId), 2000);
+      generateTrueAiButton.disabled = false;
+    });
 
     generateButton.addEventListener('click', async () => {
       generateButton.disabled = true;

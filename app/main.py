@@ -164,6 +164,9 @@ class AiVideoRequest(BaseModel):
     script: str
     audio_path: str
 
+class TrueAiVideoRequest(BaseModel):
+    prompt: str = "anime action sequence in a futuristic city"
+
 
 @app.on_event("startup")
 def bootstrap_dependencies() -> None:
@@ -727,6 +730,34 @@ def _build_phase25_shot_plan(target_seconds: float) -> list[dict]:
     return plan
 
 
+
+def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest) -> None:
+    from app.core.visuals.anime_trueai_video.pipeline import run_trueai_60s_job  # noqa: WPS433
+
+    def _update(message: str) -> None:
+        stage = "generate"
+        if "plan" in message:
+            stage = "plan"
+        elif "stitch" in message:
+            stage = "stitch"
+        elif "mux" in message:
+            stage = "mux"
+        _set_status(job_id, message, stage_key=stage, progress_pct=35)
+
+    try:
+        _set_status(job_id, "Queued TRUE text-to-video", stage_key="plan", progress_pct=1)
+        final_video, report = run_trueai_60s_job(job_id, req.prompt, status_callback=_update)
+        _set_status(
+            job_id,
+            "Complete",
+            stage_key="done",
+            progress_pct=100,
+            extra={"clip": str(final_video), "report": str(report), "mode": "true_text_to_video"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        _set_error(job_id, f"Error: {exc}")
+
+
 def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> None:
     from src.phase2.clips.clip_generator import generate_clip_with_telemetry  # noqa: WPS433
     from src.phase2.episodes.episode_assembler import (
@@ -1243,6 +1274,17 @@ async def finalize_anime_episode_3d(job_id: str = Body(..., embed=True)) -> JSON
     _set_status(job_id, "Complete", anime_3d_result=result, stage_key="done", progress_pct=100)
     return JSONResponse({"status": "ok", "job_id": job_id})
 
+
+
+
+@app.post("/jobs/anime-trueai-60s")
+async def generate_anime_trueai_60s(req: TrueAiVideoRequest = Body(default=TrueAiVideoRequest())) -> JSONResponse:
+    job_id = uuid.uuid4().hex
+    _set_status(job_id, "Queued TRUE AI video", stage_key="plan", progress_pct=1)
+    thread = threading.Thread(target=_run_trueai_video_60s, args=(job_id, req), daemon=True)
+    thread.start()
+    out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
+    return JSONResponse({"job_id": job_id, "output_dir": str(out_dir.resolve())})
 
 @app.post("/jobs/ai-video-60s")
 async def generate_ai_video_60s(req: AiVideoRequest = Body(...)) -> JSONResponse:
