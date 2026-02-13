@@ -97,6 +97,11 @@
       <option value="balanced">balanced</option>
       <option value="anime_visual">anime_visual</option>
     </select>
+    <label class="label" for="characterStyleToggle">Character Style: Realistic Human</label>
+    <div style="margin:8px 0 14px 0;display:flex;align-items:center;gap:8px;">
+      <input type="checkbox" id="characterStyleToggle" checked />
+      <span>Enable realistic human character fallback</span>
+    </div>
     <button id="generateButton">Start anime_3d 60s</button>
     <div class="status">
       <div><span class="label">Endpoint:</span> <span id="endpointText">POST /jobs/anime-episode-60s-3d</span></div>
@@ -137,6 +142,7 @@
     const smoothingText = document.getElementById('smoothingText');
     const stylePreset = document.getElementById('stylePreset');
     const outputPath = document.getElementById('outputPath');
+    const characterStyleToggle = document.getElementById('characterStyleToggle');
     const outputDuration = document.getElementById('outputDuration');
     const downloadLink = document.getElementById('downloadLink');
     const finalStatus = document.getElementById('finalStatus');
@@ -337,7 +343,7 @@
       const response = await apiFetch(requestPath, {
         method: requestMethod,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ style_preset: stylePreset.value }),
+        body: JSON.stringify({ style_preset: stylePreset.value, character_style: characterStyleToggle.checked ? "realistic_human" : "default" }),
       });
       if (!response.ok) {
         const errorText = await response.text();

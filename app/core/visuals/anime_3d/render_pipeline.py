@@ -742,6 +742,7 @@ def _render_anime_3d_60s_impl(
     environment = env_template
     character_asset = None
     mode = "default"
+    character_style = "realistic_human"
     enable_sfx = True
     enable_lipsync = True
     enable_music = True
@@ -763,6 +764,8 @@ def _render_anime_3d_60s_impl(
         environment = str(overrides["environment"]).strip().lower()
     if overrides.get("character_asset"):
         character_asset = str(overrides["character_asset"])
+    if overrides.get("character_style"):
+        character_style = str(overrides["character_style"]).strip().lower()
     if overrides.get("mode"):
         mode = str(overrides["mode"]).strip().lower()
     if overrides.get("seed") is not None:
@@ -1001,6 +1004,7 @@ def _render_anime_3d_60s_impl(
     add_opt(blender_args, "--environment", environment)
     add_opt(blender_args, "--character-asset", character_asset)
     add_opt(blender_args, "--character-variation", character_variation.to_json())
+    add_opt(blender_args, "--character-style", character_style)
     add_opt(blender_args, "--mode", mode)
     add_opt(blender_args, "--seed", seed_value)
     add_opt(blender_args, "--fingerprint", fingerprint)

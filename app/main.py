@@ -157,6 +157,7 @@ class Anime3DRequest(BaseModel):
     enable_lipsync: Optional[bool] = None
     enable_music: Optional[bool] = None
     strict_assets: Optional[bool] = None
+    character_style: Optional[str] = "realistic_human"
 
 
 class AiVideoRequest(BaseModel):
@@ -409,6 +410,7 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
         overrides.setdefault("res", "1920x1080")
         overrides.setdefault("outline_mode", "freestyle")
         overrides.setdefault("style_preset", "default")
+        overrides.setdefault("character_style", "realistic_human")
         overrides.setdefault("disable_overlays", False)
         overrides.setdefault("enable_sfx", True)
         overrides.setdefault("enable_lipsync", True)
@@ -618,6 +620,37 @@ async def debug_status() -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         payload["torch"] = {"error": str(exc)}
     return JSONResponse(payload)
+
+
+@app.get("/debug/character")
+async def debug_character() -> JSONResponse:
+    assets_root = get_assets_root()
+    realistic_dir = assets_root / "characters" / "realistic"
+    hero_blend = assets_root / "characters" / "hero.blend"
+    vrm_dir = assets_root / "characters" / "vrm"
+    realistic_assets = []
+    if realistic_dir.exists():
+        realistic_assets = [str(p.name) for p in realistic_dir.rglob("*") if p.is_file()][:50]
+    vrm_assets = []
+    if vrm_dir.exists():
+        vrm_assets = [str(p.name) for p in vrm_dir.glob("*.vrm")]
+    source = "procedural_fallback"
+    if realistic_assets:
+        source = "local_realistic"
+    elif hero_blend.exists():
+        source = "hero_blend"
+    elif vrm_assets:
+        source = "vrm"
+    return JSONResponse(
+        {
+            "ok": True,
+            "character_source": source,
+            "hero_blend_exists": hero_blend.exists(),
+            "realistic_assets": realistic_assets,
+            "vrm_assets": vrm_assets,
+            "procedural_fallback_available": True,
+        }
+    )
 
 
 @app.get("/debug/downloads")
@@ -1373,6 +1406,7 @@ def _register_api_aliases() -> None:
         "/health",
         "/debug/status",
         "/debug/downloads",
+        "/debug/character",
     }
 
     def _should_alias(path: str) -> bool:

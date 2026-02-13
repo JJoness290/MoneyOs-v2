@@ -188,6 +188,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--beat-plan", default="")
     parser.add_argument("--character-asset", default="")
     parser.add_argument("--character-variation", default="")
+    parser.add_argument("--character-style", default="realistic_human")
     parser.add_argument("--mode", default="default")
     parser.add_argument("--style-preset", default="default")
     parser.add_argument("--outline-mode", default="freestyle")
@@ -707,6 +708,99 @@ def _find_character_asset(workdir: Path) -> Path | None:
     return None
 
 
+def create_procedural_human(
+    scene: bpy.types.Scene,
+    seed: int | None,
+    variation: dict | None,
+) -> tuple[bpy.types.Object, bpy.types.Object]:
+    del variation
+    rng = random.Random(seed or 1337)
+    bpy.ops.object.armature_add(enter_editmode=True, location=(0.0, 0.0, 0.0))
+    armature = bpy.context.active_object
+    armature.name = "procedural_human_rig"
+    bones = armature.data.edit_bones
+    root = bones[0]
+    root.name = "hips"
+    root.head = (0.0, 0.0, 0.9)
+    root.tail = (0.0, 0.0, 1.1)
+    spine = bones.new("spine")
+    spine.head = root.tail
+    spine.tail = (0.0, 0.0, 1.45)
+    spine.parent = root
+    head = bones.new("head")
+    head.head = spine.tail
+    head.tail = (0.0, 0.0, 1.75)
+    head.parent = spine
+    l_arm = bones.new("upper_arm.L")
+    l_arm.head = (0.0, 0.0, 1.4)
+    l_arm.tail = (0.35, 0.0, 1.35)
+    l_arm.parent = spine
+    r_arm = bones.new("upper_arm.R")
+    r_arm.head = (0.0, 0.0, 1.4)
+    r_arm.tail = (-0.35, 0.0, 1.35)
+    r_arm.parent = spine
+    l_leg = bones.new("thigh.L")
+    l_leg.head = (0.1, 0.0, 0.9)
+    l_leg.tail = (0.1, 0.0, 0.35)
+    l_leg.parent = root
+    r_leg = bones.new("thigh.R")
+    r_leg.head = (-0.1, 0.0, 0.9)
+    r_leg.tail = (-0.1, 0.0, 0.35)
+    r_leg.parent = root
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.32, location=(0.0, 0.0, 1.3))
+    mesh = bpy.context.active_object
+    mesh.name = "procedural_human_mesh"
+    mesh.scale = (0.7, 0.45, 1.35)
+    bpy.ops.object.shade_smooth()
+    subsurf = mesh.modifiers.new(name="Subsurf", type="SUBSURF")
+    subsurf.levels = 2
+    subsurf.render_levels = 2
+    arm_mod = mesh.modifiers.new(name="Armature", type="ARMATURE")
+    arm_mod.object = armature
+    mesh.parent = armature
+    mesh["mo_role"] = "subject"
+
+    skin = bpy.data.materials.new(name="ProceduralSkin")
+    skin.use_nodes = True
+    nodes = skin.node_tree.nodes
+    links = skin.node_tree.links
+    nodes.clear()
+    out = nodes.new(type="ShaderNodeOutputMaterial")
+    bsdf = nodes.new(type="ShaderNodeBsdfPrincipled")
+    noise = nodes.new(type="ShaderNodeTexNoise")
+    bump = nodes.new(type="ShaderNodeBump")
+    noise.inputs[2].default_value = 18.0
+    bsdf.inputs[0].default_value = (0.78 + rng.uniform(-0.05, 0.05), 0.60, 0.52, 1.0)
+    bsdf.inputs["Subsurface"].default_value = 0.2
+    bsdf.inputs["Subsurface Radius"].default_value = (1.0, 0.4, 0.25)
+    bsdf.inputs["Roughness"].default_value = 0.45
+    links.new(noise.outputs["Fac"], bump.inputs["Height"])
+    links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
+    links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+    if mesh.data.materials:
+        mesh.data.materials[0] = skin
+    else:
+        mesh.data.materials.append(skin)
+
+    for x in (-0.08, 0.08):
+        bpy.ops.mesh.primitive_uv_sphere_add(radius=0.03, location=(x, 0.29, 1.55))
+        eye = bpy.context.active_object
+        eye_mat = bpy.data.materials.new(name=f"Eye_{x}")
+        eye_mat.use_nodes = True
+        ebsdf = eye_mat.node_tree.nodes.get("Principled BSDF")
+        if ebsdf:
+            ebsdf.inputs["Base Color"].default_value = (0.08, 0.12, 0.16, 1.0)
+            ebsdf.inputs["Specular IOR Level"].default_value = 0.8
+            ebsdf.inputs["Roughness"].default_value = 0.15
+        eye.data.materials.append(eye_mat)
+        eye.parent = armature
+
+    scene.collection.objects.link(armature) if armature.name not in scene.collection.objects else None
+    return armature, mesh
+
+
 def _ensure_placeholder_armature_with_cube() -> list[bpy.types.Object]:
     bpy.ops.object.armature_add(enter_editmode=True, location=(0.0, 0.0, 0.0))
     armature = bpy.context.active_object
@@ -743,7 +837,8 @@ def _load_fallback_hero_blend(assets_root: Path) -> list[bpy.types.Object]:
     hero_path = assets_root / "characters" / "hero.blend"
     if not hero_path.exists():
         print(f"[ASSETS] fallback_hero_missing path={hero_path}")
-        return _ensure_placeholder_armature_with_cube()
+        arm, mesh = create_procedural_human(bpy.context.scene, None, {})
+        return [mesh, arm]
     try:
         appended_objects: list[bpy.types.Object] = []
         with bpy.data.libraries.load(str(hero_path), link=False) as (data_from, data_to):
@@ -773,10 +868,12 @@ def _load_fallback_hero_blend(assets_root: Path) -> list[bpy.types.Object]:
         if armature is not None:
             print(f"[ASSETS] fallback=hero_blend_armature_only path={hero_path}")
             return [armature]
-        return _ensure_placeholder_armature_with_cube()
+        arm, mesh = create_procedural_human(bpy.context.scene, None, {})
+        return [mesh, arm]
     except Exception as exc:  # noqa: BLE001
         print(f"[ASSETS] fallback_hero_blend_failed error={exc}")
-        return _ensure_placeholder_armature_with_cube()
+        arm, mesh = create_procedural_human(bpy.context.scene, None, {})
+        return [mesh, arm]
 
 
 def _import_character_asset(asset_path: Path, assets_root: Path | None = None) -> tuple[bpy.types.Object | None, str]:
@@ -1992,8 +2089,11 @@ def _normalize_character(objects: list[bpy.types.Object]) -> list[bpy.types.Obje
     return meshes
 
 
-def _load_character_asset(assets_dir: Path, character_asset: str, warnings: list[str]) -> list[bpy.types.Object]:
+def _load_character_asset(assets_dir: Path, character_asset: str, warnings: list[str], *, strict_assets: bool, character_style: str, seed: int | None) -> list[bpy.types.Object]:
     if not character_asset:
+        if character_style == "realistic_human":
+            arm, mesh = create_procedural_human(bpy.context.scene, seed, {})
+            return [mesh, arm]
         return []
     asset_path = Path(character_asset)
     if not asset_path.is_file():
@@ -2007,6 +2107,9 @@ def _load_character_asset(assets_dir: Path, character_asset: str, warnings: list
     if not asset_path.exists():
         warnings.append("character_asset_missing")
         print(f"[PHASE2] character asset missing: {asset_path}")
+        if not strict_assets and character_style == "realistic_human":
+            arm, mesh = create_procedural_human(bpy.context.scene, seed, {})
+            return [mesh, arm]
         return []
     if asset_path.suffix.lower() == ".blend":
         collections = _append_collections(asset_path)
@@ -2846,7 +2949,14 @@ def main() -> None:
         strict_assets=bool(strict_assets),
     )
     _phase3_log("PHASE3_CHARACTER_IMPORT_DONE")
-    character_meshes = _load_character_asset(assets_dir, args.character_asset, warnings)
+    character_meshes = _load_character_asset(
+        assets_dir,
+        args.character_asset,
+        warnings,
+        strict_assets=bool(strict_assets),
+        character_style=str(args.character_style).strip().lower(),
+        seed=args.seed,
+    )
     if character_meshes:
         for obj in character_meshes:
             obj["mo_role"] = "subject"
