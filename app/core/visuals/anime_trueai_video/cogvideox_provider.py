@@ -92,7 +92,7 @@ class CogVideoXProvider(TextToVideoProvider):
             generator = torch.Generator(device="cuda").manual_seed(request.seed)
         else:
             generator = torch.Generator().manual_seed(request.seed)
-        num_frames = request.seconds * request.fps
+        num_frames = int(max(1, min(48, round(request.seconds * request.fps))))
         with torch.autocast("cuda", dtype=torch.bfloat16) if self._device == "cuda" else contextlib.nullcontext():
             result = self._pipe(
                 prompt=request.prompt,
@@ -118,6 +118,6 @@ class CogVideoXProvider(TextToVideoProvider):
             width=request.width,
             height=request.height,
             fps=request.fps,
-            duration_s=float(request.seconds),
+            duration_s=float(num_frames / request.fps),
             backend=self.name,
         )

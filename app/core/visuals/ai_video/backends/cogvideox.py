@@ -191,6 +191,7 @@ class CogVideoXBackend(AiVideoBackend):
         guidance = self._env_float("MONEYOS_COGVIDEOX_GUIDANCE", 6.0)
         num_frames_env = os.getenv("MONEYOS_COGVIDEOX_NUM_FRAMES")
         num_frames = int(num_frames_env) if num_frames_env else int(seconds * fps)
+        num_frames = max(1, min(48, num_frames))
         seed_mode = os.getenv("MONEYOS_COGVIDEOX_SEED_MODE", "per_clip").strip().lower()
         if seed_mode == "fixed":
             seed = int(os.getenv("MONEYOS_COGVIDEOX_SEED", str(seed)))

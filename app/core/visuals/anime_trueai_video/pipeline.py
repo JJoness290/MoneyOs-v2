@@ -56,10 +56,12 @@ def _probe_duration(path: Path) -> float:
 
 
 def run_trueai_60s_job(job_id: str, prompt: str, status_callback=None) -> tuple[Path, Path]:
-    clip_count = 10
-    clip_seconds = 6
-    total_seconds = 60.0
     fps = 24
+    frames_per_clip = int(os.getenv("MONEYOS_TRUEAI_FRAMES_PER_CLIP", "48"))
+    frames_per_clip = max(8, min(frames_per_clip, 48))
+    clip_seconds = frames_per_clip / fps
+    total_seconds = 60.0
+    clip_count = int(math.ceil(total_seconds / clip_seconds))
     width = 1280
     height = 720
     steps = int(os.getenv("MONEYOS_TRUEAI_STEPS", "30"))
@@ -85,6 +87,8 @@ def run_trueai_60s_job(job_id: str, prompt: str, status_callback=None) -> tuple[
     generated: list[Path] = []
     started = time.time()
     for idx in range(clip_count):
+        remaining_s = max(0.0, total_seconds - (idx * clip_seconds))
+        target_clip_seconds = min(clip_seconds, remaining_s if remaining_s > 0 else clip_seconds)
         if status_callback:
             status_callback(f"plan → generating clip {idx + 1}/{clip_count}")
         clip_path = clips_dir / f"clip_{idx:02d}.mp4"
@@ -92,7 +96,7 @@ def run_trueai_60s_job(job_id: str, prompt: str, status_callback=None) -> tuple[
             prompt=_anime_prompt(prompt, character_desc, idx),
             negative_prompt=_negative_prompt(),
             seed=seed,
-            seconds=clip_seconds,
+            seconds=max(target_clip_seconds, 1.0 / fps),
             fps=fps,
             width=width,
             height=height,
@@ -118,8 +122,24 @@ def run_trueai_60s_job(job_id: str, prompt: str, status_callback=None) -> tuple[
             )
             provider.generate(request)
             _ffmpeg("-i", str(low_clip), "-vf", "scale=1280:720", "-r", str(fps), str(clip_path))
-        if _probe_duration(clip_path) <= 0.1:
+        clip_duration = _probe_duration(clip_path)
+        if clip_duration <= 0.1:
             raise RuntimeError(f"empty clip generated: {clip_path}")
+        if clip_duration > request.seconds + 0.02:
+            _ffmpeg("-i", str(clip_path), "-t", f"{request.seconds:.3f}", "-c:v", "copy", str(clips_dir / f"clip_{idx:02d}_trim.mp4"))
+            clip_path = clips_dir / f"clip_{idx:02d}_trim.mp4"
+        elif clip_duration + 0.02 < request.seconds:
+            pad_seconds = max(0.0, request.seconds - clip_duration)
+            _ffmpeg(
+                "-i",
+                str(clip_path),
+                "-vf",
+                f"tpad=stop_mode=clone:stop_duration={pad_seconds:.3f}",
+                "-r",
+                str(fps),
+                str(clips_dir / f"clip_{idx:02d}_pad.mp4"),
+            )
+            clip_path = clips_dir / f"clip_{idx:02d}_pad.mp4"
         generated.append(clip_path)
 
     if status_callback:
