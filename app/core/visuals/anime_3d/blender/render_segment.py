@@ -14,8 +14,20 @@ from pathlib import Path
 import bpy
 from mathutils import Vector
 
+from app.core.visuals.anime_3d.asset_scan import (
+    ASSET_DIR_ALIASES,
+    character_sort_key,
+    discover_assets,
+    resolve_asset_dir,
+    resolve_asset_dirs,
+    select_animation_assets,
+    select_character_assets,
+    select_env_blend,
+    strict_assets_error,
+)
 
-PHASE3_DEBUG = os.getenv("MONEYOS_DEBUG_PHASE3", "0") == "1"
+
+PHASE3_DEBUG = os.getenv("MONEYOS_DEBUG_PHASE3", "0") == "1" or os.getenv("MONEYOS_PHASE3_DEBUG", "0") == "1"
 PHASE3_LOGGER = logging.getLogger("moneyos.phase3")
 if not PHASE3_LOGGER.handlers:
     _handler = logging.StreamHandler()
@@ -545,54 +557,37 @@ def _color_from_temperature(temp_k: float) -> tuple[float, float, float]:
     return red, green, blue
 
 
-ASSET_DIR_ALIASES = {
-    "envs": ["envs", "environments", "environment"],
-    "characters": ["characters", "chars", "character"],
-    "anims": ["anims", "animations", "anim"],
-    "vfx": ["vfx", "sprites", "fx"],
-}
 
 
 def _resolve_asset_dir(assets_dir: Path, aliases: list[str]) -> Path | None:
-    for alias in aliases:
-        candidate = assets_dir / alias
-        if candidate.exists():
-            return candidate
-    return None
+    return resolve_asset_dir(assets_dir, aliases)
 
 
 def _resolve_asset_dirs(assets_dir: Path) -> dict[str, Path | None]:
-    return {
-        "envs": _resolve_asset_dir(assets_dir, ASSET_DIR_ALIASES["envs"]),
-        "characters": _resolve_asset_dir(assets_dir, ASSET_DIR_ALIASES["characters"]),
-        "anims": _resolve_asset_dir(assets_dir, ASSET_DIR_ALIASES["anims"]),
-        "vfx": _resolve_asset_dir(assets_dir, ASSET_DIR_ALIASES["vfx"]),
-    }
+    return resolve_asset_dirs(assets_dir)
 
 
 def _character_sort_key(candidate: Path) -> tuple[int, int, str]:
-    parts = {part.lower() for part in candidate.parts}
-    in_starter_pack = 0 if "starter_pack" in parts else 1
-    ext_priority = 0 if candidate.suffix.lower() in {".fbx", ".glb", ".gltf"} else 1
-    return (in_starter_pack, ext_priority, candidate.name.lower())
+    return character_sort_key(candidate)
 
 
 def _discover_assets(assets_dir: Path) -> dict[str, list[Path]]:
-    asset_dirs = _resolve_asset_dirs(assets_dir)
-    envs = sorted(asset_dirs["envs"].glob("*.blend")) if asset_dirs["envs"] else []
-    characters: list[Path] = []
-    if asset_dirs["characters"]:
-        for ext in (".fbx", ".glb", ".gltf", ".blend"):
-            characters.extend(asset_dirs["characters"].rglob(f"*{ext}"))
-        characters = sorted({path for path in characters}, key=_character_sort_key)
-    anims = sorted(asset_dirs["anims"].glob("*.fbx")) if asset_dirs["anims"] else []
-    vfx = sorted(asset_dirs["vfx"].glob("*.*")) if asset_dirs["vfx"] else []
-    return {
-        "envs": envs,
-        "characters": characters,
-        "anims": anims,
-        "vfx": vfx,
-    }
+    inventory, _ = discover_assets(assets_dir)
+    return inventory
+
+
+def _select_env_blend(env_candidates: list[Path], environment: str) -> Path | None:
+    return select_env_blend(env_candidates, environment)
+
+
+def _select_character_assets(char_candidates: list[Path]) -> tuple[Path | None, Path | None]:
+    return select_character_assets(char_candidates)
+
+
+def _select_animation_assets(anim_candidates: list[Path]) -> dict[str, Path | None]:
+    return select_animation_assets(anim_candidates)
+
+
 
 
 def _required_assets(assets_dir: Path) -> dict[str, Path]:
@@ -617,45 +612,6 @@ def _required_assets(assets_dir: Path) -> dict[str, Path]:
 def _find_missing_assets(assets_dir: Path) -> list[str]:
     return [key for key, path in _required_assets(assets_dir).items() if not path.exists()]
 
-
-def _select_env_blend(env_candidates: list[Path]) -> Path | None:
-    for candidate in env_candidates:
-        if candidate.name.lower() == "city.blend":
-            return candidate
-    return env_candidates[0] if env_candidates else None
-
-
-def _select_character_assets(char_candidates: list[Path]) -> tuple[Path | None, Path | None]:
-    ordered = sorted(char_candidates, key=_character_sort_key)
-    hero = None
-    enemy = None
-    for candidate in ordered:
-        name = candidate.name.lower()
-        if hero is None and ("hero" in name or "player" in name):
-            hero = candidate
-        elif enemy is None and ("enemy" in name or "npc" in name or "monster" in name):
-            enemy = candidate
-    if hero is None and ordered:
-        hero = ordered[0]
-    if enemy is None:
-        for candidate in ordered:
-            if candidate != hero:
-                enemy = candidate
-                break
-    return hero, enemy
-
-
-def _select_animation_assets(anim_candidates: list[Path]) -> dict[str, Path | None]:
-    selections: dict[str, Path | None] = {"idle": None, "run": None, "punch": None}
-    for candidate in anim_candidates:
-        name = candidate.stem.lower()
-        if selections["idle"] is None and "idle" in name:
-            selections["idle"] = candidate
-        if selections["run"] is None and ("run" in name or "jog" in name):
-            selections["run"] = candidate
-        if selections["punch"] is None and "punch" in name:
-            selections["punch"] = candidate
-    return selections
 
 def _create_procedural_humanoid(name: str, location: tuple[float, float, float]) -> tuple[bpy.types.Object, int]:
     raise RuntimeError("Procedural primitive humanoids are disabled for anime pipeline.")
@@ -2512,36 +2468,50 @@ def main() -> None:
     procedural_fallback = False
     used_assets: list[str] = []
 
-    if missing_assets and strict_assets:
-        error = f"missing assets: {', '.join(missing_assets)}"
-        _write_report(
-            report_path,
-            {
-                "status": "error",
-                "error": error,
-                "seed": seed_value,
-                "fingerprint": fingerprint,
-                "assets_dir": str(assets_dir),
-                "missing_assets": missing_assets,
-                "used_assets": used_assets,
-                "procedural_fallback": False,
-            },
-        )
-        print(f"[ASSETS] {error}", file=sys.stderr)
-        raise SystemExit(2)
-    if missing_assets and not strict_assets:
-        procedural_fallback = True
-    assets_inventory = _discover_assets(assets_dir) if args.asset_mode == "local" else {}
-    asset_dirs = _resolve_asset_dirs(assets_dir)
+    assets_inventory, asset_dirs = discover_assets(assets_dir)
 
     env_candidates = assets_inventory.get("envs", [])
     char_candidates = assets_inventory.get("characters", [])
     anim_candidates = assets_inventory.get("anims", [])
     vfx_candidates = assets_inventory.get("vfx", [])
-    env_blend = _select_env_blend(env_candidates)
+    env_blend = _select_env_blend(env_candidates, args.environment)
     selected_env = env_blend.stem if env_blend else args.environment
     hero_asset, enemy_asset = _select_character_assets(char_candidates)
     anim_selections = _select_animation_assets(anim_candidates)
+
+    if strict_assets:
+        strict_missing = []
+        if env_blend is None:
+            strict_missing.append("env blend")
+        if hero_asset is None:
+            strict_missing.append("character blend")
+        if anim_selections.get("idle") is None:
+            strict_missing.append("idle.fbx")
+        if anim_selections.get("run") is None:
+            strict_missing.append("run.fbx")
+        if anim_selections.get("punch") is None:
+            strict_missing.append("punch.fbx")
+        if strict_missing:
+            error = strict_assets_error(assets_dir, asset_dirs, assets_inventory)
+            _write_report(
+                report_path,
+                {
+                    "status": "error",
+                    "error": error,
+                    "seed": seed_value,
+                    "fingerprint": fingerprint,
+                    "assets_dir": str(assets_dir),
+                    "missing_assets": strict_missing,
+                    "used_assets": [],
+                    "procedural_fallback": False,
+                },
+            )
+            print(f"[ASSETS] {error}", file=sys.stderr)
+            raise SystemExit(2)
+
+    if not strict_assets and (env_blend is None or hero_asset is None or any(v is None for v in anim_selections.values())):
+        procedural_fallback = True
+
     used_assets = [
         str(asset)
         for asset in (env_blend, hero_asset, enemy_asset)
