@@ -37,7 +37,7 @@ from app.config import (
     resolve_style_preset,
     resolve_texture_mode,
 )
-from app.core.paths import get_assets_root, get_characters_dir, get_output_root
+from app.core.paths import get_assets_root, get_characters_dir, get_output_root, get_repo_root
 from app.core.tts import generate_tts
 from app.core.assets3d.auto_assets import ensure_anime3d_assets_auto
 from app.core.assets3d.bootstrapper import ensure_minimum_assets
@@ -1103,11 +1103,14 @@ def _render_anime_3d_60s_impl(
     with blender_stdout_path.open("w", encoding="utf-8") as stdout_handle, blender_stderr_path.open(
         "w", encoding="utf-8"
     ) as stderr_handle:
+        blender_env = os.environ.copy()
+        blender_env["MONEYOS_REPO_ROOT"] = str(get_repo_root())
         process = subprocess.Popen(
             cmd,
             stdout=stdout_handle,
             stderr=stderr_handle,
             text=True,
+            env=blender_env,
         )
         total_frames = max(1, int(math.ceil(duration_s * fps)))
         last_update = 0.0

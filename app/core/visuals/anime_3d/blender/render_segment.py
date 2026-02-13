@@ -11,6 +11,40 @@ import sys
 import wave
 from pathlib import Path
 
+
+def _bootstrap_repo_path_for_blender(script_path: Path | None = None) -> tuple[Path | None, bool]:
+    """Ensure repo root is on sys.path for Blender embedded Python."""
+    candidate: Path | None = None
+    env_root = os.getenv("MONEYOS_REPO_ROOT", "").strip()
+    if env_root:
+        env_path = Path(env_root)
+        if (env_path / "app").exists() and (env_path / "src").exists():
+            candidate = env_path
+
+    start = (script_path or Path(__file__)).resolve()
+    if candidate is None:
+        for parent in [start.parent, *start.parents]:
+            has_app_src = (parent / "app").is_dir() and (parent / "src").is_dir()
+            has_marker = (parent / "pyproject.toml").exists() or (parent / "requirements.txt").exists()
+            if has_app_src or has_marker:
+                candidate = parent
+                break
+
+    added = False
+    if candidate is not None:
+        root_str = str(candidate)
+        if root_str not in sys.path:
+            sys.path.insert(0, root_str)
+            added = True
+        current_pythonpath = os.getenv("PYTHONPATH", "")
+        if root_str not in current_pythonpath.split(os.pathsep):
+            os.environ["PYTHONPATH"] = root_str if not current_pythonpath else f"{root_str}{os.pathsep}{current_pythonpath}"
+    print(f"[BLENDER_BOOTSTRAP] repo_root={candidate} added_to_syspath={1 if added else 0}")
+    return candidate, added
+
+
+_bootstrap_repo_path_for_blender()
+
 import bpy
 from mathutils import Vector
 
