@@ -5,6 +5,7 @@ import gc
 import os
 from pathlib import Path
 
+
 from app.core.visuals.anime_trueai_video.provider import ClipRequest, ClipResult, TextToVideoProvider
 
 
@@ -38,19 +39,32 @@ class CogVideoXProvider(TextToVideoProvider):
         if not self.allow_download:
             raise RuntimeError("CogVideoX model not found locally and auto-download is disabled")
         from huggingface_hub import snapshot_download
-
         return snapshot_download(repo_id=self.model_id)
+
+
+    @staticmethod
+    def _is_diffusers_snapshot(model_ref: str) -> bool:
+        path = Path(model_ref)
+        if not path.exists():
+            return False
+        return (path / "model_index.json").exists() and not (path / "config.json").exists()
 
     def _load(self) -> None:
         if self._pipe is not None:
             return
         import torch
-        from diffusers import CogVideoXPipeline
+        from diffusers import CogVideoXPipeline, DiffusionPipeline
 
         self._device = "cuda" if torch.cuda.is_available() and os.getenv("MONEYOS_USE_GPU", "1") != "0" else "cpu"
         dtype = torch.bfloat16 if self._device == "cuda" else torch.float32
         model_ref = self._resolve_model_ref()
-        pipe = CogVideoXPipeline.from_pretrained(model_ref, torch_dtype=dtype)
+        if self._is_diffusers_snapshot(model_ref):
+            pipe = DiffusionPipeline.from_pretrained(model_ref, torch_dtype=dtype)
+        else:
+            with contextlib.suppress(Exception):
+                pipe = CogVideoXPipeline.from_pretrained(model_ref, torch_dtype=dtype)
+            if "pipe" not in locals():
+                pipe = DiffusionPipeline.from_pretrained(model_ref, torch_dtype=dtype)
         if self._device == "cuda":
             if hasattr(pipe, "enable_model_cpu_offload"):
                 with contextlib.suppress(Exception):

@@ -5,6 +5,7 @@ import gc
 import os
 from pathlib import Path
 
+
 from app.core.visuals.ai_video.backends.base import AiVideoBackend, BackendResult, BackendUnavailable
 
 
@@ -64,6 +65,27 @@ class CogVideoXBackend(AiVideoBackend):
             print(f"[CogVideoXBackend] is_available failed: {e}")
             return False
 
+
+    def _resolve_diffusers_model_ref(self) -> str:
+        model_path_env = os.getenv("MONEYOS_COGVIDEOX_MODEL_PATH", "").strip()
+        if model_path_env:
+            local = Path(model_path_env)
+            if local.exists():
+                return str(local)
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot = snapshot_download(repo_id=self.model_id, local_files_only=True)
+            return str(snapshot)
+        except Exception:  # noqa: BLE001
+            return self.model_id
+
+    @staticmethod
+    def _is_diffusers_snapshot(model_ref: str) -> bool:
+        path = Path(model_ref)
+        if not path.exists():
+            return False
+        return (path / "model_index.json").exists() and not (path / "config.json").exists()
+
     def load(self) -> None:
         if self._pipe is not None:
             return
@@ -73,7 +95,7 @@ class CogVideoXBackend(AiVideoBackend):
 
         use_gpu = os.getenv("MONEYOS_USE_GPU", "1") != "0"
         self._device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
-        from diffusers import CogVideoXPipeline
+        from diffusers import CogVideoXPipeline, DiffusionPipeline
 
         self._offload_enabled = self._env_flag_alias(
             "MONEYOS_COGVIDEOX_OFFLOAD",
@@ -87,10 +109,15 @@ class CogVideoXBackend(AiVideoBackend):
 
         dtype = torch.float16 if self._fp16_enabled else torch.float32
         self._dtype = "float16" if self._fp16_enabled else "float32"
-        pipe = CogVideoXPipeline.from_pretrained(
-            self.model_id,
-            torch_dtype=dtype,
-        )
+        model_ref = self._resolve_diffusers_model_ref()
+        if self._is_diffusers_snapshot(model_ref):
+            print(f"[AI-VIDEO][COGVIDEOX] detected diffusers snapshot model_index.json without config.json: {model_ref}")
+            pipe = DiffusionPipeline.from_pretrained(model_ref, torch_dtype=dtype)
+        else:
+            with contextlib.suppress(Exception):
+                pipe = CogVideoXPipeline.from_pretrained(model_ref, torch_dtype=dtype)
+            if "pipe" not in locals():
+                pipe = DiffusionPipeline.from_pretrained(model_ref, torch_dtype=dtype)
         if self._device == "cuda" and not self._offload_enabled:
             pipe = pipe.to(self._device)
         if self._device == "cuda" and self._offload_enabled and hasattr(pipe, "enable_model_cpu_offload"):
