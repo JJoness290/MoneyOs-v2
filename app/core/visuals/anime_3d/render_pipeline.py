@@ -819,7 +819,7 @@ def _render_anime_3d_60s_impl(
             selected_character = pick_character(seed_value, characters)
             character_asset = str(selected_character.local_path)
             if selected_character.local_path.suffix.lower() == ".vrm":
-                ensure_vrm_addon_ready(Path(ensure_blender_path()), cache_root, selected_character.local_path)
+                ensure_vrm_addon_ready(Path(ensure_blender_path()), assets_root, selected_character.local_path)
             else:
                 phase3_logger.warning(
                     "PHASE3_CHARACTER_FALLBACK character=%s path=%s",

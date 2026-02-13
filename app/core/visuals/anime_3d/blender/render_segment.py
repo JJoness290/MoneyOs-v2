@@ -707,17 +707,47 @@ def _find_character_asset(workdir: Path) -> Path | None:
     return None
 
 
-def _import_character_asset(asset_path: Path) -> tuple[bpy.types.Object | None, str]:
+def _load_fallback_hero_blend(assets_root: Path) -> list[bpy.types.Object]:
+    hero_path = assets_root / "characters" / "hero.blend"
+    if not hero_path.exists():
+        return []
+    try:
+        collections = _append_collections(hero_path)
+        objects: list[bpy.types.Object] = []
+        for collection in collections:
+            objects.extend(list(collection.all_objects))
+        meshes = _normalize_character(objects)
+        if meshes:
+            print(f"[ASSETS] fallback=hero_blend path={hero_path}")
+        return meshes
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ASSETS] fallback_hero_blend_failed error={exc}")
+        return []
+
+
+def _import_character_asset(asset_path: Path, assets_root: Path | None = None) -> tuple[bpy.types.Object | None, str]:
     ext = asset_path.suffix.lower()
     if ext in {".glb", ".gltf"}:
         bpy.ops.import_scene.gltf(filepath=str(asset_path))
     elif ext == ".fbx":
         bpy.ops.import_scene.fbx(filepath=str(asset_path))
     elif ext == ".vrm":
-        if hasattr(bpy.ops.import_scene, "vrm"):
+        if not hasattr(bpy.ops.import_scene, "vrm"):
+            print("VRM addon missing; falling back to hero.blend")
+            if assets_root:
+                meshes = _load_fallback_hero_blend(assets_root)
+                if meshes:
+                    return meshes[0], "blend"
+            return None, "vrm"
+        try:
             bpy.ops.import_scene.vrm(filepath=str(asset_path))
-        else:
-            raise RuntimeError("VRM importer add-on is not enabled; run VRM add-on installer first.")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ASSETS] vrm_import_failed error={exc}; falling back to hero.blend")
+            if assets_root:
+                meshes = _load_fallback_hero_blend(assets_root)
+                if meshes:
+                    return meshes[0], "blend"
+            return None, "vrm"
     meshes = [obj for obj in bpy.context.selected_objects if obj.type == "MESH"]
     if not meshes:
         meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
@@ -737,7 +767,7 @@ def _ensure_character(
     if args.character_asset:
         asset_path = Path(args.character_asset)
         if asset_path.exists():
-            subject, fmt = _import_character_asset(asset_path)
+            subject, fmt = _import_character_asset(asset_path, assets_dir)
             if subject:
                 print(f"[ANIME3D_CHAR] source=provided name={subject.name} format={fmt}")
                 return subject, "provided", fmt
@@ -761,7 +791,7 @@ def _ensure_character(
             print(f"[ANIME3D_CHAR] source=asset_lib name={subject.name} format=blend")
             return subject, "asset_lib", "blend"
     if asset_path:
-        subject, fmt = _import_character_asset(asset_path)
+        subject, fmt = _import_character_asset(asset_path, assets_dir)
         if subject:
             print(f"[ANIME3D_CHAR] source=asset_lib name={subject.name} format={fmt}")
             return subject, "asset_lib", fmt
@@ -1932,10 +1962,17 @@ def _load_character_asset(assets_dir: Path, character_asset: str, warnings: list
         return _normalize_character(objects)
     if asset_path.suffix.lower() == ".vrm":
         if not hasattr(bpy.ops.import_scene, "vrm"):
-            raise RuntimeError("VRM importer add-on is not enabled")
-        bpy.ops.import_scene.vrm(filepath=str(asset_path))
-        meshes = [obj for obj in bpy.context.selected_objects if obj.type == "MESH"]
-        return _normalize_character(meshes)
+            print("VRM addon missing; falling back to hero.blend")
+            warnings.append("vrm_addon_missing_fallback_hero")
+            return _load_fallback_hero_blend(assets_dir)
+        try:
+            bpy.ops.import_scene.vrm(filepath=str(asset_path))
+            meshes = [obj for obj in bpy.context.selected_objects if obj.type == "MESH"]
+            return _normalize_character(meshes)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[PHASE2] vrm import failed: {exc}; fallback hero.blend")
+            warnings.append("vrm_import_failed_fallback_hero")
+            return _load_fallback_hero_blend(assets_dir)
     warnings.append("character_asset_unsupported")
     print(f"[PHASE2] unsupported character asset: {asset_path}")
     return []

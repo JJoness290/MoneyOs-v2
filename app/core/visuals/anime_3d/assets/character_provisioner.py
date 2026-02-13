@@ -22,22 +22,6 @@ CURATED_VRM_MODELS: tuple[dict[str, Any], ...] = (
         "license": "sample conditions",
         "filename": "AliciaSolid_vrm-0.51.vrm",
     },
-    {
-        "name": "AliciaSolidFaceExpression",
-        "source_urls": [
-            "https://github.com/vrm-c/vrm-specification/raw/master/samples/VRM1_Expression_Tests_AliciaSolid.vrm",
-        ],
-        "license": "sample conditions",
-        "filename": "AliciaSolidFaceExpression.vrm",
-    },
-    {
-        "name": "VRM1FirstPersonA",
-        "source_urls": [
-            "https://github.com/vrm-c/vrm-specification/raw/master/samples/VRM1_FirstPerson_A.vrm",
-        ],
-        "license": "sample conditions",
-        "filename": "VRM1_FirstPerson_A.vrm",
-    },
 )
 
 
