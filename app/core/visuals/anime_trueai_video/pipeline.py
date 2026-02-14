@@ -177,16 +177,33 @@ def run_trueai_60s_job(
     status_callback=None,
     forced_preset: str | None = None,
 ) -> tuple[Path, Path]:
+    import os
+
+    FASTTEST = os.getenv("MONEYOS_TRUEAI_FASTTEST", "0") == "1" or str(forced_preset or "").strip().lower() == "fasttest"
+
     cfg = _resolve_preset(forced_preset)
-    total_seconds = cfg.duration_s
+    duration_seconds = cfg.duration_s
     fps = cfg.fps
-    frames_per_clip = min(48, max(8, cfg.frames_per_clip))
-    clip_seconds = frames_per_clip / fps
-    clip_count = int(math.ceil(total_seconds / clip_seconds))
+    steps = cfg.steps
     width = cfg.width
     height = cfg.height
-    steps = cfg.steps
-    guidance = cfg.guidance
+    guidance_scale = cfg.guidance
+    frames_per_clip = min(48, max(8, cfg.frames_per_clip))
+
+    if FASTTEST:
+        print("[TRUEAI] FASTTEST ACTIVE — MAX SPEED MODE")
+        duration_seconds = 12
+        fps = 8
+        steps = 8
+        width = 512
+        height = 288
+        guidance_scale = 2.5
+        frames_per_clip = 24
+
+    total_seconds = float(duration_seconds)
+    clip_seconds = frames_per_clip / fps
+    clip_count = int(math.ceil(total_seconds / clip_seconds))
+    guidance = float(guidance_scale)
     seed = int(os.getenv("MONEYOS_TRUEAI_SEED", "777"))
     enable_sharpen = os.getenv("MONEYOS_POST_SHARPEN", "1" if cfg.name in {"fasttest", "fast"} else "0") == "1"
 
@@ -207,8 +224,7 @@ def run_trueai_60s_job(
     if not provider.is_available():
         raise RuntimeError("CogVideoX backend unavailable. Install diffusers/torch and model.")
 
-    if cfg.name == "fasttest":
-        print("[TRUEAI] FASTTEST ACTIVE")
+    if FASTTEST:
         print(f"[TRUEAI] duration={total_seconds}")
         print(f"[TRUEAI] fps={fps}")
         print(f"[TRUEAI] steps={steps}")
@@ -244,7 +260,7 @@ def run_trueai_60s_job(
         try:
             provider.generate(request)
         except Exception:
-            if cfg.name == "fasttest":
+            if FASTTEST:
                 raise
             low_clip = clips_dir / f"clip_{idx:02d}_low.mp4"
             request = ClipRequest(
@@ -343,7 +359,7 @@ def run_trueai_60s_job(
         "guidance": guidance,
         "width": width,
         "height": height,
-        "preset": cfg.name,
+        "preset": "fasttest" if FASTTEST else cfg.name,
         "post_sharpen": True,
         "elapsed_s": round(time.time() - started, 3),
         "final_video": str(final_mp4),
