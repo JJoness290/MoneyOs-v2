@@ -100,13 +100,13 @@ def _resolve_preset(forced_preset: str | None = None) -> TrueAIPresetConfig:
     if preset == "fasttest":
         cfg = TrueAIPresetConfig(
             name=preset,
-            duration_s=_env_float("MONEYOS_TRUEAI_DURATION_S", 12.0),
-            fps=_env_int("MONEYOS_TRUEAI_FPS", 8),
-            width=_env_int("MONEYOS_TRUEAI_WIDTH", 512),
-            height=_env_int("MONEYOS_TRUEAI_HEIGHT", 288),
-            steps=_env_int("MONEYOS_TRUEAI_STEPS", 8),
-            guidance=_env_float("MONEYOS_TRUEAI_GUIDANCE", 2.8),
-            frames_per_clip=_env_int("MONEYOS_TRUEAI_FRAMES_PER_CLIP", 24),
+            duration_s=12.0,
+            fps=8,
+            width=512,
+            height=288,
+            steps=8,
+            guidance=2.5,
+            frames_per_clip=24,
         )
     elif preset == "fast":
         cfg = TrueAIPresetConfig(
@@ -142,13 +142,22 @@ def _resolve_preset(forced_preset: str | None = None) -> TrueAIPresetConfig:
             frames_per_clip=_env_int("MONEYOS_TRUEAI_FRAMES_PER_CLIP", 48),
         )
 
-    duration_s = min(max(cfg.duration_s, 8.0 if cfg.name == "fasttest" else 2.0), 15.0 if cfg.name == "fasttest" else 120.0)
-    fps = min(max(cfg.fps, 6 if cfg.name == "fasttest" else 8), 8 if cfg.name == "fasttest" else 24)
-    width = _multiple_of_8(cfg.width)
-    height = _multiple_of_8(cfg.height)
-    steps = min(max(cfg.steps, 6 if cfg.name == "fasttest" else 8), 10 if cfg.name == "fasttest" else 50)
-    guidance = min(max(cfg.guidance, 2.0), 3.5 if cfg.name == "fasttest" else 9.0)
-    frames_per_clip = min(max(cfg.frames_per_clip, 8), 48)
+    if cfg.name == "fasttest":
+        duration_s = 12.0
+        fps = 8
+        width = 512
+        height = 288
+        steps = 8
+        guidance = 2.5
+        frames_per_clip = 24
+    else:
+        duration_s = min(max(cfg.duration_s, 2.0), 120.0)
+        fps = min(max(cfg.fps, 8), 24)
+        width = _multiple_of_8(cfg.width)
+        height = _multiple_of_8(cfg.height)
+        steps = min(max(cfg.steps, 8), 50)
+        guidance = min(max(cfg.guidance, 2.0), 9.0)
+        frames_per_clip = min(max(cfg.frames_per_clip, 8), 48)
 
     return TrueAIPresetConfig(
         name=cfg.name,
@@ -198,6 +207,12 @@ def run_trueai_60s_job(
     if not provider.is_available():
         raise RuntimeError("CogVideoX backend unavailable. Install diffusers/torch and model.")
 
+    if cfg.name == "fasttest":
+        print("[TRUEAI] FASTTEST ACTIVE")
+        print(f"[TRUEAI] duration={total_seconds}")
+        print(f"[TRUEAI] fps={fps}")
+        print(f"[TRUEAI] steps={steps}")
+        print(f"[TRUEAI] resolution={width}x{height}")
     print(
         "[TRUEAI] "
         f"preset={cfg.name} duration_s={total_seconds:.3f} fps={fps} frames_per_clip={frames_per_clip} clip_seconds={clip_seconds:.3f} "
@@ -229,6 +244,8 @@ def run_trueai_60s_job(
         try:
             provider.generate(request)
         except Exception:
+            if cfg.name == "fasttest":
+                raise
             low_clip = clips_dir / f"clip_{idx:02d}_low.mp4"
             request = ClipRequest(
                 prompt=request.prompt,
@@ -271,22 +288,14 @@ def run_trueai_60s_job(
     concat_list.write_text("\n".join([f"file '{p.as_posix()}'" for p in generated]), encoding="utf-8")
     stitched = final_dir / "stitched_raw.mp4"
     _ffmpeg("-f", "concat", "-safe", "0", "-i", str(concat_list), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(stitched))
-
     target_video = final_dir / "video_out.mp4"
-    final_w, final_h = (1920, 1080) if cfg.name in {"balanced", "max"} else (width, height)
-    vf_parts = []
-    if final_w != width or final_h != height:
-        vf_parts.append(f"scale={final_w}:{final_h}:flags=lanczos")
-    vf_parts.append(f"fps={fps}")
-    if enable_sharpen:
-        vf_parts.append("cas=strength=0.25")
-    vf = ",".join(vf_parts)
+    final_filter = "scale=1920:1080:flags=lanczos,cas=strength=0.35"
     try:
         _ffmpeg(
             "-i",
             str(stitched),
             "-vf",
-            vf,
+            final_filter,
             "-t",
             f"{total_seconds:.3f}",
             "-c:v",
@@ -296,12 +305,11 @@ def run_trueai_60s_job(
             str(target_video),
         )
     except Exception:
-        vf_fallback = ",".join(part for part in vf_parts if not part.startswith("cas="))
         _ffmpeg(
             "-i",
             str(stitched),
             "-vf",
-            vf_fallback,
+            "scale=1920:1080:flags=lanczos",
             "-t",
             f"{total_seconds:.3f}",
             "-c:v",
@@ -336,7 +344,7 @@ def run_trueai_60s_job(
         "width": width,
         "height": height,
         "preset": cfg.name,
-        "post_sharpen": enable_sharpen,
+        "post_sharpen": True,
         "elapsed_s": round(time.time() - started, 3),
         "final_video": str(final_mp4),
     }
