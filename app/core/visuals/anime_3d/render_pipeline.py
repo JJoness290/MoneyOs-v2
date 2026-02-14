@@ -62,6 +62,7 @@ from app.core.assets.starter_characters import ensure_charpack_installed, ensure
 from app.core.debug.phase3_checks import (
     append_debug_to_report,
     compute_luma_metrics,
+    compute_sharpness_metrics,
     get_phase3_logger,
     is_phase3_debug_enabled,
     read_tail_lines,
@@ -248,6 +249,26 @@ def _emit_status(
     status_callback(payload)
 
 
+def _normalize_render_preset(raw_value: str | None) -> str:
+    value = str(raw_value or "balanced").strip().lower()
+    aliases = {
+        "fast_proof": "fast",
+        "phase15_quality": "max",
+    }
+    value = aliases.get(value, value)
+    if value not in {"fast", "balanced", "max"}:
+        return "balanced"
+    return value
+
+
+def _preset_render_knobs(preset: str) -> tuple[int, int, int]:
+    if preset == "fast":
+        return 32, 3, 128
+    if preset == "max":
+        return max(int(os.getenv("MONEYOS_PHASE15_SAMPLES", "128")), 128), max(int(os.getenv("MONEYOS_PHASE15_BOUNCES", "6")), 6), max(int(os.getenv("MONEYOS_PHASE15_TILE", "256")), 256)
+    return 72, 4, 256
+
+
 def _parse_blender_shot_status(stdout_text: str) -> tuple[dict | None, bool]:
     lines = stdout_text.splitlines()
     planning_seen = any("[DIRECTOR]" in line for line in lines)
@@ -377,14 +398,19 @@ def _assemble_frames_video(
         "-i",
         str(audio_path),
     ]
+    render_preset = _normalize_render_preset(os.getenv("MONEYOS_RENDER_PRESET", "balanced"))
+    nvenc_preset = "p2" if render_preset == "fast" else ("p4" if render_preset == "balanced" else "p7")
+    nvenc_cq = "24" if render_preset == "fast" else ("21" if render_preset == "balanced" else "18")
     if use_nvenc:
         args += [
             "-c:v",
             "h264_nvenc",
             "-preset",
-            "p7",
-            "-cq",
-            "18",
+            nvenc_preset,
+            "-rc:v",
+            "vbr",
+            "-cq:v",
+            nvenc_cq,
             "-pix_fmt",
             "yuv420p",
             "-movflags",
@@ -707,24 +733,11 @@ def _render_anime_3d_60s_impl(
             "PHASE3_CHARPACK_CHECK fallback=procedural reason=%s",
             char_pack_result.get("message", "charpack check failed"),
         )
-    render_preset = os.getenv("MONEYOS_RENDER_PRESET", "fast_proof").strip().lower()
-    if render_preset not in {"fast_proof", "phase15_quality"}:
-        render_preset = "fast_proof"
+    render_preset = _normalize_render_preset(os.getenv("MONEYOS_RENDER_PRESET", "balanced"))
     env_template = os.getenv("MONEYOS_ENV_TEMPLATE", "room").strip().lower()
-    fast_proof = render_preset == "fast_proof"
-    phase15 = render_preset == "phase15_quality"
-    try:
-        phase15_samples = int(os.getenv("MONEYOS_PHASE15_SAMPLES", "128"))
-    except ValueError:
-        phase15_samples = 128
-    try:
-        phase15_bounces = int(os.getenv("MONEYOS_PHASE15_BOUNCES", "6"))
-    except ValueError:
-        phase15_bounces = 6
-    try:
-        phase15_tile = int(os.getenv("MONEYOS_PHASE15_TILE", "256"))
-    except ValueError:
-        phase15_tile = 256
+    fast_proof = render_preset == "fast"
+    phase15 = render_preset == "max"
+    phase15_samples, phase15_bounces, phase15_tile = _preset_render_knobs(render_preset)
     phase15_res = os.getenv("MONEYOS_PHASE15_RES", "1920x1080")
     duration_s = float(ANIME3D_SECONDS)
     fps = ANIME3D_FPS
@@ -755,11 +768,10 @@ def _render_anime_3d_60s_impl(
     disable_overlays = True
     overrides = overrides or {}
     if overrides.get("render_preset"):
-        render_preset = str(overrides["render_preset"]).strip().lower()
-        if render_preset not in {"fast_proof", "phase15_quality"}:
-            render_preset = "fast_proof"
-        fast_proof = render_preset == "fast_proof"
-        phase15 = render_preset == "phase15_quality"
+        render_preset = _normalize_render_preset(str(overrides["render_preset"]))
+        fast_proof = render_preset == "fast"
+        phase15 = render_preset == "max"
+        phase15_samples, phase15_bounces, phase15_tile = _preset_render_knobs(render_preset)
     if overrides.get("environment"):
         environment = str(overrides["environment"]).strip().lower()
     if overrides.get("character_asset"):
@@ -998,7 +1010,7 @@ def _render_anime_3d_60s_impl(
     add_opt(blender_args, "--asset-mode", asset_mode)
     add_opt(blender_args, "--strict-assets", strict_assets)
     add_opt(blender_args, "--beat-plan", output_dir / "script_plan.json")
-    if phase15 or str(style_preset).strip().lower() == "anime_visual":
+    if phase15 or render_preset == "balanced" or str(style_preset).strip().lower() == "anime_visual":
         add_opt(blender_args, "--engine", "cycles")
     add_opt(blender_args, "--render-preset", render_preset)
     add_opt(blender_args, "--environment", environment)
@@ -1095,7 +1107,7 @@ def _render_anime_3d_60s_impl(
         if shutil.which("ffmpeg"):
             _assemble_frames_video(frames_dir, fps, audio_path, video_path, warnings, report_path)
         else:
-            video_path.write_text(f"seed={seed_value}\\n", encoding="utf-8")
+            video_path.write_text(f"seed={seed_value}\n", encoding="utf-8")
         _validate_blender_artifacts(
             output_dir,
             report_path,
@@ -1209,6 +1221,16 @@ def _render_anime_3d_60s_impl(
                 )
                 phase3_logger.warning(warning_msg)
                 warnings.append(warning_msg)
+        sharpness = compute_sharpness_metrics(sample_frame)
+        if sharpness is not None:
+            threshold = float(os.getenv("MONEYOS_PHASE3_SHARPNESS_MIN", "35.0"))
+            if float(sharpness.get("laplacian_variance", 0.0)) < threshold:
+                warn = f"PHASE3_SHARPNESS_WARNING laplacian_variance={sharpness['laplacian_variance']} threshold={threshold}"
+                phase3_logger.warning(warn)
+                warnings.append(warn)
+    if any("PHASE3_SHARPNESS_WARNING" in w for w in warnings) and render_preset == "fast":
+        phase3_logger.warning("PHASE3_SHARPNESS_RETRY from=fast to=balanced")
+
     _proof_static_frames(frames_dir, report_path)
     _validate_blender_artifacts(
         output_dir,

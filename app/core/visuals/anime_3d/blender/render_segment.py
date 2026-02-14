@@ -173,7 +173,7 @@ def _parse_args() -> argparse.Namespace:
     else:
         argv = []
     parser = argparse.ArgumentParser()
-    parser.add_argument("--render-preset", default="fast_proof")
+    parser.add_argument("--render-preset", default="balanced")
     parser.add_argument("--engine", default="eevee")
     parser.add_argument("--gpu", default="1")
     parser.add_argument("--audio", default=None)
@@ -244,6 +244,25 @@ def _seed_randomness(seed_value: int) -> None:
             scene.cycles.seed = seed_value
     except Exception:  # noqa: BLE001
         pass
+
+
+
+
+def _normalize_render_preset(raw_value: str | None) -> str:
+    value = str(raw_value or "balanced").strip().lower()
+    aliases = {"fast_proof": "fast", "phase15_quality": "max"}
+    value = aliases.get(value, value)
+    if value not in {"fast", "balanced", "max"}:
+        return "balanced"
+    return value
+
+
+def _disable_global_blur(scene: bpy.types.Scene, camera: bpy.types.Object | None) -> None:
+    _safe_set(scene.render, "use_motion_blur", False)
+    if camera and getattr(camera, "data", None) and hasattr(camera.data, "dof"):
+        _safe_set(camera.data.dof, "use_dof", False)
+        _safe_set(camera.data.dof, "focus_distance", 10.0)
+        _safe_set(camera.data.dof, "aperture_fstop", 128.0)
 
 
 def _configure_cycles_gpu_optix(scene: bpy.types.Scene, args: argparse.Namespace) -> dict[str, object]:
@@ -1460,8 +1479,9 @@ def _create_scene(
     camera = bpy.context.active_object
     scene.camera = camera
     if camera.data:
-        camera.data.dof.use_dof = True
-        camera.data.dof.focus_distance = 3.0
+        camera.data.dof.use_dof = False
+        camera.data.dof.focus_distance = 10.0
+        _safe_set(camera.data.dof, "aperture_fstop", 128.0)
 
     return {
         "hero_armature": hero_armature,
@@ -2596,12 +2616,8 @@ def _setup_compositor(scene: bpy.types.Scene, warnings: list[str]) -> None:
         return
     tree.nodes.clear()
     render_layers = tree.nodes.new(type="CompositorNodeRLayers")
-    glare = tree.nodes.new(type="CompositorNodeGlare")
-    glare.glare_type = "FOG_GLOW"
-    glare.quality = "MEDIUM"
     composite = tree.nodes.new(type="CompositorNodeComposite")
-    tree.links.new(render_layers.outputs["Image"], glare.inputs["Image"])
-    tree.links.new(glare.outputs["Image"], composite.inputs["Image"])
+    tree.links.new(render_layers.outputs["Image"], composite.inputs["Image"])
 
 
 def _get_scene_node_tree(scene: bpy.types.Scene) -> bpy.types.NodeTree | None:
@@ -2636,14 +2652,23 @@ def _configure_eevee(scene: bpy.types.Scene, quality: str) -> None:
         bloom_enabled = True
     elif major_version >= 5:
         print("[WARN] EEVEE bloom not available on this Blender version; continuing.")
-    _safe_set(eevee, "bloom_intensity", 0.05)
-    _safe_set(eevee, "use_motion_blur", True)
+    _safe_set(eevee, "bloom_intensity", 0.02)
+    _safe_set(eevee, "use_motion_blur", False)
     if quality == "max":
         _safe_set(eevee, "taa_render_samples", 64)
         _safe_set(eevee, "shadow_cube_size", "2048")
         _safe_set(eevee, "shadow_cascade_size", "2048")
+    elif quality == "fast":
+        _safe_set(eevee, "taa_render_samples", 8)
+        _safe_set(eevee, "shadow_cube_size", "512")
+        _safe_set(eevee, "shadow_cascade_size", "512")
+        _safe_set(eevee, "use_ssr", False)
+        _safe_set(eevee, "use_gtao", False)
+        _safe_set(eevee, "use_volumetric_lights", False)
     else:
-        _safe_set(eevee, "taa_render_samples", 32)
+        _safe_set(eevee, "taa_render_samples", 24)
+        _safe_set(eevee, "shadow_cube_size", "1024")
+        _safe_set(eevee, "shadow_cascade_size", "1024")
     if major_version >= 5 and not bloom_enabled:
         pass
 
@@ -2679,7 +2704,8 @@ def _configure_phase15_cycles(scene: bpy.types.Scene, args: argparse.Namespace) 
     scene.cycles.device = "GPU"
     _safe_set(scene.cycles, "samples", args.phase15_samples)
     _safe_set(scene.cycles, "use_adaptive_sampling", True)
-    _safe_set(scene.cycles, "adaptive_threshold", 0.01)
+    _safe_set(scene.cycles, "adaptive_threshold", 0.03 if _normalize_render_preset(args.render_preset)=="fast" else (0.015 if _normalize_render_preset(args.render_preset)=="balanced" else 0.008))
+    _safe_set(scene.cycles, "filter_width", 0.6)
     _safe_set(scene.cycles, "max_bounces", args.phase15_bounces)
     _safe_set(scene.cycles, "caustics_reflective", False)
     _safe_set(scene.cycles, "caustics_refractive", False)
@@ -2840,8 +2866,8 @@ def main() -> None:
     _clear_scene()
     scene = bpy.context.scene
     warnings: list[str] = []
-    preset = args.render_preset
-    phase15 = preset == "phase15_quality"
+    preset = _normalize_render_preset(args.render_preset)
+    phase15 = preset == "max"
     phase15_info: dict[str, object] | None = None
     quality_enabled = os.getenv("MONEYOS_ANIME3D_QUALITY", "1") != "0"
     force_gpu = os.getenv("MONEYOS_ANIME3D_FORCE_GPU", "1") != "0"
@@ -2870,13 +2896,14 @@ def main() -> None:
         "devices": [],
         "scene_device": "CPU",
     }
-    if args.fast_proof:
+    fast_mode = args.fast_proof or preset == "fast"
+    if fast_mode:
         engine = "BLENDER_EEVEE_NEXT"
         try:
             scene.render.engine = engine
         except Exception:  # noqa: BLE001
             scene.render.engine = "BLENDER_EEVEE"
-        scene.render.fps = 30
+        scene.render.fps = args.fps
     else:
         scene.render.engine = "BLENDER_EEVEE" if args.engine == "eevee" else "CYCLES"
         scene.render.fps = args.fps
@@ -2909,6 +2936,14 @@ def main() -> None:
         )
     elif hasattr(scene, "eevee"):
         _configure_eevee(scene, args.quality)
+
+    print(
+        "[RENDER_PRESET] "
+        f"preset={preset} engine={scene.render.engine} fps={scene.render.fps} "
+        f"res={scene.render.resolution_x}x{scene.render.resolution_y}@{scene.render.resolution_percentage}% "
+        f"motion_blur={getattr(scene.render, 'use_motion_blur', False)} "
+        f"dof={getattr(getattr(getattr(scene.camera, 'data', None), 'dof', None), 'use_dof', False)}"
+    )
 
     procedural_humanoid = False
     if procedural_fallback and strict_assets:
@@ -2948,6 +2983,7 @@ def main() -> None:
         style_preset=args.style_preset,
         strict_assets=bool(strict_assets),
     )
+    _disable_global_blur(scene, objects.get("camera") if isinstance(objects, dict) else scene.camera)
     _phase3_log("PHASE3_CHARACTER_IMPORT_DONE")
     character_meshes = _load_character_asset(
         assets_dir,
@@ -3010,7 +3046,7 @@ def main() -> None:
         warnings,
     )
     print("[POSTFX] enabled=", args.postfx)
-    if args.postfx == "on" and not args.fast_proof:
+    if args.postfx == "on" and not fast_mode:
         _setup_compositor(scene, warnings)
     envelope = _load_rms_envelope(Path(args.audio) if args.audio else Path(), args.fps, scene.frame_end)
     dialogue_text = " ".join(str(beat.get("dialogue", "")) for beat in beat_plan) if beat_plan else ""
@@ -3021,7 +3057,7 @@ def main() -> None:
         f"{motion_info['camera']} character_motion={motion_info['character']} "
         f"object_motion={motion_info['object']} light_motion={motion_info['light']}"
     )
-    fast_proof_like = args.fast_proof or phase15
+    fast_proof_like = fast_mode or phase15
     mouth_keyframes = _animate(
         objects,
         envelope,

@@ -14,8 +14,12 @@ StatusCallback = Callable[[str], None] | None
 
 
 def _nvenc_quality_mode() -> str:
-    mode = os.getenv("MONEYOS_NVENC_QUALITY", "balanced").strip().lower()
-    if mode not in {"balanced", "max"}:
+    mode = os.getenv("MONEYOS_NVENC_QUALITY", "").strip().lower()
+    if not mode:
+        preset = os.getenv("MONEYOS_RENDER_PRESET", "balanced").strip().lower()
+        aliases = {"fast_proof": "fast", "phase15_quality": "max"}
+        mode = aliases.get(preset, preset)
+    if mode not in {"fast", "balanced", "max"}:
         return "balanced"
     return mode
 
@@ -38,20 +42,20 @@ def _nvenc_preset(mode: str) -> str:
     preset = os.getenv("MONEYOS_NVENC_PRESET")
     if preset:
         return preset
-    return "p7" if mode == "max" else "p5"
+    return "p2" if mode == "fast" else ("p4" if mode == "balanced" else "p7")
 
 
 def _nvenc_cq_value(mode: str) -> str:
     env_value = os.getenv("MONEYOS_NVENC_CQ")
     if env_value:
         return env_value
-    return "18" if mode == "max" else "22"
+    return "24" if mode == "fast" else ("21" if mode == "balanced" else "18")
 
 
 def _nvenc_vbr_values(mode: str) -> tuple[str, str, str]:
-    default_rate = "35M" if mode == "max" else "16M"
-    default_max = "50M" if mode == "max" else "24M"
-    default_buf = "100M" if mode == "max" else "48M"
+    default_rate = "10M" if mode == "fast" else ("16M" if mode == "balanced" else "35M")
+    default_max = "14M" if mode == "fast" else ("24M" if mode == "balanced" else "50M")
+    default_buf = "28M" if mode == "fast" else ("48M" if mode == "balanced" else "100M")
     bitrate = os.getenv("MONEYOS_NVENC_VBR", default_rate)
     maxrate = os.getenv("MONEYOS_NVENC_MAXRATE", default_max)
     bufsize = os.getenv("MONEYOS_NVENC_BUFSIZE", default_buf)
@@ -273,10 +277,10 @@ def select_video_encoder() -> tuple[list[str], str]:
             warning += " (cuda_available=true)"
         print(warning)
     args = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "veryfast"]
-    render_preset = os.getenv("MONEYOS_RENDER_PRESET", "fast_proof").strip().lower()
-    if render_preset == "fast_proof":
+    render_preset = os.getenv("MONEYOS_RENDER_PRESET", "balanced").strip().lower()
+    if render_preset in {"fast", "fast_proof"}:
         args += ["-minrate", "2M", "-maxrate", "4M", "-bufsize", "4M"]
-        print("[ENC] libx264 entropy floor enabled (fast_proof)")
+        print("[ENC] libx264 entropy floor enabled (fast)")
     print("[ResourceGuard] Encoder: libx264 args:", " ".join(args))
     return (args, "libx264")
 
