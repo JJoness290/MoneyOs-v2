@@ -731,7 +731,7 @@ def _build_phase25_shot_plan(target_seconds: float) -> list[dict]:
 
 
 
-def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest) -> None:
+def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: str | None = None) -> None:
     from app.core.visuals.anime_trueai_video.pipeline import run_trueai_60s_job  # noqa: WPS433
 
     def _update(message: str) -> None:
@@ -746,7 +746,7 @@ def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest) -> None:
 
     try:
         _set_status(job_id, "Queued TRUE text-to-video", stage_key="plan", progress_pct=1)
-        final_video, report = run_trueai_60s_job(job_id, req.prompt, status_callback=_update)
+        final_video, report = run_trueai_60s_job(job_id, req.prompt, status_callback=_update, forced_preset=forced_preset)
         _set_status(
             job_id,
             "Complete",
@@ -1285,6 +1285,17 @@ async def generate_anime_trueai_60s(req: TrueAiVideoRequest = Body(default=TrueA
     thread.start()
     out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
     return JSONResponse({"job_id": job_id, "output_dir": str(out_dir.resolve())})
+
+
+
+@app.post("/jobs/anime-trueai-fasttest")
+async def generate_anime_trueai_fasttest(req: TrueAiVideoRequest = Body(default=TrueAiVideoRequest())) -> JSONResponse:
+    job_id = uuid.uuid4().hex
+    _set_status(job_id, "Queued TRUE AI fasttest video", stage_key="plan", progress_pct=1)
+    thread = threading.Thread(target=_run_trueai_video_60s, args=(job_id, req, "fasttest"), daemon=True)
+    thread.start()
+    out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
+    return JSONResponse({"job_id": job_id, "output_dir": str(out_dir.resolve()), "preset": "fasttest"})
 
 @app.post("/jobs/ai-video-60s")
 async def generate_ai_video_60s(req: AiVideoRequest = Body(...)) -> JSONResponse:

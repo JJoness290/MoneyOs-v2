@@ -5,19 +5,22 @@ import gc
 import os
 from pathlib import Path
 
-
 from app.core.visuals.anime_trueai_video.provider import ClipRequest, ClipResult, TextToVideoProvider
 
 
 class CogVideoXProvider(TextToVideoProvider):
     name = "cogvideox"
+    _shared_pipe = None
+    _shared_device = "cpu"
 
     def __init__(self) -> None:
         self.model_id = os.getenv("MONEYOS_COGVIDEOX_MODEL_ID", "zai-org/CogVideoX-5b")
         self.model_path = os.getenv("MONEYOS_COGVIDEOX_MODEL_PATH", "")
         self.allow_download = os.getenv("MONEYOS_AI_VIDEO_ALLOW_DOWNLOAD", "1") == "1"
-        self._pipe = None
-        self._device = "cpu"
+        self._pipe = CogVideoXProvider._shared_pipe
+        self._device = CogVideoXProvider._shared_device
+        self._generation_calls = 0
+        self._compiled = False
 
     def is_available(self) -> bool:
         try:
@@ -39,8 +42,8 @@ class CogVideoXProvider(TextToVideoProvider):
         if not self.allow_download:
             raise RuntimeError("CogVideoX model not found locally and auto-download is disabled")
         from huggingface_hub import snapshot_download
-        return snapshot_download(repo_id=self.model_id)
 
+        return snapshot_download(repo_id=self.model_id)
 
     @staticmethod
     def _is_diffusers_snapshot(model_ref: str) -> bool:
@@ -57,6 +60,14 @@ class CogVideoXProvider(TextToVideoProvider):
 
         self._device = "cuda" if torch.cuda.is_available() and os.getenv("MONEYOS_USE_GPU", "1") != "0" else "cpu"
         dtype = torch.bfloat16 if self._device == "cuda" else torch.float32
+
+        with contextlib.suppress(Exception):
+            torch.backends.cuda.matmul.allow_tf32 = True
+        with contextlib.suppress(Exception):
+            torch.backends.cudnn.allow_tf32 = True
+        with contextlib.suppress(Exception):
+            torch.set_float32_matmul_precision("high")
+
         model_ref = self._resolve_model_ref()
         if self._is_diffusers_snapshot(model_ref):
             pipe = DiffusionPipeline.from_pretrained(model_ref, torch_dtype=dtype)
@@ -65,6 +76,7 @@ class CogVideoXProvider(TextToVideoProvider):
                 pipe = CogVideoXPipeline.from_pretrained(model_ref, torch_dtype=dtype)
             if "pipe" not in locals():
                 pipe = DiffusionPipeline.from_pretrained(model_ref, torch_dtype=dtype)
+
         if self._device == "cuda":
             if hasattr(pipe, "enable_model_cpu_offload"):
                 with contextlib.suppress(Exception):
@@ -77,7 +89,32 @@ class CogVideoXProvider(TextToVideoProvider):
                 pipe.enable_vae_slicing()
             with contextlib.suppress(Exception):
                 pipe.vae.enable_tiling()
+            with contextlib.suppress(Exception):
+                pipe.enable_xformers_memory_efficient_attention()
+
         self._pipe = pipe
+        CogVideoXProvider._shared_pipe = pipe
+        CogVideoXProvider._shared_device = self._device
+
+    def _maybe_compile(self) -> None:
+        if self._compiled or self._pipe is None or self._device != "cuda":
+            return
+        if os.getenv("MONEYOS_TRUEAI_COMPILE", "0") != "1":
+            return
+        compile_after_first = os.getenv("MONEYOS_TRUEAI_COMPILE_AFTER_FIRST", "1") == "1"
+        if compile_after_first and self._generation_calls < 1:
+            return
+        import torch
+
+        target = getattr(self._pipe, "transformer", None)
+        if target is None:
+            return
+        try:
+            self._pipe.transformer = torch.compile(target, mode="reduce-overhead", fullgraph=False)
+            self._compiled = True
+            print("[TRUEAI] compile=enabled target=transformer")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[TRUEAI] compile=failed reason={exc}")
 
     def generate(self, request: ClipRequest) -> ClipResult:
         self._load()
@@ -86,12 +123,9 @@ class CogVideoXProvider(TextToVideoProvider):
         import torch
         from diffusers.utils import export_to_video
 
+        self._maybe_compile()
         self._pipe.set_progress_bar_config(disable=True)
-        generator = None
-        if self._device == "cuda":
-            generator = torch.Generator(device="cuda").manual_seed(request.seed)
-        else:
-            generator = torch.Generator().manual_seed(request.seed)
+        generator = torch.Generator(device="cuda").manual_seed(request.seed) if self._device == "cuda" else torch.Generator().manual_seed(request.seed)
         num_frames = int(max(1, min(48, round(request.seconds * request.fps))))
         with torch.autocast("cuda", dtype=torch.bfloat16) if self._device == "cuda" else contextlib.nullcontext():
             result = self._pipe(
@@ -109,6 +143,7 @@ class CogVideoXProvider(TextToVideoProvider):
         export_to_video(frames, str(request.out_path), fps=request.fps)
         if request.out_path.stat().st_size <= 0:
             raise RuntimeError("generated empty clip")
+        self._generation_calls += 1
         with contextlib.suppress(Exception):
             if self._device == "cuda":
                 torch.cuda.empty_cache()
