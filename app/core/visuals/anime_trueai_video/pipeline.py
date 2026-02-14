@@ -5,6 +5,7 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
 import subprocess
 import time
 
@@ -26,6 +27,7 @@ class TrueAIPresetConfig:
     steps: int
     guidance: float
     frames_per_clip: int
+    super_resolution: bool
 
 
 def _output_dir(job_id: str) -> Path:
@@ -38,11 +40,18 @@ def _anime_prompt(base: str, character_desc: str, shot_idx: int) -> str:
         "sharp clean linework, vibrant colors, cel shading, dramatic shadows, expressive anime eyes, "
         "anime movie quality, high detail anime background"
     )
-    return f"{style}. Character: {character_desc}. Shot {shot_idx + 1}: {base}".strip()
+    consistency = (
+        "consistent character identity, consistent lighting direction, fixed lens behavior, "
+        "stable camera motion, coherent line art"
+    )
+    return f"{style}. {consistency}. Character: {character_desc}. Shot {shot_idx + 1}: {base}".strip()
 
 
 def _negative_prompt() -> str:
-    return "photorealistic, realistic human, live action, 3D render, western cartoon, blurry, distorted, low quality, scribbles, watermark, text"
+    return (
+        "photorealistic, realistic human, live action, 3D render, western cartoon, blurry, distorted, "
+        "low quality, scribbles, watermark, text"
+    )
 
 
 def _ffmpeg(*args: str) -> None:
@@ -66,107 +75,46 @@ def _probe_duration(path: Path) -> float:
     return float(proc.stdout.strip())
 
 
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except Exception:
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except Exception:
-        return default
-
-
 def _multiple_of_8(value: int) -> int:
     value = max(64, int(value))
     return max(64, (value // 8) * 8)
 
 
 def _resolve_preset(forced_preset: str | None = None) -> TrueAIPresetConfig:
-    if os.getenv("MONEYOS_TRUEAI_FASTTEST", "0") == "1":
+    fasttest_env = os.getenv("MONEYOS_TRUEAI_FASTTEST", "0") == "1"
+    preset = str(forced_preset or os.getenv("MONEYOS_TRUEAI_PRESET", "balanced")).strip().lower()
+    if fasttest_env:
         preset = "fasttest"
-    elif forced_preset:
-        preset = forced_preset.strip().lower()
-    else:
-        preset = os.getenv("MONEYOS_TRUEAI_PRESET", "balanced").strip().lower()
-    if preset not in {"fasttest", "fast", "balanced", "max"}:
+    aliases = {"max": "quality", "fast": "balanced"}
+    preset = aliases.get(preset, preset)
+    if preset not in {"fasttest", "balanced", "quality"}:
         preset = "balanced"
 
     if preset == "fasttest":
-        cfg = TrueAIPresetConfig(
-            name=preset,
-            duration_s=12.0,
-            fps=8,
-            width=512,
-            height=288,
-            steps=8,
-            guidance=2.5,
-            frames_per_clip=24,
-        )
-    elif preset == "fast":
-        cfg = TrueAIPresetConfig(
-            name=preset,
-            duration_s=_env_float("MONEYOS_TRUEAI_DURATION_S", 60.0),
-            fps=_env_int("MONEYOS_TRUEAI_FPS", 12),
-            width=_env_int("MONEYOS_TRUEAI_WIDTH", 768),
-            height=_env_int("MONEYOS_TRUEAI_HEIGHT", 432),
-            steps=_env_int("MONEYOS_TRUEAI_STEPS", 14),
-            guidance=_env_float("MONEYOS_TRUEAI_GUIDANCE", 4.0),
-            frames_per_clip=_env_int("MONEYOS_TRUEAI_FRAMES_PER_CLIP", 32),
-        )
-    elif preset == "max":
-        cfg = TrueAIPresetConfig(
-            name=preset,
-            duration_s=_env_float("MONEYOS_TRUEAI_DURATION_S", 60.0),
-            fps=_env_int("MONEYOS_TRUEAI_FPS", 24),
-            width=_env_int("MONEYOS_TRUEAI_WIDTH", 1280),
-            height=_env_int("MONEYOS_TRUEAI_HEIGHT", 720),
-            steps=_env_int("MONEYOS_TRUEAI_STEPS", 36),
-            guidance=_env_float("MONEYOS_TRUEAI_GUIDANCE", 6.5),
-            frames_per_clip=_env_int("MONEYOS_TRUEAI_FRAMES_PER_CLIP", 48),
-        )
-    else:
-        cfg = TrueAIPresetConfig(
-            name=preset,
-            duration_s=_env_float("MONEYOS_TRUEAI_DURATION_S", 60.0),
-            fps=_env_int("MONEYOS_TRUEAI_FPS", 24),
-            width=_env_int("MONEYOS_TRUEAI_WIDTH", 1280),
-            height=_env_int("MONEYOS_TRUEAI_HEIGHT", 720),
-            steps=_env_int("MONEYOS_TRUEAI_STEPS", 24),
-            guidance=_env_float("MONEYOS_TRUEAI_GUIDANCE", 5.5),
-            frames_per_clip=_env_int("MONEYOS_TRUEAI_FRAMES_PER_CLIP", 48),
-        )
+        return TrueAIPresetConfig("fasttest", 12.0, 8, 512, 288, 10, 3.0, 24, False)
+    if preset == "quality":
+        return TrueAIPresetConfig("quality", 60.0, 24, 1280, 720, 40, 7.0, 48, True)
+    return TrueAIPresetConfig("balanced", 60.0, 12, 960, 540, 24, 5.5, 24, True)
 
-    if cfg.name == "fasttest":
-        duration_s = 12.0
-        fps = 8
-        width = 512
-        height = 288
-        steps = 8
-        guidance = 2.5
-        frames_per_clip = 24
-    else:
-        duration_s = min(max(cfg.duration_s, 2.0), 120.0)
-        fps = min(max(cfg.fps, 8), 24)
-        width = _multiple_of_8(cfg.width)
-        height = _multiple_of_8(cfg.height)
-        steps = min(max(cfg.steps, 8), 50)
-        guidance = min(max(cfg.guidance, 2.0), 9.0)
-        frames_per_clip = min(max(cfg.frames_per_clip, 8), 48)
 
-    return TrueAIPresetConfig(
-        name=cfg.name,
-        duration_s=float(duration_s),
-        fps=fps,
-        width=width,
-        height=height,
-        steps=steps,
-        guidance=float(guidance),
-        frames_per_clip=frames_per_clip,
-    )
+def run_super_resolution(input_video_path: Path, scale: int = 2, fps: int = 24) -> Path:
+    out_path = input_video_path.with_name(f"{input_video_path.stem}_sr.mp4")
+    if scale <= 1:
+        return input_video_path
+    exe = shutil.which("realesrgan-ncnn-vulkan") or shutil.which("realesrgan-ncnn-vulkan.exe")
+    if exe:
+        frames_in = input_video_path.parent / "sr_frames_in"
+        frames_out = input_video_path.parent / "sr_frames_out"
+        frames_in.mkdir(parents=True, exist_ok=True)
+        frames_out.mkdir(parents=True, exist_ok=True)
+        _ffmpeg("-i", str(input_video_path), str(frames_in / "f_%06d.png"))
+        cmd = [exe, "-i", str(frames_in), "-o", str(frames_out), "-n", "realesr-animevideov3", "-s", str(scale), "-f", "png"]
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        if result.returncode == 0:
+            _ffmpeg("-framerate", str(fps), "-i", str(frames_out / "f_%06d.png"), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path))
+            return out_path
+    _ffmpeg("-i", str(input_video_path), "-vf", f"scale=iw*{scale}:ih*{scale}:flags=lanczos", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path))
+    return out_path
 
 
 def run_trueai_60s_job(
@@ -175,35 +123,19 @@ def run_trueai_60s_job(
     status_callback=None,
     forced_preset: str | None = None,
 ) -> tuple[Path, Path]:
-    import os
-
     FASTTEST = os.getenv("MONEYOS_TRUEAI_FASTTEST", "0") == "1" or str(forced_preset or "").strip().lower() == "fasttest"
+    cfg = _resolve_preset("fasttest" if FASTTEST else forced_preset)
 
-    cfg = _resolve_preset(forced_preset)
-    duration_seconds = cfg.duration_s
+    total_seconds = cfg.duration_s
     fps = cfg.fps
     steps = cfg.steps
-    width = cfg.width
-    height = cfg.height
-    guidance_scale = cfg.guidance
+    width = _multiple_of_8(cfg.width)
+    height = _multiple_of_8(cfg.height)
+    guidance = cfg.guidance
     frames_per_clip = min(48, max(8, cfg.frames_per_clip))
-
-    if FASTTEST:
-        print("[TRUEAI] FASTTEST ACTIVE — MAX SPEED MODE")
-        duration_seconds = 12
-        fps = 8
-        steps = 8
-        width = 512
-        height = 288
-        guidance_scale = 2.5
-        frames_per_clip = 24
-
-    total_seconds = float(duration_seconds)
     clip_seconds = frames_per_clip / fps
     clip_count = int(math.ceil(total_seconds / clip_seconds))
-    guidance = float(guidance_scale)
     seed = int(os.getenv("MONEYOS_TRUEAI_SEED", "777"))
-    enable_sharpen = os.getenv("MONEYOS_POST_SHARPEN", "1" if cfg.name in {"fasttest", "fast"} else "0") == "1"
 
     out_dir = _output_dir(job_id)
     clips_dir = out_dir / "clips"
@@ -223,20 +155,16 @@ def run_trueai_60s_job(
         raise RuntimeError("CogVideoX backend unavailable. Install diffusers/torch and model.")
 
     if FASTTEST:
-        print(f"[TRUEAI] duration={total_seconds}")
-        print(f"[TRUEAI] fps={fps}")
-        print(f"[TRUEAI] steps={steps}")
-        print(f"[TRUEAI] resolution={width}x{height}")
-    print(
-        "[TRUEAI] "
-        f"preset={cfg.name} duration_s={total_seconds:.3f} fps={fps} frames_per_clip={frames_per_clip} clip_seconds={clip_seconds:.3f} "
-        f"clips={clip_count} steps={steps} guidance={guidance} size={width}x{height} "
-        f"compile={os.getenv('MONEYOS_TRUEAI_COMPILE', '0')} compile_after_first={os.getenv('MONEYOS_TRUEAI_COMPILE_AFTER_FIRST', '1')} "
-        f"post_sharpen={int(enable_sharpen)}"
-    )
+        print("[TRUEAI] FASTTEST ACTIVE — MAX SPEED MODE")
+    print(f"[TRUEAI] preset={cfg.name}")
+    print(f"[TRUEAI] resolution={width}x{height}")
+    print(f"[TRUEAI] steps={steps}")
+    print(f"[TRUEAI] guidance={guidance}")
+    print(f"[TRUEAI] super_resolution={'ON' if cfg.super_resolution else 'OFF'}")
 
     generated: list[Path] = []
     started = time.time()
+
     for idx in range(clip_count):
         remaining_s = max(0.0, total_seconds - (idx * clip_seconds))
         target_clip_seconds = min(clip_seconds, remaining_s if remaining_s > 0 else clip_seconds)
@@ -255,59 +183,42 @@ def run_trueai_60s_job(
             guidance=guidance,
             out_path=clip_path,
         )
-        try:
-            provider.generate(request)
-        except Exception:
-            if FASTTEST:
-                raise
-            low_clip = clips_dir / f"clip_{idx:02d}_low.mp4"
-            request = ClipRequest(
-                prompt=request.prompt,
-                negative_prompt=request.negative_prompt,
-                seed=request.seed,
-                seconds=request.seconds,
-                fps=request.fps,
-                width=max(320, _multiple_of_8(width // 2)),
-                height=max(192, _multiple_of_8(height // 2)),
-                steps=max(6, request.steps - 2),
-                guidance=max(2.0, request.guidance - 0.8),
-                out_path=low_clip,
-            )
-            provider.generate(request)
-            _ffmpeg("-i", str(low_clip), "-vf", f"scale={width}:{height}:flags=lanczos", "-r", str(fps), str(clip_path))
+        provider.generate(request)
 
         clip_duration = _probe_duration(clip_path)
         if clip_duration <= 0.1:
             raise RuntimeError(f"empty clip generated: {clip_path}")
         if clip_duration > request.seconds + 0.02:
-            _ffmpeg("-i", str(clip_path), "-t", f"{request.seconds:.3f}", "-c:v", "copy", str(clips_dir / f"clip_{idx:02d}_trim.mp4"))
-            clip_path = clips_dir / f"clip_{idx:02d}_trim.mp4"
+            trim_path = clips_dir / f"clip_{idx:02d}_trim.mp4"
+            _ffmpeg("-i", str(clip_path), "-t", f"{request.seconds:.3f}", "-c:v", "copy", str(trim_path))
+            clip_path = trim_path
         elif clip_duration + 0.02 < request.seconds:
             pad_seconds = max(0.0, request.seconds - clip_duration)
-            _ffmpeg(
-                "-i",
-                str(clip_path),
-                "-vf",
-                f"tpad=stop_mode=clone:stop_duration={pad_seconds:.3f}",
-                "-r",
-                str(fps),
-                str(clips_dir / f"clip_{idx:02d}_pad.mp4"),
-            )
-            clip_path = clips_dir / f"clip_{idx:02d}_pad.mp4"
+            pad_path = clips_dir / f"clip_{idx:02d}_pad.mp4"
+            _ffmpeg("-i", str(clip_path), "-vf", f"tpad=stop_mode=clone:stop_duration={pad_seconds:.3f}", "-r", str(fps), str(pad_path))
+            clip_path = pad_path
         generated.append(clip_path)
 
     if status_callback:
         status_callback("stitching")
     concat_list = clips_dir / "concat.txt"
     concat_list.write_text("\n".join([f"file '{p.as_posix()}'" for p in generated]), encoding="utf-8")
-    stitched = final_dir / "stitched_raw.mp4"
+
+    stitched = final_dir / "stitched.mp4"
     _ffmpeg("-f", "concat", "-safe", "0", "-i", str(concat_list), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(stitched))
+
+    source_for_final = stitched
+    if cfg.super_resolution and not FASTTEST:
+        if status_callback:
+            status_callback("super-resolution")
+        source_for_final = run_super_resolution(stitched, scale=2, fps=fps)
+
     target_video = final_dir / "video_out.mp4"
     final_filter = "scale=1920:1080:flags=lanczos,cas=strength=0.35"
     try:
         _ffmpeg(
             "-i",
-            str(stitched),
+            str(source_for_final),
             "-vf",
             final_filter,
             "-t",
@@ -319,15 +230,15 @@ def run_trueai_60s_job(
             "-profile:v",
             "high",
             "-preset",
-            "p2" if cfg.name in {"fasttest", "fast"} else "p7",
+            "p2" if FASTTEST else ("p4" if cfg.name == "balanced" else "p7"),
             str(target_video),
         )
     except Exception:
         _ffmpeg(
             "-i",
-            str(stitched),
+            str(source_for_final),
             "-vf",
-            "scale=1920:1080:flags=lanczos",
+            "scale=1920:1080:flags=lanczos,unsharp=5:5:1.0:5:5:0.0",
             "-t",
             f"{total_seconds:.3f}",
             "-c:v",
@@ -346,8 +257,9 @@ def run_trueai_60s_job(
 
     duration = _probe_duration(final_mp4)
     if math.fabs(duration - total_seconds) > 0.15:
-        _ffmpeg("-i", str(final_mp4), "-t", f"{total_seconds:.3f}", "-c:v", "copy", "-c:a", "copy", str(final_dir / "final_trim.mp4"))
-        final_mp4 = final_dir / "final_trim.mp4"
+        trim_final = final_dir / "final_trim.mp4"
+        _ffmpeg("-i", str(final_mp4), "-t", f"{total_seconds:.3f}", "-c:v", "copy", "-c:a", "copy", str(trim_final))
+        final_mp4 = trim_final
 
     report = {
         "job_id": job_id,
@@ -361,8 +273,8 @@ def run_trueai_60s_job(
         "guidance": guidance,
         "width": width,
         "height": height,
-        "preset": "fasttest" if FASTTEST else cfg.name,
-        "post_sharpen": True,
+        "preset": cfg.name,
+        "super_resolution": bool(cfg.super_resolution and not FASTTEST),
         "elapsed_s": round(time.time() - started, 3),
         "final_video": str(final_mp4),
     }

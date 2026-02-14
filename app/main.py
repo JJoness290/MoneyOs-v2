@@ -1297,6 +1297,17 @@ async def generate_anime_trueai_fasttest(req: TrueAiVideoRequest = Body(default=
     out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
     return JSONResponse({"job_id": job_id, "output_dir": str(out_dir.resolve()), "preset": "fasttest"})
 
+
+
+@app.post("/jobs/anime-trueai-quality")
+async def generate_anime_trueai_quality(req: TrueAiVideoRequest = Body(default=TrueAiVideoRequest())) -> JSONResponse:
+    job_id = uuid.uuid4().hex
+    _set_status(job_id, "Queued TRUE AI quality video", stage_key="plan", progress_pct=1)
+    thread = threading.Thread(target=_run_trueai_video_60s, args=(job_id, req, "quality"), daemon=True)
+    thread.start()
+    out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
+    return JSONResponse({"job_id": job_id, "output_dir": str(out_dir.resolve()), "preset": "quality"})
+
 @app.post("/jobs/ai-video-60s")
 async def generate_ai_video_60s(req: AiVideoRequest = Body(...)) -> JSONResponse:
     from app.core.visuals.ai_video.pipeline import run_ai_video_job  # noqa: WPS433

@@ -59,7 +59,7 @@ class CogVideoXProvider(TextToVideoProvider):
         from diffusers import CogVideoXPipeline, DiffusionPipeline
 
         self._device = "cuda" if torch.cuda.is_available() and os.getenv("MONEYOS_USE_GPU", "1") != "0" else "cpu"
-        dtype = torch.bfloat16 if self._device == "cuda" else torch.float32
+        dtype = torch.float16 if self._device == "cuda" else torch.float32
 
         with contextlib.suppress(Exception):
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -76,6 +76,11 @@ class CogVideoXProvider(TextToVideoProvider):
                 pipe = CogVideoXPipeline.from_pretrained(model_ref, torch_dtype=dtype)
             if "pipe" not in locals():
                 pipe = DiffusionPipeline.from_pretrained(model_ref, torch_dtype=dtype)
+
+        with contextlib.suppress(Exception):
+            from diffusers import DPMSolverMultistepScheduler  # noqa: WPS433
+
+            pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
 
         if self._device == "cuda":
             if hasattr(pipe, "enable_model_cpu_offload"):
@@ -126,8 +131,11 @@ class CogVideoXProvider(TextToVideoProvider):
         self._maybe_compile()
         self._pipe.set_progress_bar_config(disable=True)
         generator = torch.Generator(device="cuda").manual_seed(request.seed) if self._device == "cuda" else torch.Generator().manual_seed(request.seed)
+        with contextlib.suppress(Exception):
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = True
         num_frames = int(max(1, min(48, round(request.seconds * request.fps))))
-        with torch.autocast("cuda", dtype=torch.bfloat16) if self._device == "cuda" else contextlib.nullcontext():
+        with torch.autocast("cuda", dtype=torch.float16) if self._device == "cuda" else contextlib.nullcontext():
             result = self._pipe(
                 prompt=request.prompt,
                 negative_prompt=request.negative_prompt,
