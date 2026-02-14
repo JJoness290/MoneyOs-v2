@@ -49,7 +49,7 @@ def _nvenc_cq_value(mode: str) -> str:
     env_value = os.getenv("MONEYOS_NVENC_CQ")
     if env_value:
         return env_value
-    return "24" if mode == "fast" else ("21" if mode == "balanced" else "18")
+    return os.getenv("MONEYOS_NVENC_CQ", "19")
 
 
 def _nvenc_vbr_values(mode: str) -> tuple[str, str, str]:
@@ -66,12 +66,12 @@ def _nvenc_args_for_mode(mode: str) -> list[str]:
     codec = _nvenc_codec()
     preset = _nvenc_preset(mode)
     rc_mode = _nvenc_rc_mode()
-    args = ["-c:v", codec, "-pix_fmt", "yuv420p", "-preset", preset]
+    args = ["-c:v", codec, "-pix_fmt", "yuv420p", "-profile:v", "high", "-preset", preset]
     if rc_mode == "vbr":
         bitrate, maxrate, bufsize = _nvenc_vbr_values(mode)
         args += ["-rc:v", "vbr", "-b:v", bitrate, "-maxrate", maxrate, "-bufsize", bufsize]
     else:
-        args += ["-rc:v", "vbr_hq", "-cq", _nvenc_cq_value(mode)]
+        args += ["-rc:v", "vbr_hq", "-cq", _nvenc_cq_value(mode), "-b:v", "0"]
     return args
 
 
@@ -150,6 +150,93 @@ def _ensure_faststart(args: list[str]) -> list[str]:
     return args
 
 
+def _ffprobe_video_stream(path: Path) -> dict[str, str] | None:
+    if not path.exists():
+        return None
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,pix_fmt,profile",
+            "-of",
+            "default=noprint_wrappers=1:nokey=0",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        return None
+    payload: dict[str, str] = {}
+    for line in (probe.stdout or "").splitlines():
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        payload[k.strip()] = v.strip()
+    return payload or None
+
+
+def _is_nvenc_h264_safe_stream(info: dict[str, str] | None) -> bool:
+    if not info:
+        return False
+    codec = (info.get("codec_name") or "").strip().lower()
+    pix_fmt = (info.get("pix_fmt") or "").strip().lower()
+    profile = (info.get("profile") or "").strip().lower()
+    return codec == "h264" and pix_fmt == "yuv420p" and "444" not in profile
+
+
+def _reencode_safe_x264(output_path: Path, log_path: Path | None = None) -> None:
+    temp_path = output_path.with_suffix(".x264safe.mp4")
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(output_path),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "high",
+        "-crf",
+        os.getenv("MONEYOS_X264_SAFE_CRF", "18"),
+        "-preset",
+        "veryfast",
+        "-movflags",
+        "+faststart",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        str(temp_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"safe x264 re-encode failed: {result.stderr[-800:]}")
+    temp_path.replace(output_path)
+    msg = f"[FFmpeg] NVENC safety fallback re-encode applied: {output_path}"
+    print(msg)
+    _append_log(log_path, msg)
+
+
+def _verify_nvenc_h264_output(output_path: Path, log_path: Path | None = None) -> None:
+    info = _ffprobe_video_stream(output_path)
+    msg = f"[FFmpeg] ffprobe verify codec={info.get('codec_name') if info else '?'} pix_fmt={info.get('pix_fmt') if info else '?'} profile={info.get('profile') if info else '?'}"
+    print(msg)
+    _append_log(log_path, msg)
+    if _is_nvenc_h264_safe_stream(info):
+        return
+    warn = "[FFmpeg] NVENC output verification failed; auto-fallback to safe libx264 encode"
+    print(warn)
+    _append_log(log_path, warn)
+    _reencode_safe_x264(output_path, log_path)
+
+
 def run_ffmpeg(
     args: list[str],
     status_callback: StatusCallback = None,
@@ -180,6 +267,10 @@ def run_ffmpeg(
                 status_callback(error_message)
             _append_log(log_path, error_message)
             raise RuntimeError(error_message)
+        if "h264_nvenc" in args:
+            out_path = Path(str(args[-1]))
+            if out_path.suffix.lower() == ".mp4":
+                _verify_nvenc_h264_output(out_path, log_path)
         print(f"[ResourceGuard] FFmpeg command length: {cmd_len}")
         command = " ".join(args)
         print("[ResourceGuard] FFmpeg command:", command)
@@ -215,6 +306,10 @@ def run_ffmpeg(
                 status_callback(error_message)
             _append_log(log_path, error_message)
             raise RuntimeError(error_message)
+        if "h264_nvenc" in args:
+            out_path = Path(str(args[-1]))
+            if out_path.suffix.lower() == ".mp4":
+                _verify_nvenc_h264_output(out_path, log_path)
     finally:
         guard.stop()
 

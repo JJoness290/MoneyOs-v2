@@ -11,6 +11,7 @@ import time
 from app.config import OUTPUT_DIR
 from app.core.visuals.anime_trueai_video.cogvideox_provider import CogVideoXProvider
 from app.core.visuals.anime_trueai_video.provider import ClipRequest, TextToVideoProvider
+from app.core.visuals.ffmpeg_utils import run_ffmpeg
 
 StatusCallback = callable
 
@@ -45,10 +46,7 @@ def _negative_prompt() -> str:
 
 
 def _ffmpeg(*args: str) -> None:
-    cmd = ["ffmpeg", "-y", *args]
-    proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed: {' '.join(cmd)} :: {proc.stderr[-1200:]}")
+    run_ffmpeg(["ffmpeg", "-y", *args])
 
 
 def _probe_duration(path: Path) -> float:
@@ -316,8 +314,12 @@ def run_trueai_60s_job(
             f"{total_seconds:.3f}",
             "-c:v",
             "h264_nvenc",
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "high",
             "-preset",
-            "p2" if cfg.name in {"fasttest", "fast"} else "p4",
+            "p2" if cfg.name in {"fasttest", "fast"} else "p7",
             str(target_video),
         )
     except Exception:
