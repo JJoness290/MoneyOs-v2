@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import json
 import os
 from pathlib import Path
+import re
 
 
 from app.core.visuals.ai_video.backends.base import AiVideoBackend, BackendResult, BackendUnavailable
@@ -17,6 +19,7 @@ class CogVideoXBackend(AiVideoBackend):
         "model.safetensors.index.json",
         "pytorch_model.bin.index.json",
     )
+    _SHARDED_SAFE_RE = re.compile(r"^model-\d{5}-of-\d{5}\.safetensors$")
 
     def __init__(self) -> None:
         self.model_id = os.getenv(
@@ -96,7 +99,21 @@ class CogVideoXBackend(AiVideoBackend):
     def _has_usable_weight_file(cls, model_dir: Path) -> bool:
         if not model_dir.exists() or not model_dir.is_dir():
             return False
-        return any((model_dir / marker).exists() for marker in cls._WEIGHT_MARKERS)
+        if any((model_dir / marker).exists() for marker in cls._WEIGHT_MARKERS):
+            return True
+        return any(cls._SHARDED_SAFE_RE.match(p.name) for p in model_dir.iterdir() if p.is_file())
+
+    @classmethod
+    def _weight_layout(cls, model_dir: Path) -> str:
+        if not model_dir.exists() or not model_dir.is_dir():
+            return "missing"
+        if (model_dir / "model.safetensors").exists() or (model_dir / "pytorch_model.bin").exists():
+            return "single-file"
+        if (model_dir / "model.safetensors.index.json").exists() or (model_dir / "pytorch_model.bin.index.json").exists():
+            return "indexed-sharded"
+        if any(cls._SHARDED_SAFE_RE.match(p.name) for p in model_dir.iterdir() if p.is_file()):
+            return "sharded-no-index"
+        return "unknown"
 
     @staticmethod
     def _list_dir_files(model_dir: Path) -> list[str]:
@@ -115,6 +132,30 @@ class CogVideoXBackend(AiVideoBackend):
             "CogVideoX load failed: component directory does not contain a usable weight file "
             f"({', '.join(self._WEIGHT_MARKERS)}). component={component} path={component_dir} files={files}"
         )
+
+    def _ensure_safetensors_index_for_shards(self, model_dir: Path) -> None:
+        index_path = model_dir / "model.safetensors.index.json"
+        if index_path.exists():
+            return
+        shard_files = sorted([p for p in model_dir.iterdir() if p.is_file() and self._SHARDED_SAFE_RE.match(p.name)])
+        if not shard_files:
+            return
+        try:
+            from safetensors import safe_open  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            print(f"[AI-VIDEO][COGVIDEOX] shard index not generated (missing safetensors): {exc}")
+            return
+        weight_map: dict[str, str] = {}
+        for shard in shard_files:
+            with safe_open(str(shard), framework="pt", device="cpu") as sf:
+                for key in sf.keys():
+                    weight_map[key] = shard.name
+        payload = {
+            "metadata": {"total_size": sum(p.stat().st_size for p in shard_files)},
+            "weight_map": weight_map,
+        }
+        index_path.write_text(json.dumps(payload), encoding="utf-8")
+        print(f"[AI-VIDEO][COGVIDEOX] generated shard index: {index_path}")
 
     def load(self) -> None:
         if self._pipe is not None:
@@ -140,11 +181,19 @@ class CogVideoXBackend(AiVideoBackend):
         dtype = torch.float16 if self._fp16_enabled else torch.float32
         self._dtype = "float16" if self._fp16_enabled else "float32"
         model_ref = self._resolve_diffusers_model_ref()
+        component_dir = Path(model_ref) / "text_encoder"
+        layout = self._weight_layout(component_dir)
+        print(f"[AI-VIDEO][COGVIDEOX] text_encoder load layout={layout} path={component_dir}")
+        if layout == "sharded-no-index":
+            self._ensure_safetensors_index_for_shards(component_dir)
+            layout = self._weight_layout(component_dir)
+            print(f"[AI-VIDEO][COGVIDEOX] text_encoder layout_after_index={layout}")
         self._validate_component_weights(model_ref, "text_encoder")
+        local_only = Path(model_ref).exists()
         load_kwargs = {
             "torch_dtype": dtype,
             "use_safetensors": True,
-            "local_files_only": True,
+            "local_files_only": local_only,
         }
         if self._is_diffusers_snapshot(model_ref):
             print(f"[AI-VIDEO][COGVIDEOX] detected diffusers snapshot model_index.json without config.json: {model_ref}")
