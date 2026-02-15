@@ -125,7 +125,16 @@ class CogVideoXProvider(TextToVideoProvider):
         path = Path(model_ref)
         if not path.exists():
             return False
-        return (path / "model_index.json").exists() and not (path / "config.json").exists()
+        return (path / "model_index.json").exists()
+
+    @staticmethod
+    def _root_file_flags(model_ref: str) -> dict[str, bool]:
+        root = Path(model_ref)
+        return {
+            "model_index.json": (root / "model_index.json").exists(),
+            "configuration.json": (root / "configuration.json").exists(),
+            "config.json": (root / "config.json").exists(),
+        }
 
     def _load(self) -> None:
         if self._pipe is not None:
@@ -144,6 +153,7 @@ class CogVideoXProvider(TextToVideoProvider):
             torch.set_float32_matmul_precision("high")
 
         model_ref = self._resolve_model_ref()
+        print(f"[TRUEAI][COGVIDEOX] root_files={self._root_file_flags(model_ref)}")
         component_dir = Path(model_ref) / "text_encoder"
         layout = self._weight_layout(component_dir)
         print(f"[TRUEAI][COGVIDEOX] text_encoder load layout={layout} path={component_dir}")
@@ -152,15 +162,18 @@ class CogVideoXProvider(TextToVideoProvider):
             layout = self._weight_layout(component_dir)
             print(f"[TRUEAI][COGVIDEOX] text_encoder layout_after_index={layout}")
         self._validate_component_weights(model_ref, "text_encoder")
-        local_only = Path(model_ref).exists() or not self.allow_download
+        cache_dir = os.getenv("HF_HOME", str(Path.home() / ".cache" / "huggingface"))
         load_kwargs = {
             "torch_dtype": dtype,
             "use_safetensors": True,
-            "local_files_only": local_only,
+            "local_files_only": True,
+            "cache_dir": cache_dir,
         }
         if self._is_diffusers_snapshot(model_ref):
+            print(f"[TRUEAI][COGVIDEOX] load_path=diffusers_root model_ref={model_ref}")
             pipe = DiffusionPipeline.from_pretrained(model_ref, **load_kwargs)
         else:
+            print(f"[TRUEAI][COGVIDEOX] load_path=transformers_root model_ref={model_ref}")
             with contextlib.suppress(Exception):
                 pipe = CogVideoXPipeline.from_pretrained(model_ref, **load_kwargs)
             if "pipe" not in locals():

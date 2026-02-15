@@ -93,7 +93,16 @@ class CogVideoXBackend(AiVideoBackend):
         path = Path(model_ref)
         if not path.exists():
             return False
-        return (path / "model_index.json").exists() and not (path / "config.json").exists()
+        return (path / "model_index.json").exists()
+
+    @staticmethod
+    def _root_file_flags(model_ref: str) -> dict[str, bool]:
+        root = Path(model_ref)
+        return {
+            "model_index.json": (root / "model_index.json").exists(),
+            "configuration.json": (root / "configuration.json").exists(),
+            "config.json": (root / "config.json").exists(),
+        }
 
     @classmethod
     def _has_usable_weight_file(cls, model_dir: Path) -> bool:
@@ -181,6 +190,7 @@ class CogVideoXBackend(AiVideoBackend):
         dtype = torch.float16 if self._fp16_enabled else torch.float32
         self._dtype = "float16" if self._fp16_enabled else "float32"
         model_ref = self._resolve_diffusers_model_ref()
+        print(f"[AI-VIDEO][COGVIDEOX] root_files={self._root_file_flags(model_ref)}")
         component_dir = Path(model_ref) / "text_encoder"
         layout = self._weight_layout(component_dir)
         print(f"[AI-VIDEO][COGVIDEOX] text_encoder load layout={layout} path={component_dir}")
@@ -189,16 +199,18 @@ class CogVideoXBackend(AiVideoBackend):
             layout = self._weight_layout(component_dir)
             print(f"[AI-VIDEO][COGVIDEOX] text_encoder layout_after_index={layout}")
         self._validate_component_weights(model_ref, "text_encoder")
-        local_only = Path(model_ref).exists()
+        cache_dir = os.getenv("HF_HOME", str(Path.home() / ".cache" / "huggingface"))
         load_kwargs = {
             "torch_dtype": dtype,
             "use_safetensors": True,
-            "local_files_only": local_only,
+            "local_files_only": True,
+            "cache_dir": cache_dir,
         }
         if self._is_diffusers_snapshot(model_ref):
-            print(f"[AI-VIDEO][COGVIDEOX] detected diffusers snapshot model_index.json without config.json: {model_ref}")
+            print(f"[AI-VIDEO][COGVIDEOX] load_path=diffusers_root model_ref={model_ref}")
             pipe = DiffusionPipeline.from_pretrained(model_ref, **load_kwargs)
         else:
+            print(f"[AI-VIDEO][COGVIDEOX] load_path=transformers_root model_ref={model_ref}")
             with contextlib.suppress(Exception):
                 pipe = CogVideoXPipeline.from_pretrained(model_ref, **load_kwargs)
             if "pipe" not in locals():

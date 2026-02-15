@@ -16,10 +16,10 @@ def test_detect_diffusers_snapshot_trueai(tmp_path: Path) -> None:
     assert CogVideoXProvider._is_diffusers_snapshot(str(tmp_path)) is True
 
 
-def test_not_diffusers_snapshot_when_config_exists(tmp_path: Path) -> None:
+def test_diffusers_snapshot_even_when_config_exists(tmp_path: Path) -> None:
     (tmp_path / "model_index.json").write_text("{}", encoding="utf-8")
     (tmp_path / "config.json").write_text("{}", encoding="utf-8")
-    assert CogVideoXBackend._is_diffusers_snapshot(str(tmp_path)) is False
+    assert CogVideoXBackend._is_diffusers_snapshot(str(tmp_path)) is True
 
 
 def test_weight_marker_validation_accepts_sharded_index(tmp_path: Path) -> None:
