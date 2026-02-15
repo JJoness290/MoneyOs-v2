@@ -14,12 +14,18 @@ def test_detect_diffusers_snapshot_backend(tmp_path: Path) -> None:
 def test_detect_diffusers_snapshot_trueai(tmp_path: Path) -> None:
     (tmp_path / "model_index.json").write_text("{}", encoding="utf-8")
     assert CogVideoXProvider._is_diffusers_snapshot(str(tmp_path)) is True
+    assert CogVideoXProvider.detect_model_format(str(tmp_path)) == "diffusers"
 
 
 def test_diffusers_snapshot_even_when_config_exists(tmp_path: Path) -> None:
     (tmp_path / "model_index.json").write_text("{}", encoding="utf-8")
     (tmp_path / "config.json").write_text("{}", encoding="utf-8")
     assert CogVideoXBackend._is_diffusers_snapshot(str(tmp_path)) is True
+
+
+def test_detect_transformers_format_without_model_index(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    assert CogVideoXProvider.detect_model_format(str(tmp_path)) == "transformers"
 
 
 def test_weight_marker_validation_accepts_sharded_index(tmp_path: Path) -> None:

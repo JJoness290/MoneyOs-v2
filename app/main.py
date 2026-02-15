@@ -765,6 +765,7 @@ def _build_phase25_shot_plan(target_seconds: float) -> list[dict]:
 
 def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: str | None = None) -> None:
     from app.core.visuals.anime_trueai_video.pipeline import run_trueai_60s_job  # noqa: WPS433
+    print("[TRUEAI][ENTRY] file=app/main.py func=_run_trueai_video_60s -> app/core/visuals/anime_trueai_video/pipeline.py:run_trueai_60s_job")
 
     def _update(message: str) -> None:
         stage = "generate"

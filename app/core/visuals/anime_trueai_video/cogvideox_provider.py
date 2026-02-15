@@ -136,6 +136,15 @@ class CogVideoXProvider(TextToVideoProvider):
             "config.json": (root / "config.json").exists(),
         }
 
+    @staticmethod
+    def detect_model_format(model_ref: str) -> str:
+        root = Path(model_ref)
+        if (root / "model_index.json").exists():
+            return "diffusers"
+        if (root / "config.json").exists():
+            return "transformers"
+        return "transformers"
+
     def _load(self) -> None:
         if self._pipe is not None:
             return
@@ -169,10 +178,17 @@ class CogVideoXProvider(TextToVideoProvider):
             "local_files_only": True,
             "cache_dir": cache_dir,
         }
-        if self._is_diffusers_snapshot(model_ref):
+        model_format = self.detect_model_format(model_ref)
+        if model_format == "diffusers":
             print(f"[TRUEAI][COGVIDEOX] load_path=diffusers_root model_ref={model_ref}")
             pipe = DiffusionPipeline.from_pretrained(model_ref, **load_kwargs)
         else:
+            if Path(model_ref).exists() and (Path(model_ref) / "model_index.json").exists():
+                root_files = self._list_dir_files(Path(model_ref))
+                raise RuntimeError(
+                    "BUG: attempted transformers load on diffusers root "
+                    f"path={model_ref} files={root_files}"
+                )
             print(f"[TRUEAI][COGVIDEOX] load_path=transformers_root model_ref={model_ref}")
             with contextlib.suppress(Exception):
                 pipe = CogVideoXPipeline.from_pretrained(model_ref, **load_kwargs)
