@@ -13,6 +13,12 @@ from app.config import OUTPUT_DIR
 from app.core.visuals.anime_trueai_video.cogvideox_provider import CogVideoXProvider
 from app.core.visuals.anime_trueai_video.provider import ClipRequest, TextToVideoProvider
 from app.core.visuals.ffmpeg_utils import run_ffmpeg
+from app.core.stability import (
+    PressureMonitor,
+    classify_cuda_failure,
+    read_recent_nvlddmkm_events,
+    resolve_stability_settings,
+)
 
 StatusCallback = callable
 
@@ -87,13 +93,15 @@ def _resolve_preset(forced_preset: str | None = None) -> TrueAIPresetConfig:
         preset = "fasttest"
     aliases = {"max": "quality", "fast": "balanced"}
     preset = aliases.get(preset, preset)
-    if preset not in {"fasttest", "balanced", "quality"}:
+    if preset not in {"fasttest", "balanced", "quality", "safe"}:
         preset = "balanced"
 
     if preset == "fasttest":
         return TrueAIPresetConfig("fasttest", 12.0, 8, 512, 288, 10, 3.0, 24, False)
     if preset == "quality":
         return TrueAIPresetConfig("quality", 60.0, 24, 1280, 720, 40, 7.0, 48, True)
+    if preset == "safe":
+        return TrueAIPresetConfig("safe", 60.0, 10, 768, 432, 18, 4.5, 16, False)
     return TrueAIPresetConfig("balanced", 60.0, 12, 960, 540, 24, 5.5, 24, True)
 
 
@@ -140,10 +148,16 @@ def run_trueai_60s_job(
     out_dir = _output_dir(job_id)
     clips_dir = out_dir / "clips"
     final_dir = out_dir / "final"
+    diagnostics_dir = out_dir / "diagnostics"
     out_dir.mkdir(parents=True, exist_ok=True)
     clips_dir.mkdir(parents=True, exist_ok=True)
     final_dir.mkdir(parents=True, exist_ok=True)
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
     report_path = final_dir / "report.json"
+    stability = resolve_stability_settings()
+    monitor = PressureMonitor(diagnostics_dir / "metrics.jsonl", stability)
+    monitor.start()
+    downshifts: list[dict[str, object]] = []
 
     character_desc = os.getenv(
         "MONEYOS_TRUEAI_CHARACTER_DESC",
@@ -183,7 +197,79 @@ def run_trueai_60s_job(
             guidance=guidance,
             out_path=clip_path,
         )
-        provider.generate(request)
+        # Load shedding under pressure
+        if stability.stability_mode and monitor.state in {"HIGH", "CRITICAL"}:
+            if status_callback:
+                status_callback("paused due to GPU/VRAM pressure; waiting to cool/free memory")
+            time.sleep(2.0 if monitor.state == "HIGH" else 5.0)
+        try:
+            provider.generate(request)
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            failure_kind = classify_cuda_failure(msg)
+            if failure_kind:
+                if status_callback:
+                    status_callback("tdr_detected")
+                events = read_recent_nvlddmkm_events(max_lines=200, minutes=5)
+                if events:
+                    (diagnostics_dir / "nvlddmkm_events.log").write_text("\n".join(events), encoding="utf-8")
+                checkpoint = {
+                    "clip_index": idx,
+                    "seed": seed,
+                    "prompt": request.prompt,
+                    "width": width,
+                    "height": height,
+                    "steps": steps,
+                    "guidance": guidance,
+                    "preset": cfg.name,
+                }
+                (diagnostics_dir / "checkpoint.json").write_text(json.dumps(checkpoint, indent=2), encoding="utf-8")
+                try:
+                    import torch  # noqa: WPS433
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                if status_callback:
+                    status_callback("recovery_wait")
+                time.sleep(15)
+                if status_callback:
+                    status_callback("recovery_restart_worker")
+                provider = CogVideoXProvider()
+                try:
+                    provider.generate(request)
+                except Exception as exc2:  # noqa: BLE001
+                    if cfg.name == "quality":
+                        cfg = _resolve_preset("balanced")
+                        downshifts.append({"from": "quality", "to": "balanced", "clip": idx})
+                        if status_callback:
+                            status_callback("fallback_safe_preset")
+                        width, height, steps, guidance = cfg.width, cfg.height, cfg.steps, cfg.guidance
+                    elif cfg.name == "balanced":
+                        cfg = _resolve_preset("safe")
+                        downshifts.append({"from": "balanced", "to": "safe", "clip": idx})
+                        if status_callback:
+                            status_callback("fallback_safe_preset")
+                        width, height, steps, guidance = cfg.width, cfg.height, cfg.steps, cfg.guidance
+                    else:
+                        if status_callback:
+                            status_callback("fallback_cpu")
+                        os.environ["MONEYOS_USE_GPU"] = "0"
+                    provider = CogVideoXProvider()
+                    request = ClipRequest(
+                        prompt=request.prompt,
+                        negative_prompt=request.negative_prompt,
+                        seed=request.seed,
+                        seconds=request.seconds,
+                        fps=request.fps,
+                        width=_multiple_of_8(width),
+                        height=_multiple_of_8(height),
+                        steps=steps,
+                        guidance=guidance,
+                        out_path=clip_path,
+                    )
+                    provider.generate(request)
+            else:
+                raise
 
         clip_duration = _probe_duration(clip_path)
         if clip_duration <= 0.1:
@@ -261,6 +347,10 @@ def run_trueai_60s_job(
         _ffmpeg("-i", str(final_mp4), "-t", f"{total_seconds:.3f}", "-c:v", "copy", "-c:a", "copy", str(trim_final))
         final_mp4 = trim_final
 
+    monitor.stop()
+    peak_gpu = max([float(x.get("gpu_util") or 0.0) for x in monitor.samples], default=0.0)
+    peak_vram = max([float(x.get("vram_util") or 0.0) for x in monitor.samples], default=0.0)
+    peak_temp = max([float(x.get("gpu_temp") or 0.0) for x in monitor.samples], default=0.0)
     report = {
         "job_id": job_id,
         "backend": provider.name,
@@ -277,6 +367,11 @@ def run_trueai_60s_job(
         "super_resolution": bool(cfg.super_resolution and not FASTTEST),
         "elapsed_s": round(time.time() - started, 3),
         "final_video": str(final_mp4),
+        "downshifts": downshifts,
+        "peak_gpu_util": peak_gpu,
+        "peak_vram_util": peak_vram,
+        "peak_gpu_temp": peak_temp,
+        "diagnostics_dir": str(diagnostics_dir),
     }
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     return final_mp4, report_path

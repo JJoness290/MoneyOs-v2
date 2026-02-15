@@ -55,6 +55,12 @@ from app.core.pipeline import PipelineResult, run_pipeline
 from app.core.system_specs import get_system_specs
 from src.utils.phase import is_phase2_or_higher, normalize_phase
 from app.core.debug.phase3_checks import get_phase3_logger, is_phase3_debug_enabled
+from app.core.stability import (
+    apply_startup_env_defaults,
+    resolve_stability_settings,
+    stability_status_payload,
+    read_recent_nvlddmkm_events,
+)
 
 app = FastAPI()
 _phase3_logger = get_phase3_logger()
@@ -170,6 +176,11 @@ class TrueAiVideoRequest(BaseModel):
 
 @app.on_event("startup")
 def bootstrap_dependencies() -> None:
+    stability = apply_startup_env_defaults()
+    print(f"[STABILITY] {stability}")
+    reg = stability_status_payload().get("registry", {})
+    if reg.get("supported") and not reg.get("sufficient"):
+        print("[STABILITY][WARN] TdrDelay/TdrDdiDelay are below recommended >=60. Configure Windows registry for long GPU workloads.")
     if "MONEYOS_USE_GPU" not in os.environ:
         os.environ["MONEYOS_USE_GPU"] = "1"
     ensure_dependencies()
@@ -608,6 +619,7 @@ async def debug_status() -> JSONResponse:
         "last_error": blender.error,
         "last_clip_telemetry": _last_clip_telemetry,
         "last_job_snapshot": _last_job_snapshot,
+        "stability": stability_status_payload(),
     }
     try:
         import torch  # noqa: WPS433
@@ -623,6 +635,26 @@ async def debug_status() -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         payload["torch"] = {"error": str(exc)}
     return JSONResponse(payload)
+
+
+@app.get("/debug/preflight")
+async def debug_preflight() -> JSONResponse:
+    checks: dict[str, object] = {
+        "stability": stability_status_payload(),
+        "nvidia_smi": shutil.which("nvidia-smi") is not None,
+        "disk_free_bytes": shutil.disk_usage(str(get_output_root())).free,
+        "assets_root_exists": get_assets_root().exists(),
+        "output_root_exists": get_output_root().exists(),
+    }
+    try:
+        import torch  # noqa: WPS433
+
+        checks["torch_cuda_available"] = bool(torch.cuda.is_available())
+        if torch.cuda.is_available():
+            checks["gpu_name"] = torch.cuda.get_device_name(0)
+    except Exception as exc:  # noqa: BLE001
+        checks["torch_error"] = str(exc)
+    return JSONResponse(checks)
 
 
 @app.get("/debug/character")
@@ -736,12 +768,22 @@ def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: s
 
     def _update(message: str) -> None:
         stage = "generate"
-        if "plan" in message:
+        lowered = message.lower()
+        if "plan" in lowered:
             stage = "plan"
-        elif "stitch" in message:
+        elif "stitch" in lowered:
             stage = "stitch"
-        elif "mux" in message:
+        elif "mux" in lowered:
             stage = "mux"
+        elif lowered in {
+            "tdr_detected",
+            "recovery_wait",
+            "recovery_restart_worker",
+            "fallback_safe_preset",
+            "fallback_cpu",
+            "failed",
+        }:
+            stage = lowered
         _set_status(job_id, message, stage_key=stage, progress_pct=35)
 
     try:
@@ -1353,6 +1395,24 @@ async def status(job_id: str) -> JSONResponse:
     if not data:
         raise HTTPException(status_code=404, detail="Job not found")
     return JSONResponse(data)
+
+
+@app.get("/jobs/{job_id}/diagnostics")
+async def job_diagnostics(job_id: str) -> JSONResponse:
+    with _jobs_lock:
+        data = _jobs.get(job_id, {})
+    output_dir_raw = data.get("output_dir")
+    if not output_dir_raw:
+        raise HTTPException(status_code=404, detail="No diagnostics for this job")
+    output_dir = Path(output_dir_raw)
+    diag = {
+        "job_id": job_id,
+        "output_dir": str(output_dir),
+        "report": str(output_dir / "final" / "report.json"),
+        "metrics": str(output_dir / "diagnostics" / "metrics.jsonl"),
+        "events": str(output_dir / "diagnostics" / "nvlddmkm_events.log"),
+    }
+    return JSONResponse(diag)
 
 
 @app.get("/events/{job_id}")
