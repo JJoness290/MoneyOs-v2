@@ -12,6 +12,12 @@ class CogVideoXProvider(TextToVideoProvider):
     name = "cogvideox"
     _shared_pipe = None
     _shared_device = "cpu"
+    _WEIGHT_MARKERS = (
+        "model.safetensors",
+        "pytorch_model.bin",
+        "model.safetensors.index.json",
+        "pytorch_model.bin.index.json",
+    )
 
     def __init__(self) -> None:
         self.model_id = os.getenv("MONEYOS_COGVIDEOX_MODEL_ID", "zai-org/CogVideoX-5b")
@@ -38,12 +44,40 @@ class CogVideoXProvider(TextToVideoProvider):
         cache_home = Path(os.getenv("HF_HOME", str(Path.home() / ".cache" / "huggingface")))
         local_snapshots = list(cache_home.glob(f"hub/models--{self.model_id.replace('/', '--')}/snapshots/*"))
         if local_snapshots:
+            # Prefer snapshots with a usable text_encoder weight marker.
+            for snap in sorted(local_snapshots, reverse=True):
+                if self._has_usable_weight_file(snap / "text_encoder"):
+                    return str(snap)
             return str(sorted(local_snapshots)[-1])
         if not self.allow_download:
             raise RuntimeError("CogVideoX model not found locally and auto-download is disabled")
         from huggingface_hub import snapshot_download
 
         return snapshot_download(repo_id=self.model_id)
+
+    @classmethod
+    def _has_usable_weight_file(cls, model_dir: Path) -> bool:
+        if not model_dir.exists() or not model_dir.is_dir():
+            return False
+        return any((model_dir / marker).exists() for marker in cls._WEIGHT_MARKERS)
+
+    @staticmethod
+    def _list_dir_files(model_dir: Path) -> list[str]:
+        if not model_dir.exists() or not model_dir.is_dir():
+            return []
+        return sorted([entry.name for entry in model_dir.iterdir() if entry.is_file()])
+
+    def _validate_component_weights(self, model_ref: str, component: str = "text_encoder") -> None:
+        component_dir = Path(model_ref) / component
+        if not component_dir.exists():
+            return
+        if self._has_usable_weight_file(component_dir):
+            return
+        files = self._list_dir_files(component_dir)
+        raise RuntimeError(
+            "CogVideoX load failed: component directory does not contain a usable weight file "
+            f"({', '.join(self._WEIGHT_MARKERS)}). component={component} path={component_dir} files={files}"
+        )
 
     @staticmethod
     def _is_diffusers_snapshot(model_ref: str) -> bool:
@@ -69,13 +103,19 @@ class CogVideoXProvider(TextToVideoProvider):
             torch.set_float32_matmul_precision("high")
 
         model_ref = self._resolve_model_ref()
+        self._validate_component_weights(model_ref, "text_encoder")
+        load_kwargs = {
+            "torch_dtype": dtype,
+            "use_safetensors": True,
+            "local_files_only": not self.allow_download,
+        }
         if self._is_diffusers_snapshot(model_ref):
-            pipe = DiffusionPipeline.from_pretrained(model_ref, torch_dtype=dtype)
+            pipe = DiffusionPipeline.from_pretrained(model_ref, **load_kwargs)
         else:
             with contextlib.suppress(Exception):
-                pipe = CogVideoXPipeline.from_pretrained(model_ref, torch_dtype=dtype)
+                pipe = CogVideoXPipeline.from_pretrained(model_ref, **load_kwargs)
             if "pipe" not in locals():
-                pipe = DiffusionPipeline.from_pretrained(model_ref, torch_dtype=dtype)
+                pipe = DiffusionPipeline.from_pretrained(model_ref, **load_kwargs)
 
         with contextlib.suppress(Exception):
             from diffusers import DPMSolverMultistepScheduler  # noqa: WPS433

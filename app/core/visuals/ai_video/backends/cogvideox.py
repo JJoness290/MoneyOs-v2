@@ -11,6 +11,12 @@ from app.core.visuals.ai_video.backends.base import AiVideoBackend, BackendResul
 
 class CogVideoXBackend(AiVideoBackend):
     name = "COGVIDEOX"
+    _WEIGHT_MARKERS = (
+        "model.safetensors",
+        "pytorch_model.bin",
+        "model.safetensors.index.json",
+        "pytorch_model.bin.index.json",
+    )
 
     def __init__(self) -> None:
         self.model_id = os.getenv(
@@ -86,6 +92,30 @@ class CogVideoXBackend(AiVideoBackend):
             return False
         return (path / "model_index.json").exists() and not (path / "config.json").exists()
 
+    @classmethod
+    def _has_usable_weight_file(cls, model_dir: Path) -> bool:
+        if not model_dir.exists() or not model_dir.is_dir():
+            return False
+        return any((model_dir / marker).exists() for marker in cls._WEIGHT_MARKERS)
+
+    @staticmethod
+    def _list_dir_files(model_dir: Path) -> list[str]:
+        if not model_dir.exists() or not model_dir.is_dir():
+            return []
+        return sorted([entry.name for entry in model_dir.iterdir() if entry.is_file()])
+
+    def _validate_component_weights(self, model_ref: str, component: str = "text_encoder") -> None:
+        component_dir = Path(model_ref) / component
+        if not component_dir.exists():
+            return
+        if self._has_usable_weight_file(component_dir):
+            return
+        files = self._list_dir_files(component_dir)
+        raise BackendUnavailable(
+            "CogVideoX load failed: component directory does not contain a usable weight file "
+            f"({', '.join(self._WEIGHT_MARKERS)}). component={component} path={component_dir} files={files}"
+        )
+
     def load(self) -> None:
         if self._pipe is not None:
             return
@@ -110,14 +140,20 @@ class CogVideoXBackend(AiVideoBackend):
         dtype = torch.float16 if self._fp16_enabled else torch.float32
         self._dtype = "float16" if self._fp16_enabled else "float32"
         model_ref = self._resolve_diffusers_model_ref()
+        self._validate_component_weights(model_ref, "text_encoder")
+        load_kwargs = {
+            "torch_dtype": dtype,
+            "use_safetensors": True,
+            "local_files_only": True,
+        }
         if self._is_diffusers_snapshot(model_ref):
             print(f"[AI-VIDEO][COGVIDEOX] detected diffusers snapshot model_index.json without config.json: {model_ref}")
-            pipe = DiffusionPipeline.from_pretrained(model_ref, torch_dtype=dtype)
+            pipe = DiffusionPipeline.from_pretrained(model_ref, **load_kwargs)
         else:
             with contextlib.suppress(Exception):
-                pipe = CogVideoXPipeline.from_pretrained(model_ref, torch_dtype=dtype)
+                pipe = CogVideoXPipeline.from_pretrained(model_ref, **load_kwargs)
             if "pipe" not in locals():
-                pipe = DiffusionPipeline.from_pretrained(model_ref, torch_dtype=dtype)
+                pipe = DiffusionPipeline.from_pretrained(model_ref, **load_kwargs)
         if self._device == "cuda" and not self._offload_enabled:
             pipe = pipe.to(self._device)
         if self._device == "cuda" and self._offload_enabled and hasattr(pipe, "enable_model_cpu_offload"):

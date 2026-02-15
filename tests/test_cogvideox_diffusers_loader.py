@@ -20,3 +20,22 @@ def test_not_diffusers_snapshot_when_config_exists(tmp_path: Path) -> None:
     (tmp_path / "model_index.json").write_text("{}", encoding="utf-8")
     (tmp_path / "config.json").write_text("{}", encoding="utf-8")
     assert CogVideoXBackend._is_diffusers_snapshot(str(tmp_path)) is False
+
+
+def test_weight_marker_validation_accepts_sharded_index(tmp_path: Path) -> None:
+    text_encoder = tmp_path / "text_encoder"
+    text_encoder.mkdir(parents=True, exist_ok=True)
+    (text_encoder / "model-00001-of-00002.safetensors").write_text("x", encoding="utf-8")
+    (text_encoder / "model-00002-of-00002.safetensors").write_text("x", encoding="utf-8")
+    (text_encoder / "model.safetensors.index.json").write_text("{}", encoding="utf-8")
+    assert CogVideoXBackend._has_usable_weight_file(text_encoder) is True
+    assert CogVideoXProvider._has_usable_weight_file(text_encoder) is True
+
+
+def test_weight_marker_validation_rejects_missing_index(tmp_path: Path) -> None:
+    text_encoder = tmp_path / "text_encoder"
+    text_encoder.mkdir(parents=True, exist_ok=True)
+    (text_encoder / "model-00001-of-00002.safetensors").write_text("x", encoding="utf-8")
+    (text_encoder / "model-00002-of-00002.safetensors").write_text("x", encoding="utf-8")
+    assert CogVideoXBackend._has_usable_weight_file(text_encoder) is False
+    assert CogVideoXProvider._has_usable_weight_file(text_encoder) is False
