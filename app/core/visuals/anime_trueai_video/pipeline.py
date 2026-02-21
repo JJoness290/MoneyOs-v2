@@ -165,6 +165,8 @@ def run_trueai_60s_job(
     )
 
     provider: TextToVideoProvider = CogVideoXProvider()
+    if status_callback:
+        status_callback("load → CogVideoX pipeline")
     if not provider.is_available():
         raise RuntimeError("CogVideoX backend unavailable. Install diffusers/torch and model.")
 
@@ -203,6 +205,8 @@ def run_trueai_60s_job(
                 status_callback("paused due to GPU/VRAM pressure; waiting to cool/free memory")
             time.sleep(2.0 if monitor.state == "HIGH" else 5.0)
         try:
+            if status_callback:
+                status_callback(f"inference → clip {idx + 1}/{clip_count}")
             provider.generate(request)
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)

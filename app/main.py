@@ -35,7 +35,15 @@ from app.config import (
     resolve_style_preset,
     resolve_texture_mode,
 )
-from app.core.paths import get_assets_root, get_characters_dir, get_output_root, get_repo_root
+from app.core.paths import (
+    get_assets_root,
+    get_cache_root,
+    get_characters_dir,
+    get_hf_home,
+    get_hf_hub_cache,
+    get_output_root,
+    get_repo_root,
+)
 from app.core.assets.harvester.cache import get_cache_paths
 from app.core.assets.harvester.harvester import harvest_assets
 from app.core.assets.starter_characters import ensure_starter_characters_installed, list_character_assets
@@ -99,6 +107,7 @@ _last_clip_telemetry: dict[str, object] = {}
 _last_job_snapshot: dict[str, object] = {}
 _perf_lock = threading.Lock()
 _perf_history_path = OUTPUT_DIR / "perf_history.json"
+_trueai_slots = threading.Semaphore(max(1, resolve_stability_settings().max_concurrency))
 
 _STAGE_ORDER = ["script", "broll", "render", "audio", "director", "blender", "frames", "encode", "mux", "done"]
 _STAGE_ALIASES = {
@@ -178,6 +187,14 @@ class TrueAiVideoRequest(BaseModel):
 def bootstrap_dependencies() -> None:
     stability = apply_startup_env_defaults()
     print(f"[STABILITY] {stability}")
+    print(
+        "[PATHS] "
+        f"assets_root={get_assets_root()} "
+        f"output_root={get_output_root()} "
+        f"cache_root={get_cache_root()} "
+        f"hf_home={get_hf_home()} "
+        f"hf_hub_cache={get_hf_hub_cache()}"
+    )
     reg = stability_status_payload().get("registry", {})
     if reg.get("supported") and not reg.get("sufficient"):
         print("[STABILITY][WARN] TdrDelay/TdrDdiDelay are below recommended >=60. Configure Windows registry for long GPU workloads.")
@@ -587,6 +604,9 @@ async def debug_status() -> JSONResponse:
         "assets_root": str(assets_root),
         "starter_pack_receipt": starter_payload,
         "output_root": str(get_output_root()),
+        "cache_root": str(get_cache_root()),
+        "hf_home": str(get_hf_home()),
+        "hf_hub_cache": str(get_hf_hub_cache()),
         "required_assets": {key: path.exists() for key, path in required_assets.items()},
         "assets_ready": {key: path.exists() for key, path in required_assets.items()},
         "assets_missing": [key for key, path in required_assets.items() if not path.exists()],
@@ -645,6 +665,9 @@ async def debug_preflight() -> JSONResponse:
         "disk_free_bytes": shutil.disk_usage(str(get_output_root())).free,
         "assets_root_exists": get_assets_root().exists(),
         "output_root_exists": get_output_root().exists(),
+        "cache_root": str(get_cache_root()),
+        "hf_home": str(get_hf_home()),
+        "hf_hub_cache": str(get_hf_hub_cache()),
     }
     try:
         import torch  # noqa: WPS433
@@ -766,6 +789,16 @@ def _build_phase25_shot_plan(target_seconds: float) -> list[dict]:
 def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: str | None = None) -> None:
     from app.core.visuals.anime_trueai_video.pipeline import run_trueai_60s_job  # noqa: WPS433
     print("[TRUEAI][ENTRY] file=app/main.py func=_run_trueai_video_60s -> app/core/visuals/anime_trueai_video/pipeline.py:run_trueai_60s_job")
+    heartbeat_stop = threading.Event()
+
+    def _heartbeat() -> None:
+        while not heartbeat_stop.wait(12.0):
+            with _jobs_lock:
+                current = _jobs.get(job_id, {})
+                status = str(current.get("status", "working"))
+                stage = str(current.get("stage_key", "generate"))
+                progress = int(current.get("progress_pct", 35))
+            _set_status(job_id, status, stage_key=stage, progress_pct=progress)
 
     def _update(message: str) -> None:
         stage = "generate"
@@ -785,11 +818,20 @@ def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: s
             "failed",
         }:
             stage = lowered
+        elif "download" in lowered:
+            stage = "plan"
+        elif "load" in lowered or "inference" in lowered:
+            stage = "generate"
         _set_status(job_id, message, stage_key=stage, progress_pct=35)
 
     try:
         _set_status(job_id, "Queued TRUE text-to-video", stage_key="plan", progress_pct=1)
-        final_video, report = run_trueai_60s_job(job_id, req.prompt, status_callback=_update, forced_preset=forced_preset)
+        out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
+        _set_status(job_id, "download → CogVideoX-5b weights", stage_key="plan", progress_pct=3, extra={"output_dir": str(out_dir.resolve()), "substage": "download"})
+        hb = threading.Thread(target=_heartbeat, daemon=True)
+        hb.start()
+        with _trueai_slots:
+            final_video, report = run_trueai_60s_job(job_id, req.prompt, status_callback=_update, forced_preset=forced_preset)
         _set_status(
             job_id,
             "Complete",
@@ -799,6 +841,8 @@ def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: s
         )
     except Exception as exc:  # noqa: BLE001
         _set_error(job_id, f"Error: {exc}")
+    finally:
+        heartbeat_stop.set()
 
 
 def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> None:

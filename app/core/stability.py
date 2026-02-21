@@ -11,6 +11,8 @@ import threading
 import time
 from typing import Any
 
+from app.core.paths import apply_default_storage_env, get_hf_home, get_hf_hub_cache
+
 try:
     import psutil  # type: ignore
 except Exception:  # noqa: BLE001
@@ -27,6 +29,7 @@ class StabilitySettings:
     disable_overlap_encode: bool
     cuda_launch_blocking: int
     pytorch_alloc_conf: str
+    vram_fraction: float
 
 
 def is_windows() -> bool:
@@ -34,6 +37,7 @@ def is_windows() -> bool:
 
 
 def apply_startup_env_defaults() -> StabilitySettings:
+    apply_default_storage_env()
     if is_windows() and "MONEYOS_STABILITY_MODE" not in os.environ:
         os.environ["MONEYOS_STABILITY_MODE"] = "1"
     os.environ.setdefault("MONEYOS_MAX_GPU_UTIL", "80")
@@ -42,6 +46,13 @@ def apply_startup_env_defaults() -> StabilitySettings:
     os.environ.setdefault("MONEYOS_CPU_MAX_UTIL", "80")
     os.environ.setdefault("MONEYOS_DISABLE_OVERLAP_ENCODE", "1")
     os.environ.setdefault("MONEYOS_CUDA_LAUNCH_BLOCKING", "0")
+    os.environ.setdefault("MONEYOS_VRAM_FRACTION", "0.70")
+    if is_windows():
+        os.environ.setdefault("HUGGINGFACE_HUB_DISABLE_SYMLINKS", "1")
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+        os.environ.setdefault("HF_HOME", str(get_hf_home()))
+        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(get_hf_hub_cache()))
+        os.environ.setdefault("TRANSFORMERS_CACHE", str(get_hf_hub_cache()))
     if os.getenv("MONEYOS_STABILITY_MODE", "0") == "1":
         os.environ.setdefault(
             "MONEYOS_PYTORCH_ALLOC_CONF",
@@ -64,6 +75,7 @@ def resolve_stability_settings() -> StabilitySettings:
         disable_overlap_encode=os.getenv("MONEYOS_DISABLE_OVERLAP_ENCODE", "1") == "1",
         cuda_launch_blocking=int(os.getenv("MONEYOS_CUDA_LAUNCH_BLOCKING", "0")),
         pytorch_alloc_conf=os.getenv("MONEYOS_PYTORCH_ALLOC_CONF", "max_split_size_mb:128,garbage_collection_threshold:0.8"),
+        vram_fraction=float(os.getenv("MONEYOS_VRAM_FRACTION", "0.70")),
     )
 
 
