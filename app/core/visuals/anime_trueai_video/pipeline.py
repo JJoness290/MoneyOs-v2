@@ -96,6 +96,13 @@ def _ffprobe_video(path: Path) -> dict[str, str]:
 
 
 def _encode_youtube_mp4(input_path: Path, output_path: Path, extra_filters: list[str] | None = None, duration_s: float | None = None) -> None:
+    if not input_path.exists():
+        parent = input_path.parent
+        contents = sorted([p.name for p in parent.iterdir()]) if parent.exists() else []
+        raise RuntimeError(
+            "YouTube normalize source missing: "
+            f"input={input_path} dir={parent} contents={contents}"
+        )
     cfg = get_youtube_target_profile()
     vf = youtube_video_filter(cfg, prepend=extra_filters)
     args = ["-i", str(input_path)]
@@ -285,6 +292,7 @@ def run_trueai_60s_job(
         if status_callback:
             status_callback(f"plan → generating clip {idx + 1}/{clip_count}")
         clip_path = clips_dir / f"clip_{idx:02d}.mp4"
+        base_clip_path = clip_path
         request = ClipRequest(
             prompt=_anime_prompt(prompt, character_desc, idx),
             negative_prompt=_negative_prompt(),
@@ -389,12 +397,16 @@ def run_trueai_60s_job(
         elif clip_duration + 0.02 < request.seconds:
             pad_seconds = max(0.0, request.seconds - clip_duration)
             pad_path = clips_dir / f"clip_{idx:02d}_pad.mp4"
-            _ffmpeg("-i", str(clip_path), "-vf", f"tpad=stop_mode=clone:stop_duration={pad_seconds:.3f}", "-r", str(fps), str(pad_path))
+            _ffmpeg("-i", str(clip_path), "-vf", f"tpad=stop_mode=clone:stop_duration={pad_seconds:.3f}", str(pad_path))
             clip_path = pad_path
-        normalized_path = clips_dir / f"clip_{idx:02d}_norm.mp4"
-        _encode_youtube_mp4(clip_path, normalized_path, duration_s=request.seconds)
-        if clip_path != normalized_path:
-            normalized_path.replace(clip_path)
+        pad_path = clips_dir / f"clip_{idx:02d}_pad.mp4"
+        normalize_source = pad_path if pad_path.exists() else base_clip_path
+        if not normalize_source.exists():
+            normalize_source = clip_path
+        normalized_temp = clips_dir / f"clip_{idx:02d}_yt.mp4"
+        _encode_youtube_mp4(normalize_source, normalized_temp, duration_s=request.seconds)
+        normalized_temp.replace(base_clip_path)
+        clip_path = base_clip_path
         generated.append(clip_path)
 
     if status_callback:

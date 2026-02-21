@@ -311,6 +311,13 @@ def _is_nvenc_h264_safe_stream(info: dict[str, str] | None) -> bool:
 
 
 def _reencode_safe_x264(output_path: Path, log_path: Path | None = None) -> None:
+    if not output_path.exists():
+        parent = output_path.parent
+        contents = sorted([p.name for p in parent.iterdir()]) if parent.exists() else []
+        raise RuntimeError(
+            "safe x264 re-encode source missing: "
+            f"input={output_path} dir={parent} contents={contents}"
+        )
     temp_path = output_path.with_suffix(".x264safe.mp4")
     cmd = [
         "ffmpeg",
