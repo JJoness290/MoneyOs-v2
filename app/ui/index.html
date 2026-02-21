@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="moneyos-api-base" content="" />
   <title>MoneyOS – Video Generator</title>
   <style>
     body {
@@ -90,13 +91,19 @@
 <body>
   <div class="panel">
     <h1>MoneyOS – Video Generator</h1>
-    <label class="label" for="stylePreset">Style preset</label>
+    <label class="label" for="stylePreset">Style presets</label>
     <select id="stylePreset" style="width:100%;margin:8px 0 14px 0;padding:10px;border-radius:8px;background:#12141a;color:#f5f6f7;border:1px solid #2a2f3a;">
       <option value="default">default</option>
       <option value="balanced">balanced</option>
       <option value="anime_visual">anime_visual</option>
     </select>
+    <label class="label" for="characterStyleToggle">Character Style: Realistic Human</label>
+    <div style="margin:8px 0 14px 0;display:flex;align-items:center;gap:8px;">
+      <input type="checkbox" id="characterStyleToggle" checked />
+      <span>Enable realistic human character fallback</span>
+    </div>
     <button id="generateButton">Start anime_3d 60s</button>
+    <button id="generateTrueAiButton" style="margin-top:10px;background:#2bce7b;">TRUE AI VIDEO (60s)</button>
     <div class="status">
       <div><span class="label">Endpoint:</span> <span id="endpointText">POST /jobs/anime-episode-60s-3d</span></div>
       <div><span class="label">Stage:</span> <span id="stageText">Idle</span></div>
@@ -127,6 +134,7 @@
 
   <script>
     const generateButton = document.getElementById('generateButton');
+    const generateTrueAiButton = document.getElementById('generateTrueAiButton');
     const statusText = document.getElementById('statusText');
     const stageText = document.getElementById('stageText');
     const progressText = document.getElementById('progressText');
@@ -136,6 +144,7 @@
     const smoothingText = document.getElementById('smoothingText');
     const stylePreset = document.getElementById('stylePreset');
     const outputPath = document.getElementById('outputPath');
+    const characterStyleToggle = document.getElementById('characterStyleToggle');
     const outputDuration = document.getElementById('outputDuration');
     const downloadLink = document.getElementById('downloadLink');
     const finalStatus = document.getElementById('finalStatus');
@@ -150,6 +159,35 @@
     const gpuFlags = document.getElementById('gpuFlags');
     let polling = null;
     let eventSource = null;
+
+    function resolveApiBase() {
+      const windowBase = window.__MONEYOS_API_BASE__;
+      if (windowBase && String(windowBase).trim()) {
+        return String(windowBase).trim();
+      }
+      const metaBase = document.querySelector('meta[name="moneyos-api-base"]')?.content;
+      if (metaBase && String(metaBase).trim()) {
+        return String(metaBase).trim();
+      }
+      const envLike = window.VITE_API_BASE || window.NEXT_PUBLIC_API_BASE || window.MONEYOS_API_BASE || window.__API_BASE__;
+      if (envLike && String(envLike).trim()) {
+        return String(envLike).trim();
+      }
+      return 'http://127.0.0.1:8000';
+    }
+
+    const API_BASE = resolveApiBase();
+
+    function apiUrl(path) {
+      return new URL(path, API_BASE).toString();
+    }
+
+    async function apiFetch(path, options) {
+      const url = apiUrl(path);
+      return fetch(url, options);
+    }
+
+    endpointText.textContent = `POST ${apiUrl('/jobs/anime-episode-60s-3d')}`;
 
     function appendLog(message) {
       const line = document.createElement('div');
@@ -205,7 +243,7 @@
 
     async function loadSystemSpecs() {
       try {
-        const response = await fetch('/api/system/specs');
+        const response = await apiFetch('/api/system/specs');
         if (!response.ok) {
           throw new Error('Specs unavailable');
         }
@@ -231,7 +269,7 @@
 
     async function loadDoctorStatus() {
       try {
-        const healthResponse = await fetch('/health');
+        const healthResponse = await apiFetch('/health');
         const health = await healthResponse.json();
         backendStatus.textContent = healthResponse.ok ? `OK (${health.version})` : 'Unavailable';
         const envFlags = health.env_flags || {};
@@ -241,7 +279,7 @@
         gpuFlags.textContent = '-';
       }
       try {
-        const debugResponse = await fetch('/debug/status');
+        const debugResponse = await apiFetch('/debug/status');
         const debug = await debugResponse.json();
         if (debug.blender && debug.blender.found) {
           blenderStatus.textContent = `${debug.blender.version || 'found'} @ ${debug.blender.path || 'unknown'}`;
@@ -257,7 +295,7 @@
 
     async function pollStatus(jobId) {
       try {
-        const response = await fetch(`/status/${jobId}`);
+        const response = await apiFetch(`/status/${jobId}`);
         if (!response.ok) {
           throw new Error('Status unavailable');
         }
@@ -276,7 +314,7 @@
       if (eventSource) {
         eventSource.close();
       }
-      eventSource = new EventSource(`/events/${jobId}`);
+      eventSource = new EventSource(apiUrl(`/events/${jobId}`));
       eventSource.addEventListener('status', (event) => {
         const data = JSON.parse(event.data);
         updateStatus(data);
@@ -287,6 +325,48 @@
         }
       });
     }
+
+
+    generateTrueAiButton.addEventListener('click', async () => {
+      generateTrueAiButton.disabled = true;
+      finalStatus.textContent = 'In Progress';
+      statusText.textContent = 'Planning true text-to-video shots...';
+      stageText.textContent = 'plan';
+      progressText.textContent = '1%';
+      progressBar.style.width = '1%';
+      outputPath.textContent = '-';
+      outputDuration.textContent = '-';
+      downloadLink.textContent = '-';
+      logTail.innerHTML = '';
+
+      const requestPath = '/jobs/anime-trueai-60s';
+      const requestMethod = 'POST';
+      const requestUrl = apiUrl(requestPath);
+      const prompt = `${stylePreset.value} anime story, same protagonist throughout all shots`;
+      const response = await apiFetch(requestPath, {
+        method: requestMethod,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        finalStatus.textContent = 'FAILED';
+        generateTrueAiButton.disabled = false;
+        appendLog(`${requestMethod} ${requestUrl} -> ${response.status} ${response.statusText}: ${errorText}`);
+        return;
+      }
+      const data = await response.json();
+      const jobId = data.job_id;
+      if (!jobId) {
+        finalStatus.textContent = 'FAILED';
+        generateTrueAiButton.disabled = false;
+        appendLog('Job id missing from TRUE AI response.');
+        return;
+      }
+      subscribeEvents(jobId);
+      polling = setInterval(() => pollStatus(jobId), 2000);
+      generateTrueAiButton.disabled = false;
+    });
 
     generateButton.addEventListener('click', async () => {
       generateButton.disabled = true;
@@ -301,16 +381,19 @@
       finalStatus.textContent = 'In Progress';
       logTail.innerHTML = '';
 
-      const response = await fetch('/jobs/anime-episode-60s-3d', {
-        method: 'POST',
+      const requestPath = '/jobs/anime-episode-60s-3d';
+      const requestMethod = 'POST';
+      const requestUrl = apiUrl(requestPath);
+      const response = await apiFetch(requestPath, {
+        method: requestMethod,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ style_preset: stylePreset.value }),
+        body: JSON.stringify({ style_preset: stylePreset.value, character_style: characterStyleToggle.checked ? "realistic_human" : "default" }),
       });
       if (!response.ok) {
         const errorText = await response.text();
         finalStatus.textContent = 'FAILED';
         generateButton.disabled = false;
-        appendLog(`Request failed (${response.status}): ${errorText}`);
+        appendLog(`${requestMethod} ${requestUrl} -> ${response.status} ${response.statusText}: ${errorText}`);
         return;
       }
       const data = await response.json();

@@ -61,9 +61,10 @@ def download_url(
             return cached_path, sha256
         except Exception as exc:  # noqa: BLE001
             last_error = exc
+            print(f"[DOWNLOAD] pack_id=cc0 stage=download_url source=cc0 url={url} attempt={attempt + 1} error={exc}", flush=True)
             if attempt < retries:
                 time.sleep(backoff * (attempt + 1))
-    raise RuntimeError(f"download failed: {last_error}")
+    raise RuntimeError(f"download failed for {url}: {last_error}")
 
 
 def update_sources_manifest(

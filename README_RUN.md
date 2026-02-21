@@ -18,7 +18,26 @@ $env:MONEYOS_ANIME3D_STYLE_PRESET = "key_art"
 $env:MONEYOS_ANIME3D_OUTLINE_MODE = "freestyle"
 $env:MONEYOS_ANIME3D_POSTFX = "on"
 $env:MONEYOS_ANIME3D_SFX_MODE = "auto"
+$env:MONEYOS_DEBUG_PHASE3 = "1"
+$env:MONEYOS_PHASE3_LUMA_MIN = "25"
+$env:MONEYOS_PHASE3_DARK_PCT_MAX = "0.85"
+$env:MONEYOS_AUTO_INSTALL_STARTER_CHARACTERS = "1"
+$env:MONEYOS_STARTER_CHAR_PACK_URL = "https://kenney.nl/media/pages/assets/animated-characters-3/df080ca4ab-1694862585/kenney_animated-characters-3.zip"
+$env:MONEYOS_STARTER_CHAR_PACK_PROVIDER = "kenney_animated_characters_3"
+$env:MONEYOS_STARTER_CHAR_MIN_FILES = "1"
+$env:MONEYOS_STARTER_CHAR_MIN_RIGGED = "1"
+$env:MONEYOS_STARTER_CHAR_FORCE = "0"
 ```
+
+Phase 3 debug variables:
+- `MONEYOS_DEBUG_PHASE3=1` enables detailed runtime checks and traces (`moneyos.phase3` logger).
+- `MONEYOS_PHASE3_LUMA_MIN` controls silhouette detector minimum mean luma threshold.
+- `MONEYOS_PHASE3_DARK_PCT_MAX` controls silhouette detector maximum dark pixel ratio.
+- `MONEYOS_AUTO_INSTALL_STARTER_CHARACTERS=1` auto-installs starter characters into `${MONEYOS_ASSETS_ROOT}\characters\starter_pack` when none are usable.
+- Optional: `MONEYOS_STARTER_CHAR_PACK_SHA256` enforces pack integrity if provided.
+- `MONEYOS_STARTER_CHAR_MIN_RIGGED` controls minimum required rigged assets (`.fbx/.glb/.gltf`) before install is skipped.
+- `MONEYOS_STARTER_CHAR_FORCE=1` forces reinstall/check even when rigged assets are present.
+- Receipt is written to `${MONEYOS_ASSETS_ROOT}\characters\.starter_pack.json`.
 
 Persist the storage roots (PowerShell):
 
@@ -74,3 +93,29 @@ Artifacts in the same folder:
 - `render_report.json`
 - `frames/`
 - `blender_stdout.txt` / `blender_stderr.txt`
+
+
+## Offline procedural mode (no HTTP/network)
+
+```powershell
+$env:MONEYOS_TEXTURE_MODE = "procedural"
+$env:MONEYOS_STYLE_PRESET = "local"
+$env:MONEYOS_SD_DISABLE = "1"
+$env:MONEYOS_NO_NETWORK = "1"
+$env:MONEYOS_DISABLE_NET = "1"
+$env:MONEYOS_DISABLE_CC0_BOOTSTRAP = "1"
+$env:MONEYOS_ASSET_PROVIDERS = "none"
+$env:MONEYOS_ASSET_MAX_DOWNLOADS_PER_RUN = "0"
+```
+
+Then verify:
+
+```bash
+curl http://127.0.0.1:8000/debug/status
+```
+
+Expected fields:
+- `"texture_mode": "procedural"`
+- `"style_preset": "local"`
+- `"sd_disabled": true`
+- `"offline": true`

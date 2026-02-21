@@ -8,58 +8,80 @@ def get_repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def get_output_root() -> Path:
-    env_root = os.getenv("MONEYOS_OUTPUT_ROOT")
-    if env_root:
-        path = Path(env_root).expanduser().resolve()
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    env_short = os.getenv("MONEYOS_SHORT_WORKDIR")
-    if env_short:
-        path = Path(env_short).expanduser().resolve()
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    drive_d = Path("D:/")
-    if drive_d.exists():
-        path = Path("D:/MoneyOS/work").resolve()
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    if os.name == "nt":
-        path = Path(r"C:\MoneyOS\work").resolve()
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    path = (get_repo_root() / "output").resolve()
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _default_roots_for_platform(is_windows: bool) -> dict[str, str]:
+    if is_windows:
+        return {
+            "MONEYOS_ASSETS_ROOT": r"C:\MoneyOS\assets",
+            "MONEYOS_OUTPUT_ROOT": r"C:\MoneyOS\work",
+            "MONEYOS_CACHE_ROOT": r"C:\MoneyOS\cache",
+            "HF_HOME": r"C:\MoneyOS\hf",
+            "HUGGINGFACE_HUB_CACHE": r"C:\MoneyOS\hf\hub",
+            "TRANSFORMERS_CACHE": r"C:\MoneyOS\hf\hub",
+        }
+    repo_root = get_repo_root()
+    return {
+        "MONEYOS_ASSETS_ROOT": str((repo_root / "assets").resolve()),
+        "MONEYOS_OUTPUT_ROOT": str((repo_root / "output").resolve()),
+        "MONEYOS_CACHE_ROOT": str((repo_root / "cache").resolve()),
+        "HF_HOME": str((repo_root / ".cache" / "huggingface").resolve()),
+        "HUGGINGFACE_HUB_CACHE": str((repo_root / ".cache" / "huggingface" / "hub").resolve()),
+        "TRANSFORMERS_CACHE": str((repo_root / ".cache" / "huggingface" / "hub").resolve()),
+    }
+
+
+def apply_default_storage_env() -> None:
+    defaults = _default_roots_for_platform(_is_windows())
+    for key, value in defaults.items():
+        os.environ.setdefault(key, value)
+    if _is_windows():
+        os.environ.setdefault("HUGGINGFACE_HUB_DISABLE_SYMLINKS", "1")
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+
+def _resolve_dir(env_name: str, fallback: str | Path) -> Path:
+    raw = os.getenv(env_name)
+    base = Path(raw) if raw else Path(fallback)
+    path = base.expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def get_output_root() -> Path:
+    apply_default_storage_env()
+    return _resolve_dir("MONEYOS_OUTPUT_ROOT", _default_roots_for_platform(_is_windows())["MONEYOS_OUTPUT_ROOT"])
 
 
 def get_assets_root() -> Path:
-    env_assets_root = os.getenv("MONEYOS_ASSETS_ROOT")
-    if env_assets_root:
-        path = Path(env_assets_root).expanduser().resolve()
-        path.mkdir(parents=True, exist_ok=True)
-        return path
+    apply_default_storage_env()
     env_assets = os.getenv("MONEYOS_ASSETS_DIR")
     if env_assets:
-        path = Path(env_assets).expanduser().resolve()
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    drive_d = Path("D:/")
-    if drive_d.exists():
-        path = Path("D:/MoneyOS/assets").resolve()
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    env_output = os.getenv("MONEYOS_OUTPUT_ROOT")
-    if env_output:
-        path = (Path(env_output).expanduser() / "assets").resolve()
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    repo_root = get_repo_root()
-    assets_dir = repo_root / "assets"
-    if assets_dir.exists():
-        path = assets_dir.resolve()
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    path = repo_root.resolve()
+        return _resolve_dir("MONEYOS_ASSETS_DIR", env_assets)
+    return _resolve_dir("MONEYOS_ASSETS_ROOT", _default_roots_for_platform(_is_windows())["MONEYOS_ASSETS_ROOT"])
+
+
+def get_cache_root() -> Path:
+    apply_default_storage_env()
+    return _resolve_dir("MONEYOS_CACHE_ROOT", _default_roots_for_platform(_is_windows())["MONEYOS_CACHE_ROOT"])
+
+
+def get_hf_home() -> Path:
+    apply_default_storage_env()
+    return _resolve_dir("HF_HOME", _default_roots_for_platform(_is_windows())["HF_HOME"])
+
+
+def get_hf_hub_cache() -> Path:
+    apply_default_storage_env()
+    return _resolve_dir("HUGGINGFACE_HUB_CACHE", _default_roots_for_platform(_is_windows())["HUGGINGFACE_HUB_CACHE"])
+
+
+def get_characters_dir() -> Path:
+    path = (get_assets_root() / "characters").resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+apply_default_storage_env()

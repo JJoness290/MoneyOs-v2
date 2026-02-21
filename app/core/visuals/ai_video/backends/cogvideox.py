@@ -2,14 +2,24 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import json
 import os
 from pathlib import Path
+import re
+
 
 from app.core.visuals.ai_video.backends.base import AiVideoBackend, BackendResult, BackendUnavailable
 
 
 class CogVideoXBackend(AiVideoBackend):
     name = "COGVIDEOX"
+    _WEIGHT_MARKERS = (
+        "model.safetensors",
+        "pytorch_model.bin",
+        "model.safetensors.index.json",
+        "pytorch_model.bin.index.json",
+    )
+    _SHARDED_SAFE_RE = re.compile(r"^model-\d{5}-of-\d{5}\.safetensors$")
 
     def __init__(self) -> None:
         self.model_id = os.getenv(
@@ -64,6 +74,98 @@ class CogVideoXBackend(AiVideoBackend):
             print(f"[CogVideoXBackend] is_available failed: {e}")
             return False
 
+
+    def _resolve_diffusers_model_ref(self) -> str:
+        model_path_env = os.getenv("MONEYOS_COGVIDEOX_MODEL_PATH", "").strip()
+        if model_path_env:
+            local = Path(model_path_env)
+            if local.exists():
+                return str(local)
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot = snapshot_download(repo_id=self.model_id, local_files_only=True)
+            return str(snapshot)
+        except Exception:  # noqa: BLE001
+            return self.model_id
+
+    @staticmethod
+    def _is_diffusers_snapshot(model_ref: str) -> bool:
+        path = Path(model_ref)
+        if not path.exists():
+            return False
+        return (path / "model_index.json").exists()
+
+    @staticmethod
+    def _root_file_flags(model_ref: str) -> dict[str, bool]:
+        root = Path(model_ref)
+        return {
+            "model_index.json": (root / "model_index.json").exists(),
+            "configuration.json": (root / "configuration.json").exists(),
+            "config.json": (root / "config.json").exists(),
+        }
+
+    @classmethod
+    def _has_usable_weight_file(cls, model_dir: Path) -> bool:
+        if not model_dir.exists() or not model_dir.is_dir():
+            return False
+        if any((model_dir / marker).exists() for marker in cls._WEIGHT_MARKERS):
+            return True
+        return any(cls._SHARDED_SAFE_RE.match(p.name) for p in model_dir.iterdir() if p.is_file())
+
+    @classmethod
+    def _weight_layout(cls, model_dir: Path) -> str:
+        if not model_dir.exists() or not model_dir.is_dir():
+            return "missing"
+        if (model_dir / "model.safetensors").exists() or (model_dir / "pytorch_model.bin").exists():
+            return "single-file"
+        if (model_dir / "model.safetensors.index.json").exists() or (model_dir / "pytorch_model.bin.index.json").exists():
+            return "indexed-sharded"
+        if any(cls._SHARDED_SAFE_RE.match(p.name) for p in model_dir.iterdir() if p.is_file()):
+            return "sharded-no-index"
+        return "unknown"
+
+    @staticmethod
+    def _list_dir_files(model_dir: Path) -> list[str]:
+        if not model_dir.exists() or not model_dir.is_dir():
+            return []
+        return sorted([entry.name for entry in model_dir.iterdir() if entry.is_file()])
+
+    def _validate_component_weights(self, model_ref: str, component: str = "text_encoder") -> None:
+        component_dir = Path(model_ref) / component
+        if not component_dir.exists():
+            return
+        if self._has_usable_weight_file(component_dir):
+            return
+        files = self._list_dir_files(component_dir)
+        raise BackendUnavailable(
+            "CogVideoX load failed: component directory does not contain a usable weight file "
+            f"({', '.join(self._WEIGHT_MARKERS)}). component={component} path={component_dir} files={files}"
+        )
+
+    def _ensure_safetensors_index_for_shards(self, model_dir: Path) -> None:
+        index_path = model_dir / "model.safetensors.index.json"
+        if index_path.exists():
+            return
+        shard_files = sorted([p for p in model_dir.iterdir() if p.is_file() and self._SHARDED_SAFE_RE.match(p.name)])
+        if not shard_files:
+            return
+        try:
+            from safetensors import safe_open  # type: ignore
+        except Exception as exc:  # noqa: BLE001
+            print(f"[AI-VIDEO][COGVIDEOX] shard index not generated (missing safetensors): {exc}")
+            return
+        weight_map: dict[str, str] = {}
+        for shard in shard_files:
+            with safe_open(str(shard), framework="pt", device="cpu") as sf:
+                for key in sf.keys():
+                    weight_map[key] = shard.name
+        payload = {
+            "metadata": {"total_size": sum(p.stat().st_size for p in shard_files)},
+            "weight_map": weight_map,
+        }
+        index_path.write_text(json.dumps(payload), encoding="utf-8")
+        print(f"[AI-VIDEO][COGVIDEOX] generated shard index: {index_path}")
+
     def load(self) -> None:
         if self._pipe is not None:
             return
@@ -73,7 +175,7 @@ class CogVideoXBackend(AiVideoBackend):
 
         use_gpu = os.getenv("MONEYOS_USE_GPU", "1") != "0"
         self._device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
-        from diffusers import CogVideoXPipeline
+        from diffusers import CogVideoXPipeline, DiffusionPipeline
 
         self._offload_enabled = self._env_flag_alias(
             "MONEYOS_COGVIDEOX_OFFLOAD",
@@ -87,10 +189,32 @@ class CogVideoXBackend(AiVideoBackend):
 
         dtype = torch.float16 if self._fp16_enabled else torch.float32
         self._dtype = "float16" if self._fp16_enabled else "float32"
-        pipe = CogVideoXPipeline.from_pretrained(
-            self.model_id,
-            torch_dtype=dtype,
-        )
+        model_ref = self._resolve_diffusers_model_ref()
+        print(f"[AI-VIDEO][COGVIDEOX] root_files={self._root_file_flags(model_ref)}")
+        component_dir = Path(model_ref) / "text_encoder"
+        layout = self._weight_layout(component_dir)
+        print(f"[AI-VIDEO][COGVIDEOX] text_encoder load layout={layout} path={component_dir}")
+        if layout == "sharded-no-index":
+            self._ensure_safetensors_index_for_shards(component_dir)
+            layout = self._weight_layout(component_dir)
+            print(f"[AI-VIDEO][COGVIDEOX] text_encoder layout_after_index={layout}")
+        self._validate_component_weights(model_ref, "text_encoder")
+        cache_dir = os.getenv("HF_HOME", str(Path.home() / ".cache" / "huggingface"))
+        load_kwargs = {
+            "torch_dtype": dtype,
+            "use_safetensors": True,
+            "local_files_only": True,
+            "cache_dir": cache_dir,
+        }
+        if self._is_diffusers_snapshot(model_ref):
+            print(f"[AI-VIDEO][COGVIDEOX] load_path=diffusers_root model_ref={model_ref}")
+            pipe = DiffusionPipeline.from_pretrained(model_ref, **load_kwargs)
+        else:
+            print(f"[AI-VIDEO][COGVIDEOX] load_path=transformers_root model_ref={model_ref}")
+            with contextlib.suppress(Exception):
+                pipe = CogVideoXPipeline.from_pretrained(model_ref, **load_kwargs)
+            if "pipe" not in locals():
+                pipe = DiffusionPipeline.from_pretrained(model_ref, **load_kwargs)
         if self._device == "cuda" and not self._offload_enabled:
             pipe = pipe.to(self._device)
         if self._device == "cuda" and self._offload_enabled and hasattr(pipe, "enable_model_cpu_offload"):
@@ -164,6 +288,7 @@ class CogVideoXBackend(AiVideoBackend):
         guidance = self._env_float("MONEYOS_COGVIDEOX_GUIDANCE", 6.0)
         num_frames_env = os.getenv("MONEYOS_COGVIDEOX_NUM_FRAMES")
         num_frames = int(num_frames_env) if num_frames_env else int(seconds * fps)
+        num_frames = max(1, min(48, num_frames))
         seed_mode = os.getenv("MONEYOS_COGVIDEOX_SEED_MODE", "per_clip").strip().lower()
         if seed_mode == "fixed":
             seed = int(os.getenv("MONEYOS_COGVIDEOX_SEED", str(seed)))

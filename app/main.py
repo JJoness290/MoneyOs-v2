@@ -8,11 +8,13 @@ import uuid
 import hashlib
 import shutil
 import time
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.routing import APIRoute
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -20,8 +22,6 @@ from app.config import (
     ANIME3D_ASSET_MODE,
     ANIME3D_POSTFX,
     ANIME3D_QUALITY,
-    ANIME3D_STYLE_PRESET,
-    ANIME3D_TEXTURE_MODE,
     ANIME3D_OUTLINE_MODE,
     ANIME3D_RESOLUTION,
     AUTO_CHARACTERS_DIR,
@@ -30,10 +30,24 @@ from app.config import (
     SD_MODEL_PATH,
     VIDEO_DIR,
     VISUAL_MODE,
+    resolve_offline_mode,
+    resolve_sd_disabled,
+    resolve_style_preset,
+    resolve_texture_mode,
 )
-from app.core.paths import get_assets_root, get_output_root, get_repo_root
+from app.core.paths import (
+    get_assets_root,
+    get_cache_root,
+    get_characters_dir,
+    get_hf_home,
+    get_hf_hub_cache,
+    get_output_root,
+    get_repo_root,
+)
 from app.core.assets.harvester.cache import get_cache_paths
 from app.core.assets.harvester.harvester import harvest_assets
+from app.core.assets.starter_characters import ensure_starter_characters_installed, list_character_assets
+from app.core.net.downloads import get_last_download_diagnostics
 from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, status as autopilot_status
 from app.core.bootstrap import ensure_dependencies
 from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
@@ -48,8 +62,38 @@ from app.core.visuals.anime_3d.render_pipeline import (
 from app.core.pipeline import PipelineResult, run_pipeline
 from app.core.system_specs import get_system_specs
 from src.utils.phase import is_phase2_or_higher, normalize_phase
+from app.core.debug.phase3_checks import get_phase3_logger, is_phase3_debug_enabled
+from app.core.stability import (
+    apply_startup_env_defaults,
+    resolve_stability_settings,
+    stability_status_payload,
+    read_recent_nvlddmkm_events,
+)
 
 app = FastAPI()
+_phase3_logger = get_phase3_logger()
+_phase3_debug = is_phase3_debug_enabled()
+
+
+@app.middleware("http")
+async def log_404_requests(request: Request, call_next):
+    if _phase3_debug:
+        _phase3_logger.info(f"PHASE3_REQUEST method={request.method} path={request.url.path}")
+        if request.url.path == "/jobs/anime-episode-60s-3d":
+            job_hint = request.query_params.get("job_id") or request.headers.get("x-job-id") or "-"
+            _phase3_logger.info(f"PHASE3_ROUTE_HIT job={job_hint}")
+    response = await call_next(request)
+    if _phase3_debug and response.status_code == 404:
+        query = request.url.query or "-"
+        print(
+            "[404] "
+            f"METHOD={request.method} "
+            f"PATH={request.url.path} "
+            f"QUERY={query} "
+            f"ORIGIN={request.headers.get('origin', '-')} "
+            f"REFERER={request.headers.get('referer', '-')}"
+        )
+    return response
 
 STATUS_IDLE = "Idle"
 STATUS_SCRIPT = "Generating script..."
@@ -63,6 +107,7 @@ _last_clip_telemetry: dict[str, object] = {}
 _last_job_snapshot: dict[str, object] = {}
 _perf_lock = threading.Lock()
 _perf_history_path = OUTPUT_DIR / "perf_history.json"
+_trueai_slots = threading.Semaphore(max(1, resolve_stability_settings().max_concurrency))
 
 _STAGE_ORDER = ["script", "broll", "render", "audio", "director", "blender", "frames", "encode", "mux", "done"]
 _STAGE_ALIASES = {
@@ -127,15 +172,32 @@ class Anime3DRequest(BaseModel):
     enable_lipsync: Optional[bool] = None
     enable_music: Optional[bool] = None
     strict_assets: Optional[bool] = None
+    character_style: Optional[str] = "realistic_human"
 
 
 class AiVideoRequest(BaseModel):
     script: str
     audio_path: str
 
+class TrueAiVideoRequest(BaseModel):
+    prompt: str = "anime action sequence in a futuristic city"
+
 
 @app.on_event("startup")
 def bootstrap_dependencies() -> None:
+    stability = apply_startup_env_defaults()
+    print(f"[STABILITY] {stability}")
+    print(
+        "[PATHS] "
+        f"assets_root={get_assets_root()} "
+        f"output_root={get_output_root()} "
+        f"cache_root={get_cache_root()} "
+        f"hf_home={get_hf_home()} "
+        f"hf_hub_cache={get_hf_hub_cache()}"
+    )
+    reg = stability_status_payload().get("registry", {})
+    if reg.get("supported") and not reg.get("sufficient"):
+        print("[STABILITY][WARN] TdrDelay/TdrDdiDelay are below recommended >=60. Configure Windows registry for long GPU workloads.")
     if "MONEYOS_USE_GPU" not in os.environ:
         os.environ["MONEYOS_USE_GPU"] = "1"
     ensure_dependencies()
@@ -178,6 +240,10 @@ def bootstrap_dependencies() -> None:
         else:
             web_url = "http://127.0.0.1:8000"
     print(f"[WEB] MoneyOS web running on {web_url}")
+    if os.getenv("MONEYOS_DISABLE_CC0_BOOTSTRAP", "1") == "1":
+        print("[BOOTSTRAP] CC0 bootstrap disabled")
+    if os.getenv("MONEYOS_NO_NETWORK") == "1":
+        print("[BOOTSTRAP] Using local assets only")
 
 
 def _format_mmss(seconds: float) -> str:
@@ -375,6 +441,7 @@ def _run_anime_3d_60s(job_id: str, req: Anime3DRequest) -> None:
         overrides.setdefault("res", "1920x1080")
         overrides.setdefault("outline_mode", "freestyle")
         overrides.setdefault("style_preset", "default")
+        overrides.setdefault("character_style", "realistic_human")
         overrides.setdefault("disable_overlays", False)
         overrides.setdefault("enable_sfx", True)
         overrides.setdefault("enable_lipsync", True)
@@ -517,6 +584,17 @@ async def debug_status() -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         last_auto_assets_error = str(exc)
     vram_gb = None
+    resolved_texture_mode = resolve_texture_mode()
+    resolved_style_preset = resolve_style_preset()
+    resolved_sd_disabled = resolve_sd_disabled()
+    resolved_offline = resolve_offline_mode()
+    starter_receipt = assets_root / "characters" / ".starter_pack.json"
+    starter_payload: dict[str, object] = {}
+    if starter_receipt.exists():
+        try:
+            starter_payload = json.loads(starter_receipt.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            starter_payload = {}
     payload = {
         "autopilot": autopilot_status(),
         "visual_mode": VISUAL_MODE,
@@ -524,7 +602,11 @@ async def debug_status() -> JSONResponse:
         "cwd": str(Path.cwd()),
         "repo_root": str(get_repo_root()),
         "assets_root": str(assets_root),
+        "starter_pack_receipt": starter_payload,
         "output_root": str(get_output_root()),
+        "cache_root": str(get_cache_root()),
+        "hf_home": str(get_hf_home()),
+        "hf_hub_cache": str(get_hf_hub_cache()),
         "required_assets": {key: path.exists() for key, path in required_assets.items()},
         "assets_ready": {key: path.exists() for key, path in required_assets.items()},
         "assets_missing": [key for key, path in required_assets.items() if not path.exists()],
@@ -532,11 +614,17 @@ async def debug_status() -> JSONResponse:
         "auto_assets_last_install_time": auto_assets_payload.get("timestamp"),
         "auto_assets_sources_used": auto_assets_payload.get("sources", []),
         "last_auto_assets_error": last_auto_assets_error,
+        "download_diagnostics": get_last_download_diagnostics(),
         "asset_mode": ANIME3D_ASSET_MODE,
-        "texture_mode": ANIME3D_TEXTURE_MODE,
+        "texture_mode": resolved_texture_mode,
+        "env_texture_mode": os.getenv("MONEYOS_TEXTURE_MODE") or os.getenv("MONEYOS_ANIME3D_TEXTURE_MODE", ""),
         "sd_model_used": SD_MODEL_PATH,
         "texture_resolution": f"{ANIME3D_RESOLUTION[0]}x{ANIME3D_RESOLUTION[1]}",
-        "style_preset": ANIME3D_STYLE_PRESET,
+        "style_preset": resolved_style_preset,
+        "env_style_preset": os.getenv("MONEYOS_STYLE_PRESET") or os.getenv("MONEYOS_ANIME3D_STYLE_PRESET", ""),
+        "sd_disabled": resolved_sd_disabled,
+        "offline": resolved_offline,
+        "env_sd_disable": os.getenv("MONEYOS_SD_DISABLE", "0"),
         "outline_mode": ANIME3D_OUTLINE_MODE,
         "postfx": ANIME3D_POSTFX,
         "quality": ANIME3D_QUALITY,
@@ -551,6 +639,7 @@ async def debug_status() -> JSONResponse:
         "last_error": blender.error,
         "last_clip_telemetry": _last_clip_telemetry,
         "last_job_snapshot": _last_job_snapshot,
+        "stability": stability_status_payload(),
     }
     try:
         import torch  # noqa: WPS433
@@ -566,6 +655,97 @@ async def debug_status() -> JSONResponse:
     except Exception as exc:  # noqa: BLE001
         payload["torch"] = {"error": str(exc)}
     return JSONResponse(payload)
+
+
+@app.get("/debug/preflight")
+async def debug_preflight() -> JSONResponse:
+    checks: dict[str, object] = {
+        "stability": stability_status_payload(),
+        "nvidia_smi": shutil.which("nvidia-smi") is not None,
+        "disk_free_bytes": shutil.disk_usage(str(get_output_root())).free,
+        "assets_root_exists": get_assets_root().exists(),
+        "output_root_exists": get_output_root().exists(),
+        "cache_root": str(get_cache_root()),
+        "hf_home": str(get_hf_home()),
+        "hf_hub_cache": str(get_hf_hub_cache()),
+    }
+    try:
+        import torch  # noqa: WPS433
+
+        checks["torch_cuda_available"] = bool(torch.cuda.is_available())
+        if torch.cuda.is_available():
+            checks["gpu_name"] = torch.cuda.get_device_name(0)
+    except Exception as exc:  # noqa: BLE001
+        checks["torch_error"] = str(exc)
+    return JSONResponse(checks)
+
+
+@app.get("/debug/character")
+async def debug_character() -> JSONResponse:
+    assets_root = get_assets_root()
+    realistic_dir = assets_root / "characters" / "realistic"
+    hero_blend = assets_root / "characters" / "hero.blend"
+    vrm_dir = assets_root / "characters" / "vrm"
+    realistic_assets = []
+    if realistic_dir.exists():
+        realistic_assets = [str(p.name) for p in realistic_dir.rglob("*") if p.is_file()][:50]
+    vrm_assets = []
+    if vrm_dir.exists():
+        vrm_assets = [str(p.name) for p in vrm_dir.glob("*.vrm")]
+    source = "procedural_fallback"
+    if realistic_assets:
+        source = "local_realistic"
+    elif hero_blend.exists():
+        source = "hero_blend"
+    elif vrm_assets:
+        source = "vrm"
+    return JSONResponse(
+        {
+            "ok": True,
+            "character_source": source,
+            "hero_blend_exists": hero_blend.exists(),
+            "realistic_assets": realistic_assets,
+            "vrm_assets": vrm_assets,
+            "procedural_fallback_available": True,
+        }
+    )
+
+
+@app.get("/debug/downloads")
+async def debug_downloads() -> JSONResponse:
+    assets_root = get_assets_root()
+    starter_receipt = assets_root / "characters" / ".starter_pack.json"
+    starter_payload: dict[str, object] = {}
+    if starter_receipt.exists():
+        try:
+            starter_payload = json.loads(starter_receipt.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            starter_payload = {}
+    asset_pack_marker = assets_root / ".asset_pack_installed.json"
+    asset_pack_payload: dict[str, object] = {}
+    if asset_pack_marker.exists():
+        try:
+            asset_pack_payload = json.loads(asset_pack_marker.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            asset_pack_payload = {}
+    auto_assets_marker = assets_root / ".auto_assets_installed.json"
+    auto_assets_payload: dict[str, object] = {}
+    if auto_assets_marker.exists():
+        try:
+            auto_assets_payload = json.loads(auto_assets_marker.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            auto_assets_payload = {}
+    return JSONResponse(
+        {
+            "ok": True,
+            "packs": {
+                "starter_characters": starter_payload,
+                "anime3d_asset_pack": asset_pack_payload,
+                "auto_assets": auto_assets_payload,
+            },
+            "last_download": get_last_download_diagnostics(),
+        }
+    )
 
 
 def _resolve_phase_target_seconds() -> tuple[str, float, str | None]:
@@ -603,6 +783,66 @@ def _build_phase25_shot_plan(target_seconds: float) -> list[dict]:
             }
         )
     return plan
+
+
+
+def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: str | None = None) -> None:
+    from app.core.visuals.anime_trueai_video.pipeline import run_trueai_60s_job  # noqa: WPS433
+    print("[TRUEAI][ENTRY] file=app/main.py func=_run_trueai_video_60s -> app/core/visuals/anime_trueai_video/pipeline.py:run_trueai_60s_job")
+    heartbeat_stop = threading.Event()
+
+    def _heartbeat() -> None:
+        while not heartbeat_stop.wait(12.0):
+            with _jobs_lock:
+                current = _jobs.get(job_id, {})
+                status = str(current.get("status", "working"))
+                stage = str(current.get("stage_key", "generate"))
+                progress = int(current.get("progress_pct", 35))
+            _set_status(job_id, status, stage_key=stage, progress_pct=progress)
+
+    def _update(message: str) -> None:
+        stage = "generate"
+        lowered = message.lower()
+        if "plan" in lowered:
+            stage = "plan"
+        elif "stitch" in lowered:
+            stage = "stitch"
+        elif "mux" in lowered:
+            stage = "mux"
+        elif lowered in {
+            "tdr_detected",
+            "recovery_wait",
+            "recovery_restart_worker",
+            "fallback_safe_preset",
+            "fallback_cpu",
+            "failed",
+        }:
+            stage = lowered
+        elif "download" in lowered:
+            stage = "plan"
+        elif "load" in lowered or "inference" in lowered:
+            stage = "generate"
+        _set_status(job_id, message, stage_key=stage, progress_pct=35)
+
+    try:
+        _set_status(job_id, "Queued TRUE text-to-video", stage_key="plan", progress_pct=1)
+        out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
+        _set_status(job_id, "download → CogVideoX-5b weights", stage_key="plan", progress_pct=3, extra={"output_dir": str(out_dir.resolve()), "substage": "download"})
+        hb = threading.Thread(target=_heartbeat, daemon=True)
+        hb.start()
+        with _trueai_slots:
+            final_video, report = run_trueai_60s_job(job_id, req.prompt, status_callback=_update, forced_preset=forced_preset)
+        _set_status(
+            job_id,
+            "Complete",
+            stage_key="done",
+            progress_pct=100,
+            extra={"clip": str(final_video), "report": str(report), "mode": "true_text_to_video"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        _set_error(job_id, f"Error: {exc}")
+    finally:
+        heartbeat_stop.set()
 
 
 def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> None:
@@ -748,7 +988,7 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
                     "environment": environment,
                     "mode": mode,
                     "render_preset": os.getenv("MONEYOS_RENDER_PRESET", "fast_proof"),
-                    "model": os.getenv("MONEYOS_ANIME3D_STYLE_PRESET", "key_art"),
+                    "model": resolve_style_preset(),
                     "uniq": f"{job_id}:{index}:{seed_value}",
                 }
                 print(f"[SHOT_UNIQUENESS] payload_keys={sorted(cache_payload.keys())}")
@@ -984,6 +1224,8 @@ def _run_hybrid_episode(job_id: str, target_seconds: float | None = None) -> Non
 
 
 @app.post("/generate")
+@app.post("/generate-audio")
+@app.post("/api/generate-audio")
 async def generate() -> JSONResponse:
     job_id = uuid.uuid4().hex
     _set_status(job_id, STATUS_SCRIPT)
@@ -1120,6 +1362,39 @@ async def finalize_anime_episode_3d(job_id: str = Body(..., embed=True)) -> JSON
     return JSONResponse({"status": "ok", "job_id": job_id})
 
 
+
+
+@app.post("/jobs/anime-trueai-60s")
+async def generate_anime_trueai_60s(req: TrueAiVideoRequest = Body(default=TrueAiVideoRequest())) -> JSONResponse:
+    job_id = uuid.uuid4().hex
+    _set_status(job_id, "Queued TRUE AI video", stage_key="plan", progress_pct=1)
+    thread = threading.Thread(target=_run_trueai_video_60s, args=(job_id, req), daemon=True)
+    thread.start()
+    out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
+    return JSONResponse({"job_id": job_id, "output_dir": str(out_dir.resolve())})
+
+
+
+@app.post("/jobs/anime-trueai-fasttest")
+async def generate_anime_trueai_fasttest(req: TrueAiVideoRequest = Body(default=TrueAiVideoRequest())) -> JSONResponse:
+    job_id = uuid.uuid4().hex
+    _set_status(job_id, "Queued TRUE AI fasttest video", stage_key="plan", progress_pct=1)
+    thread = threading.Thread(target=_run_trueai_video_60s, args=(job_id, req, "fasttest"), daemon=True)
+    thread.start()
+    out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
+    return JSONResponse({"job_id": job_id, "output_dir": str(out_dir.resolve()), "preset": "fasttest"})
+
+
+
+@app.post("/jobs/anime-trueai-quality")
+async def generate_anime_trueai_quality(req: TrueAiVideoRequest = Body(default=TrueAiVideoRequest())) -> JSONResponse:
+    job_id = uuid.uuid4().hex
+    _set_status(job_id, "Queued TRUE AI quality video", stage_key="plan", progress_pct=1)
+    thread = threading.Thread(target=_run_trueai_video_60s, args=(job_id, req, "quality"), daemon=True)
+    thread.start()
+    out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
+    return JSONResponse({"job_id": job_id, "output_dir": str(out_dir.resolve()), "preset": "quality"})
+
 @app.post("/jobs/ai-video-60s")
 async def generate_ai_video_60s(req: AiVideoRequest = Body(...)) -> JSONResponse:
     from app.core.visuals.ai_video.pipeline import run_ai_video_job  # noqa: WPS433
@@ -1165,6 +1440,24 @@ async def status(job_id: str) -> JSONResponse:
     if not data:
         raise HTTPException(status_code=404, detail="Job not found")
     return JSONResponse(data)
+
+
+@app.get("/jobs/{job_id}/diagnostics")
+async def job_diagnostics(job_id: str) -> JSONResponse:
+    with _jobs_lock:
+        data = _jobs.get(job_id, {})
+    output_dir_raw = data.get("output_dir")
+    if not output_dir_raw:
+        raise HTTPException(status_code=404, detail="No diagnostics for this job")
+    output_dir = Path(output_dir_raw)
+    diag = {
+        "job_id": job_id,
+        "output_dir": str(output_dir),
+        "report": str(output_dir / "final" / "report.json"),
+        "metrics": str(output_dir / "diagnostics" / "metrics.jsonl"),
+        "events": str(output_dir / "diagnostics" / "nvlddmkm_events.log"),
+    }
+    return JSONResponse(diag)
 
 
 @app.get("/events/{job_id}")
@@ -1215,10 +1508,21 @@ async def harvest_report() -> JSONResponse:
 
 @app.get("/assets/characters/auto")
 async def auto_characters() -> JSONResponse:
-    if not AUTO_CHARACTERS_DIR.exists():
-        return JSONResponse({"characters": []})
-    characters = [path.name for path in AUTO_CHARACTERS_DIR.iterdir() if path.is_dir()]
-    return JSONResponse({"characters": characters})
+    runtime_char_dir = get_characters_dir()
+    result = ensure_starter_characters_installed(runtime_char_dir, strict=False)
+    inventory = list_character_assets(runtime_char_dir)
+    result["usable"] = inventory.get("usable", 0)
+    if AUTO_CHARACTERS_DIR.exists():
+        result["auto_characters"] = [path.name for path in AUTO_CHARACTERS_DIR.iterdir() if path.is_dir()]
+    return JSONResponse(result)
+
+
+@app.post("/assets/characters/auto")
+async def install_auto_characters() -> JSONResponse:
+    result = ensure_starter_characters_installed(get_characters_dir(), strict=False)
+    inventory = list_character_assets(get_characters_dir())
+    result["usable"] = inventory.get("usable", 0)
+    return JSONResponse(result)
 
 
 class UseCharactersRequest(BaseModel):
@@ -1255,3 +1559,66 @@ async def assets_status() -> JSONResponse:
             "missing_categories": missing,
         }
     )
+
+
+def _register_api_aliases() -> None:
+    """Expose /api/* aliases for public UI endpoints without duplicating handlers."""
+    alias_prefix_paths = (
+        "/jobs/",
+        "/status/",
+        "/events/",
+        "/videos/",
+        "/assets/",
+    )
+    alias_exact_paths = {
+        "/generate",
+        "/health",
+        "/debug/status",
+        "/debug/downloads",
+        "/debug/character",
+    }
+
+    def _should_alias(path: str) -> bool:
+        if path.startswith("/api/"):
+            return False
+        if path in alias_exact_paths:
+            return True
+        return path.startswith(alias_prefix_paths)
+
+    existing_paths = {route.path for route in app.routes if isinstance(route, APIRoute)}
+    for route in list(app.routes):
+        if not isinstance(route, APIRoute):
+            continue
+        if not _should_alias(route.path):
+            continue
+        alias_path = f"/api{route.path}"
+        if alias_path in existing_paths:
+            continue
+        app.add_api_route(
+            alias_path,
+            route.endpoint,
+            methods=list(route.methods or []),
+            response_model=route.response_model,
+            status_code=route.status_code,
+            tags=list(route.tags),
+            summary=route.summary,
+            description=route.description,
+            response_description=route.response_description,
+            responses=route.responses,
+            deprecated=route.deprecated,
+            name=f"api_alias_{route.name}",
+            operation_id=f"api_alias_{route.operation_id}" if route.operation_id else None,
+            include_in_schema=True,
+        )
+        existing_paths.add(alias_path)
+
+
+_register_api_aliases()
+
+if _phase3_debug:
+    registered_paths = {route.path for route in app.routes if hasattr(route, "path")}
+    for required in ("/jobs/anime-episode-60s-3d", "/jobs/anime-episode-60s-3d/finalize"):
+        if required in registered_paths:
+            _phase3_logger.info(f"PHASE3_ROUTE_REGISTERED {required}")
+        else:
+            _phase3_logger.error(f"PHASE3_ROUTE_MISSING {required}")

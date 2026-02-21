@@ -14,8 +14,12 @@ StatusCallback = Callable[[str], None] | None
 
 
 def _nvenc_quality_mode() -> str:
-    mode = os.getenv("MONEYOS_NVENC_QUALITY", "balanced").strip().lower()
-    if mode not in {"balanced", "max"}:
+    mode = os.getenv("MONEYOS_NVENC_QUALITY", "").strip().lower()
+    if not mode:
+        preset = os.getenv("MONEYOS_RENDER_PRESET", "balanced").strip().lower()
+        aliases = {"fast_proof": "fast", "phase15_quality": "max"}
+        mode = aliases.get(preset, preset)
+    if mode not in {"fast", "balanced", "max"}:
         return "balanced"
     return mode
 
@@ -38,20 +42,20 @@ def _nvenc_preset(mode: str) -> str:
     preset = os.getenv("MONEYOS_NVENC_PRESET")
     if preset:
         return preset
-    return "p7" if mode == "max" else "p5"
+    return "p2" if mode == "fast" else ("p4" if mode == "balanced" else "p7")
 
 
 def _nvenc_cq_value(mode: str) -> str:
     env_value = os.getenv("MONEYOS_NVENC_CQ")
     if env_value:
         return env_value
-    return "18" if mode == "max" else "22"
+    return os.getenv("MONEYOS_NVENC_CQ", "19")
 
 
 def _nvenc_vbr_values(mode: str) -> tuple[str, str, str]:
-    default_rate = "35M" if mode == "max" else "16M"
-    default_max = "50M" if mode == "max" else "24M"
-    default_buf = "100M" if mode == "max" else "48M"
+    default_rate = "10M" if mode == "fast" else ("16M" if mode == "balanced" else "35M")
+    default_max = "14M" if mode == "fast" else ("24M" if mode == "balanced" else "50M")
+    default_buf = "28M" if mode == "fast" else ("48M" if mode == "balanced" else "100M")
     bitrate = os.getenv("MONEYOS_NVENC_VBR", default_rate)
     maxrate = os.getenv("MONEYOS_NVENC_MAXRATE", default_max)
     bufsize = os.getenv("MONEYOS_NVENC_BUFSIZE", default_buf)
@@ -62,12 +66,12 @@ def _nvenc_args_for_mode(mode: str) -> list[str]:
     codec = _nvenc_codec()
     preset = _nvenc_preset(mode)
     rc_mode = _nvenc_rc_mode()
-    args = ["-c:v", codec, "-pix_fmt", "yuv420p", "-preset", preset]
+    args = ["-c:v", codec, "-pix_fmt", "yuv420p", "-profile:v", "high", "-preset", preset]
     if rc_mode == "vbr":
         bitrate, maxrate, bufsize = _nvenc_vbr_values(mode)
         args += ["-rc:v", "vbr", "-b:v", bitrate, "-maxrate", maxrate, "-bufsize", bufsize]
     else:
-        args += ["-rc:v", "vbr_hq", "-cq", _nvenc_cq_value(mode)]
+        args += ["-rc:v", "vbr_hq", "-cq", _nvenc_cq_value(mode), "-b:v", "0"]
     return args
 
 
@@ -146,6 +150,93 @@ def _ensure_faststart(args: list[str]) -> list[str]:
     return args
 
 
+def _ffprobe_video_stream(path: Path) -> dict[str, str] | None:
+    if not path.exists():
+        return None
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,pix_fmt,profile",
+            "-of",
+            "default=noprint_wrappers=1:nokey=0",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        return None
+    payload: dict[str, str] = {}
+    for line in (probe.stdout or "").splitlines():
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        payload[k.strip()] = v.strip()
+    return payload or None
+
+
+def _is_nvenc_h264_safe_stream(info: dict[str, str] | None) -> bool:
+    if not info:
+        return False
+    codec = (info.get("codec_name") or "").strip().lower()
+    pix_fmt = (info.get("pix_fmt") or "").strip().lower()
+    profile = (info.get("profile") or "").strip().lower()
+    return codec == "h264" and pix_fmt == "yuv420p" and "444" not in profile
+
+
+def _reencode_safe_x264(output_path: Path, log_path: Path | None = None) -> None:
+    temp_path = output_path.with_suffix(".x264safe.mp4")
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(output_path),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "high",
+        "-crf",
+        os.getenv("MONEYOS_X264_SAFE_CRF", "18"),
+        "-preset",
+        "veryfast",
+        "-movflags",
+        "+faststart",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        str(temp_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"safe x264 re-encode failed: {result.stderr[-800:]}")
+    temp_path.replace(output_path)
+    msg = f"[FFmpeg] NVENC safety fallback re-encode applied: {output_path}"
+    print(msg)
+    _append_log(log_path, msg)
+
+
+def _verify_nvenc_h264_output(output_path: Path, log_path: Path | None = None) -> None:
+    info = _ffprobe_video_stream(output_path)
+    msg = f"[FFmpeg] ffprobe verify codec={info.get('codec_name') if info else '?'} pix_fmt={info.get('pix_fmt') if info else '?'} profile={info.get('profile') if info else '?'}"
+    print(msg)
+    _append_log(log_path, msg)
+    if _is_nvenc_h264_safe_stream(info):
+        return
+    warn = "[FFmpeg] NVENC output verification failed; auto-fallback to safe libx264 encode"
+    print(warn)
+    _append_log(log_path, warn)
+    _reencode_safe_x264(output_path, log_path)
+
+
 def run_ffmpeg(
     args: list[str],
     status_callback: StatusCallback = None,
@@ -176,6 +267,10 @@ def run_ffmpeg(
                 status_callback(error_message)
             _append_log(log_path, error_message)
             raise RuntimeError(error_message)
+        if "h264_nvenc" in args:
+            out_path = Path(str(args[-1]))
+            if out_path.suffix.lower() == ".mp4":
+                _verify_nvenc_h264_output(out_path, log_path)
         print(f"[ResourceGuard] FFmpeg command length: {cmd_len}")
         command = " ".join(args)
         print("[ResourceGuard] FFmpeg command:", command)
@@ -211,6 +306,10 @@ def run_ffmpeg(
                 status_callback(error_message)
             _append_log(log_path, error_message)
             raise RuntimeError(error_message)
+        if "h264_nvenc" in args:
+            out_path = Path(str(args[-1]))
+            if out_path.suffix.lower() == ".mp4":
+                _verify_nvenc_h264_output(out_path, log_path)
     finally:
         guard.stop()
 
@@ -273,10 +372,10 @@ def select_video_encoder() -> tuple[list[str], str]:
             warning += " (cuda_available=true)"
         print(warning)
     args = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "veryfast"]
-    render_preset = os.getenv("MONEYOS_RENDER_PRESET", "fast_proof").strip().lower()
-    if render_preset == "fast_proof":
+    render_preset = os.getenv("MONEYOS_RENDER_PRESET", "balanced").strip().lower()
+    if render_preset in {"fast", "fast_proof"}:
         args += ["-minrate", "2M", "-maxrate", "4M", "-bufsize", "4M"]
-        print("[ENC] libx264 entropy floor enabled (fast_proof)")
+        print("[ENC] libx264 entropy floor enabled (fast)")
     print("[ResourceGuard] Encoder: libx264 args:", " ".join(args))
     return (args, "libx264")
 

@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from app.core.paths import get_assets_root, get_output_root, get_repo_root
+from app.core.paths import get_assets_root, get_characters_dir, get_output_root, get_repo_root
 from src.utils.phase import normalize_phase
 
 BASE_DIR = get_repo_root()
@@ -10,7 +10,7 @@ VIDEO_DIR = OUTPUT_DIR / "videos"
 AUDIO_DIR = OUTPUT_DIR / "audio"
 BROLL_DIR = OUTPUT_DIR / "broll"
 ASSETS_DIR = get_assets_root()
-CHARACTERS_DIR = BASE_DIR / os.getenv("MONEYOS_CHARACTERS_DIR", "assets/characters_3d")
+CHARACTERS_DIR = get_characters_dir()
 ANIMATIONS_DIR = BASE_DIR / os.getenv("MONEYOS_ANIMATIONS_DIR", "assets/animations")
 ANIMATION_PACKS_DIR = BASE_DIR / "assets" / "animation_packs"
 VFX_DIR = BASE_DIR / os.getenv("MONEYOS_VFX_DIR", "assets/vfx")
@@ -218,4 +218,39 @@ try:
 except ValueError:
     ASSET_KEEP_TOP_N = 5
 ASSET_REVIEW_MODE = os.getenv("MONEYOS_ASSET_REVIEW_MODE", "0") == "1"
+MONEYOS_DISABLE_CC0_BOOTSTRAP = os.getenv("MONEYOS_DISABLE_CC0_BOOTSTRAP", "1")
+
 SKETCHFAB_API_TOKEN = os.getenv("MONEYOS_SKETCHFAB_API_TOKEN")
+
+
+
+def _env_text(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def resolve_offline_mode() -> bool:
+    return _env_text("MONEYOS_NO_NETWORK") == "1" or _env_text("MONEYOS_DISABLE_NET") == "1"
+
+
+def resolve_sd_disabled() -> bool:
+    return _env_text("MONEYOS_SD_DISABLE") == "1" or resolve_offline_mode()
+
+
+def resolve_texture_mode() -> str:
+    env_texture_mode = _env_text("MONEYOS_TEXTURE_MODE") or _env_text("MONEYOS_ANIME3D_TEXTURE_MODE") or ANIME3D_TEXTURE_MODE
+    mode = env_texture_mode.lower()
+    if mode not in {"sd_local", "procedural", "none"}:
+        mode = ANIME3D_TEXTURE_MODE
+    if resolve_sd_disabled() and mode == "sd_local":
+        return "procedural"
+    if resolve_offline_mode() and mode == "sd_local":
+        return "procedural"
+    return mode
+
+
+def resolve_style_preset() -> str:
+    env_style = _env_text("MONEYOS_STYLE_PRESET") or _env_text("MONEYOS_ANIME3D_STYLE_PRESET") or ANIME3D_STYLE_PRESET
+    style = env_style.lower() if env_style else ANIME3D_STYLE_PRESET
+    if resolve_offline_mode():
+        return "local"
+    return style

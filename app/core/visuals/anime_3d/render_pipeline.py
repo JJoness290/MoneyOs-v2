@@ -24,7 +24,6 @@ from app.config import (
     ANIME3D_QUALITY,
     ANIME3D_RESOLUTION,
     ANIME3D_SECONDS,
-    ANIME3D_STYLE_PRESET,
     ANIME3D_OUTLINE_MODE,
     ANIME3D_POSTFX,
     BLENDER_ENGINE,
@@ -33,8 +32,12 @@ from app.config import (
     VFX_EMISSION_STRENGTH,
     VFX_SCALE,
     VFX_SCREEN_COVERAGE,
+    resolve_offline_mode,
+    resolve_sd_disabled,
+    resolve_style_preset,
+    resolve_texture_mode,
 )
-from app.core.paths import get_assets_root, get_output_root
+from app.core.paths import get_assets_root, get_characters_dir, get_output_root, get_repo_root
 from app.core.tts import generate_tts
 from app.core.assets3d.auto_assets import ensure_anime3d_assets_auto
 from app.core.assets3d.bootstrapper import ensure_minimum_assets
@@ -49,9 +52,22 @@ from app.core.visuals.anime_3d.storage import (
 )
 from src.utils.cli_args import add_opt, validate_no_empty_value_flags
 from app.core.visuals.anime_3d.validators import validate_episode
+from app.core.visuals.anime_3d.assets.character_loader import ensure_characters, pick_character
+from app.core.visuals.anime_3d.assets.character_variation import build_character_variation
+from app.core.visuals.anime_3d.blender.install_vrm_addon import ensure_vrm_addon_ready
 from app.core.visuals.ffmpeg_utils import has_nvenc, run_ffmpeg, _fallback_to_x264, _uses_nvenc
 from src.utils.win_paths import planned_paths_preflight
 from src.moneyos.auto_assets.cc0_bootstrap_anime3d import ensure_cc0_anime3d_assets
+from app.core.assets.starter_characters import ensure_charpack_installed, ensure_starter_characters_installed
+from app.core.debug.phase3_checks import (
+    append_debug_to_report,
+    compute_luma_metrics,
+    compute_sharpness_metrics,
+    get_phase3_logger,
+    is_phase3_debug_enabled,
+    read_tail_lines,
+    trace_event,
+)
 
 
 @dataclass(frozen=True)
@@ -233,6 +249,26 @@ def _emit_status(
     status_callback(payload)
 
 
+def _normalize_render_preset(raw_value: str | None) -> str:
+    value = str(raw_value or "balanced").strip().lower()
+    aliases = {
+        "fast_proof": "fast",
+        "phase15_quality": "max",
+    }
+    value = aliases.get(value, value)
+    if value not in {"fast", "balanced", "max"}:
+        return "balanced"
+    return value
+
+
+def _preset_render_knobs(preset: str) -> tuple[int, int, int]:
+    if preset == "fast":
+        return 32, 3, 128
+    if preset == "max":
+        return max(int(os.getenv("MONEYOS_PHASE15_SAMPLES", "128")), 128), max(int(os.getenv("MONEYOS_PHASE15_BOUNCES", "6")), 6), max(int(os.getenv("MONEYOS_PHASE15_TILE", "256")), 256)
+    return 72, 4, 256
+
+
 def _parse_blender_shot_status(stdout_text: str) -> tuple[dict | None, bool]:
     lines = stdout_text.splitlines()
     planning_seen = any("[DIRECTOR]" in line for line in lines)
@@ -362,14 +398,19 @@ def _assemble_frames_video(
         "-i",
         str(audio_path),
     ]
+    render_preset = _normalize_render_preset(os.getenv("MONEYOS_RENDER_PRESET", "balanced"))
+    nvenc_preset = "p2" if render_preset == "fast" else ("p4" if render_preset == "balanced" else "p7")
+    nvenc_cq = "24" if render_preset == "fast" else ("21" if render_preset == "balanced" else "18")
     if use_nvenc:
         args += [
             "-c:v",
             "h264_nvenc",
             "-preset",
-            "p7",
-            "-cq",
-            "18",
+            nvenc_preset,
+            "-rc:v",
+            "vbr",
+            "-cq:v",
+            nvenc_cq,
             "-pix_fmt",
             "yuv420p",
             "-movflags",
@@ -661,32 +702,42 @@ def _generate_audio(
     return final_path
 
 
-def render_anime_3d_60s(
+def _render_anime_3d_60s_impl(
     job_id: str,
     status_callback: StatusCallback = None,
     overrides: dict | None = None,
 ) -> Anime3DResult:
+    phase3_logger = get_phase3_logger()
+    phase3_debug = is_phase3_debug_enabled()
+    phase3_trace: list[dict[str, object]] = []
     warnings: list[str] = []
     ensure_blender_path()
     ensure_minimum_assets(job_id)
-    render_preset = os.getenv("MONEYOS_RENDER_PRESET", "fast_proof").strip().lower()
-    if render_preset not in {"fast_proof", "phase15_quality"}:
-        render_preset = "fast_proof"
+    trace_event(phase3_trace, "PHASE3_CHARPACK_CHECK", stage="start")
+    _ = ensure_charpack_installed(get_assets_root())
+    char_pack_result = ensure_starter_characters_installed(get_characters_dir(), strict=False)
+    phase3_logger.info(
+        "PHASE3_CHARPACK_CHECK "
+        f"stage=ok installed={char_pack_result.get('installed')} source={char_pack_result.get('source')} counts={char_pack_result.get('counts', {})}"
+    )
+    trace_event(
+        phase3_trace,
+        "PHASE3_CHARPACK_CHECK",
+        stage="ok",
+        installed=char_pack_result.get("installed"),
+        counts=char_pack_result.get("counts", {}),
+    )
+    if not char_pack_result.get("ok", False):
+        warnings.append("charpack_unavailable_using_procedural_fallback")
+        phase3_logger.warning(
+            "PHASE3_CHARPACK_CHECK fallback=procedural reason=%s",
+            char_pack_result.get("message", "charpack check failed"),
+        )
+    render_preset = _normalize_render_preset(os.getenv("MONEYOS_RENDER_PRESET", "balanced"))
     env_template = os.getenv("MONEYOS_ENV_TEMPLATE", "room").strip().lower()
-    fast_proof = render_preset == "fast_proof"
-    phase15 = render_preset == "phase15_quality"
-    try:
-        phase15_samples = int(os.getenv("MONEYOS_PHASE15_SAMPLES", "128"))
-    except ValueError:
-        phase15_samples = 128
-    try:
-        phase15_bounces = int(os.getenv("MONEYOS_PHASE15_BOUNCES", "6"))
-    except ValueError:
-        phase15_bounces = 6
-    try:
-        phase15_tile = int(os.getenv("MONEYOS_PHASE15_TILE", "256"))
-    except ValueError:
-        phase15_tile = 256
+    fast_proof = render_preset == "fast"
+    phase15 = render_preset == "max"
+    phase15_samples, phase15_bounces, phase15_tile = _preset_render_knobs(render_preset)
     phase15_res = os.getenv("MONEYOS_PHASE15_RES", "1920x1080")
     duration_s = float(ANIME3D_SECONDS)
     fps = ANIME3D_FPS
@@ -694,13 +745,17 @@ def render_anime_3d_60s(
     postfx = "on" if ANIME3D_POSTFX else "off"
     outline_mode = ANIME3D_OUTLINE_MODE
     quality = ANIME3D_QUALITY
-    style_preset = ANIME3D_STYLE_PRESET
+    style_preset = resolve_style_preset()
+    texture_mode = resolve_texture_mode()
+    sd_disabled = resolve_sd_disabled()
+    offline_mode = resolve_offline_mode()
     vfx_emission_strength = VFX_EMISSION_STRENGTH
     vfx_scale = VFX_SCALE
     vfx_screen_coverage = VFX_SCREEN_COVERAGE
     environment = env_template
     character_asset = None
     mode = "default"
+    character_style = "realistic_human"
     enable_sfx = True
     enable_lipsync = True
     enable_music = True
@@ -713,19 +768,22 @@ def render_anime_3d_60s(
     disable_overlays = True
     overrides = overrides or {}
     if overrides.get("render_preset"):
-        render_preset = str(overrides["render_preset"]).strip().lower()
-        if render_preset not in {"fast_proof", "phase15_quality"}:
-            render_preset = "fast_proof"
-        fast_proof = render_preset == "fast_proof"
-        phase15 = render_preset == "phase15_quality"
+        render_preset = _normalize_render_preset(str(overrides["render_preset"]))
+        fast_proof = render_preset == "fast"
+        phase15 = render_preset == "max"
+        phase15_samples, phase15_bounces, phase15_tile = _preset_render_knobs(render_preset)
     if overrides.get("environment"):
         environment = str(overrides["environment"]).strip().lower()
     if overrides.get("character_asset"):
         character_asset = str(overrides["character_asset"])
+    if overrides.get("character_style"):
+        character_style = str(overrides["character_style"]).strip().lower()
     if overrides.get("mode"):
         mode = str(overrides["mode"]).strip().lower()
     if overrides.get("seed") is not None:
         seed_value = int(overrides["seed"])
+    if seed_value is None:
+        seed_value = int(hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:8], 16)
     if overrides.get("enable_sfx") is not None:
         enable_sfx = bool(overrides["enable_sfx"])
     if overrides.get("enable_lipsync") is not None:
@@ -761,6 +819,31 @@ def render_anime_3d_60s(
         style_preset = str(overrides["style_preset"])
         if style_preset == "key_art":
             style_preset = "default"
+    # Re-resolve with offline forcing at runtime.
+    if offline_mode:
+        style_preset = "local"
+    if sd_disabled and texture_mode == "sd_local":
+        texture_mode = "procedural"
+    selected_character = None
+    character_variation = build_character_variation(seed_value)
+    if str(style_preset).strip().lower() == "anime_visual":
+        assets_root = get_assets_root()
+        cache_root = (get_output_root() / "cache").resolve()
+        try:
+            characters = ensure_characters(assets_root, cache_root)
+            selected_character = pick_character(seed_value, characters)
+            character_asset = str(selected_character.local_path)
+            if selected_character.local_path.suffix.lower() == ".vrm":
+                ensure_vrm_addon_ready(Path(ensure_blender_path()), assets_root, selected_character.local_path)
+            else:
+                phase3_logger.warning(
+                    "PHASE3_CHARACTER_FALLBACK character=%s path=%s",
+                    selected_character.name,
+                    selected_character.local_path,
+                )
+        except Exception as exc:  # noqa: BLE001
+            phase3_logger.warning("PHASE3_CHARACTER_PROVISION_WARNING error=%s", exc)
+            trace_event(phase3_trace, "PHASE3_CHARACTER_PROVISION_WARNING", error=str(exc))
     if overrides.get("outline_mode"):
         outline_mode = str(overrides["outline_mode"])
     if overrides.get("postfx") is not None:
@@ -785,25 +868,48 @@ def render_anime_3d_60s(
         quality = "fast"
     if duration_s <= 0:
         raise RuntimeError("Duration must be provided from audio beats and be > 0 seconds.")
+    if offline_mode or sd_disabled or texture_mode != "sd_local":
+        phase3_logger.info("[TEXTURE] mode=%s (sd_disabled/offline) using procedural textures", texture_mode)
     missing_assets = _missing_required_assets()
     if missing_assets:
-        _emit_status(
-            status_callback,
-            stage_key="assets",
-            status="Bootstrapping CC0 assets...",
-            progress_pct=2,
-        )
-        cache_root = get_output_root() / "auto_assets"
-        allow_network = os.getenv("MONEYOS_DISABLE_NET") != "1"
-        ensure_cc0_anime3d_assets(
-            get_assets_root(),
-            cache_root,
-            ensure_blender_path(),
-            allow_network=allow_network,
-        )
+        cc0_disabled = os.getenv("MONEYOS_DISABLE_CC0_BOOTSTRAP") == "1"
+        no_network = os.getenv("MONEYOS_NO_NETWORK") == "1"
+        if cc0_disabled or no_network:
+            phase3_logger.info("[BOOTSTRAP] CC0 bootstrap disabled")
+            phase3_logger.info("[BOOTSTRAP] Using local assets only")
+            trace_event(
+                phase3_trace,
+                "PHASE3_CC0_BOOTSTRAP_SKIPPED",
+                reason="disabled" if cc0_disabled else "no_network",
+            )
+        else:
+            _emit_status(
+                status_callback,
+                stage_key="assets",
+                status="Bootstrapping CC0 assets...",
+                progress_pct=2,
+            )
+            cache_root = get_output_root() / "auto_assets"
+            allow_network = os.getenv("MONEYOS_DISABLE_NET") != "1"
+            try:
+                ensure_cc0_anime3d_assets(
+                    get_assets_root(),
+                    cache_root,
+                    ensure_blender_path(),
+                    allow_network=allow_network,
+                )
+            except Exception as exc:  # noqa: BLE001
+                phase3_logger.warning("CC0 bootstrap skipped: %s", exc)
+                trace_event(phase3_trace, "PHASE3_CC0_BOOTSTRAP_WARNING", error=str(exc))
         missing_assets = _missing_required_assets()
     if asset_mode == "auto" or missing_assets:
-        ensure_anime3d_assets_auto(get_assets_root(), "render", strict_assets == 1)
+        try:
+            ensure_anime3d_assets_auto(get_assets_root(), "render", strict_assets == 1)
+        except Exception as exc:  # noqa: BLE001
+            phase3_logger.warning("PHASE3_AUTO_ASSETS_WARNING error=%s", exc)
+            trace_event(phase3_trace, "PHASE3_AUTO_ASSETS_WARNING", error=str(exc))
+            if strict_assets == 1:
+                raise
         missing_assets = _missing_required_assets()
     if asset_mode == "local":
         _ensure_assets(missing_assets, strict_assets == 1)
@@ -829,6 +935,9 @@ def render_anime_3d_60s(
         "environment": environment,
         "mode": mode,
         "style_preset": style_preset,
+        "texture_mode": texture_mode,
+        "sd_disabled": "1" if sd_disabled else "0",
+        "offline": "1" if offline_mode else "0",
         "outline_mode": outline_mode,
         "postfx": postfx,
         "quality": quality,
@@ -838,6 +947,24 @@ def render_anime_3d_60s(
         "assets_dir": str(get_assets_root()),
         "asset_mode": asset_mode,
     }
+    phase3_logger.info(
+        "PHASE3_PIPELINE_ENTER "
+        f"job_id={job_id} render_preset={render_preset} engine={BLENDER_ENGINE} "
+        f"gpu={BLENDER_GPU} use_gpu={os.getenv('MONEYOS_USE_GPU', '-')} "
+        f"nvenc_quality={os.getenv('MONEYOS_NVENC_QUALITY', '-')} "
+        f"assets_root={get_assets_root()} output_path={output_dir / 'final.mp4'}"
+    )
+    trace_event(
+        phase3_trace,
+        "PHASE3_PIPELINE_ENTER",
+        job_id=job_id,
+        render_preset=render_preset,
+        engine=BLENDER_ENGINE,
+        gpu=BLENDER_GPU,
+        use_gpu=os.getenv("MONEYOS_USE_GPU", "-"),
+        assets_root=str(get_assets_root()),
+        output_path=str(output_dir / "final.mp4"),
+    )
     fingerprint = _build_fingerprint(fingerprint_payload)
     planned_paths = [
         output_dir / "render_report.json",
@@ -873,6 +1000,8 @@ def render_anime_3d_60s(
     frames_dir = output_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     script_path = (Path(__file__).parent / "blender" / "render_segment.py").resolve()
+    os.environ["MONEYOS_ANIME3D_TEXTURE_MODE"] = texture_mode
+    os.environ["MONEYOS_SD_DISABLE"] = "1" if sd_disabled else os.getenv("MONEYOS_SD_DISABLE", "0")
     blender_args: list[str] = []
     add_opt(blender_args, "--output", video_path)
     add_opt(blender_args, "--audio", audio_path)
@@ -881,11 +1010,13 @@ def render_anime_3d_60s(
     add_opt(blender_args, "--asset-mode", asset_mode)
     add_opt(blender_args, "--strict-assets", strict_assets)
     add_opt(blender_args, "--beat-plan", output_dir / "script_plan.json")
-    if phase15:
+    if phase15 or render_preset == "balanced" or str(style_preset).strip().lower() == "anime_visual":
         add_opt(blender_args, "--engine", "cycles")
     add_opt(blender_args, "--render-preset", render_preset)
     add_opt(blender_args, "--environment", environment)
     add_opt(blender_args, "--character-asset", character_asset)
+    add_opt(blender_args, "--character-variation", character_variation.to_json())
+    add_opt(blender_args, "--character-style", character_style)
     add_opt(blender_args, "--mode", mode)
     add_opt(blender_args, "--seed", seed_value)
     add_opt(blender_args, "--fingerprint", fingerprint)
@@ -976,7 +1107,7 @@ def render_anime_3d_60s(
         if shutil.which("ffmpeg"):
             _assemble_frames_video(frames_dir, fps, audio_path, video_path, warnings, report_path)
         else:
-            video_path.write_text(f"seed={seed_value}\\n", encoding="utf-8")
+            video_path.write_text(f"seed={seed_value}\n", encoding="utf-8")
         _validate_blender_artifacts(
             output_dir,
             report_path,
@@ -991,6 +1122,7 @@ def render_anime_3d_60s(
             warnings=warnings,
         )
     cmd = build_blender_command(script_path, blender_args)
+    trace_event(phase3_trace, "PHASE3_BLENDER_CMD_READY", cmd=" ".join(str(part) for part in cmd))
     _assert_seed_fingerprint_in_cmd(cmd)
     blender_cmd_path.write_text(_format_cmd(cmd), encoding="utf-8")
     cmd_text = blender_cmd_path.read_text(encoding="utf-8")
@@ -1009,11 +1141,14 @@ def render_anime_3d_60s(
     with blender_stdout_path.open("w", encoding="utf-8") as stdout_handle, blender_stderr_path.open(
         "w", encoding="utf-8"
     ) as stderr_handle:
+        blender_env = os.environ.copy()
+        blender_env["MONEYOS_REPO_ROOT"] = str(get_repo_root())
         process = subprocess.Popen(
             cmd,
             stdout=stdout_handle,
             stderr=stderr_handle,
             text=True,
+            env=blender_env,
         )
         total_frames = max(1, int(math.ceil(duration_s * fps)))
         last_update = 0.0
@@ -1069,6 +1204,33 @@ def render_anime_3d_60s(
             f"Stdout (tail):\n{tail_stdout}\n"
             f"Stderr (tail):\n{tail_stderr}"
         )
+    phase3_metrics: dict[str, object] | None = None
+    if frame_list:
+        sample_index = max(0, len(frame_list) // 2)
+        sample_frame = frame_list[sample_index]
+        metrics = compute_luma_metrics(sample_frame)
+        if metrics is not None:
+            phase3_metrics = metrics
+            luma_min = float(os.getenv("MONEYOS_PHASE3_LUMA_MIN", "25"))
+            dark_pct_max = float(os.getenv("MONEYOS_PHASE3_DARK_PCT_MAX", "0.85"))
+            if metrics["mean_luma"] < luma_min or metrics["dark_pixel_ratio"] > dark_pct_max:
+                warning_msg = (
+                    "PHASE3_SILHOUETTE_WARNING "
+                    f"mean_luma={metrics['mean_luma']} dark_ratio={metrics['dark_pixel_ratio']} "
+                    f"resolution={metrics['resolution']}"
+                )
+                phase3_logger.warning(warning_msg)
+                warnings.append(warning_msg)
+        sharpness = compute_sharpness_metrics(sample_frame)
+        if sharpness is not None:
+            threshold = float(os.getenv("MONEYOS_PHASE3_SHARPNESS_MIN", "35.0"))
+            if float(sharpness.get("laplacian_variance", 0.0)) < threshold:
+                warn = f"PHASE3_SHARPNESS_WARNING laplacian_variance={sharpness['laplacian_variance']} threshold={threshold}"
+                phase3_logger.warning(warn)
+                warnings.append(warn)
+    if any("PHASE3_SHARPNESS_WARNING" in w for w in warnings) and render_preset == "fast":
+        phase3_logger.warning("PHASE3_SHARPNESS_RETRY from=fast to=balanced")
+
     _proof_static_frames(frames_dir, report_path)
     _validate_blender_artifacts(
         output_dir,
@@ -1119,7 +1281,23 @@ def render_anime_3d_60s(
         if not fast_proof:
             raise RuntimeError(validation.message)
     _update_report_warnings(report_path, warnings)
+    if phase3_debug:
+        append_debug_to_report(
+            report_path,
+            {
+                "phase3_trace": phase3_trace,
+                "blender_tail": {
+                    "stdout": read_tail_lines(blender_stdout_path, 100),
+                    "stderr": read_tail_lines(blender_stderr_path, 100),
+                },
+                "phase3_metrics": phase3_metrics,
+            },
+        )
     clear_in_use(job_id)
+    phase3_logger.info(
+        "PHASE3_PIPELINE_EXIT "
+        f"success=1 duration={duration_s:.3f} output_file={final_path}"
+    )
     return Anime3DResult(
         output_dir=output_dir,
         final_video=final_path,
@@ -1127,6 +1305,24 @@ def render_anime_3d_60s(
         duration_seconds=duration_s,
         warnings=warnings,
     )
+
+
+def render_anime_3d_60s(
+    job_id: str,
+    status_callback: StatusCallback = None,
+    overrides: dict | None = None,
+) -> Anime3DResult:
+    phase3_logger = get_phase3_logger()
+    started = time.time()
+    try:
+        result = _render_anime_3d_60s_impl(job_id, status_callback=status_callback, overrides=overrides)
+        return result
+    except Exception as exc:  # noqa: BLE001
+        phase3_logger.error(
+            "PHASE3_PIPELINE_EXIT "
+            f"success=0 duration={time.time() - started:.3f} output_file=- error={exc}"
+        )
+        raise
 
 
 def finalize_anime_3d(job_id: str, status_callback: StatusCallback = None) -> Anime3DResult:

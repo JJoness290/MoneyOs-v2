@@ -36,6 +36,8 @@ CHECK_INTERVAL_SEC = float(os.getenv("MONEYOS_CHECK_INTERVAL", "0.75"))
 
 
 def ffmpeg_threads() -> int:
+    if os.getenv("MONEYOS_STABILITY_MODE", "0") == "1":
+        return max(1, min(2, int(os.getenv("MONEYOS_FFMPEG_THREADS", "1"))))
     mode = ram_mode()
     logical_threads = psutil.cpu_count(logical=True) or 1
     default_threads = max(1, min(6, max(1, logical_threads - 2)))
@@ -55,6 +57,8 @@ def ram_mode() -> str:
     if _RAM_MODE_CACHE:
         return _RAM_MODE_CACHE
     env_mode_raw = os.getenv("MONEYOS_RAM_MODE")
+    if os.getenv("MONEYOS_STABILITY_MODE", "0") == "1" and env_mode_raw is None:
+        env_mode_raw = "low"
     if env_mode_raw:
         env_mode = env_mode_raw.strip().lower()
         if env_mode in {"low", "balanced", "high"}:
