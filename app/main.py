@@ -13,6 +13,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
+from app.core.storage_policy import apply_storage_policy_env, print_effective_settings_banner
+
+apply_storage_policy_env()
+
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.routing import APIRoute
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
@@ -186,15 +190,18 @@ class TrueAiVideoRequest(BaseModel):
 @app.on_event("startup")
 def bootstrap_dependencies() -> None:
     stability = apply_startup_env_defaults()
-    print(f"[STABILITY] {stability}")
-    print(
-        "[PATHS] "
-        f"assets_root={get_assets_root()} "
-        f"output_root={get_output_root()} "
-        f"cache_root={get_cache_root()} "
-        f"hf_home={get_hf_home()} "
-        f"hf_hub_cache={get_hf_hub_cache()}"
+    print_effective_settings_banner(
+        heading="EFFECTIVE SETTINGS (STARTUP)",
+        extra={
+            "stability": {
+                "stability_mode": stability.stability_mode,
+                "max_concurrency": stability.max_concurrency,
+                "vram_fraction": stability.vram_fraction,
+                "pytorch_alloc_conf": stability.pytorch_alloc_conf,
+            }
+        },
     )
+    print(f"[STABILITY] {stability}")
     reg = stability_status_payload().get("registry", {})
     if reg.get("supported") and not reg.get("sufficient"):
         print("[STABILITY][WARN] TdrDelay/TdrDdiDelay are below recommended >=60. Configure Windows registry for long GPU workloads.")

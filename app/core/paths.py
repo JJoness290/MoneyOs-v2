@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from app.core.storage_policy import apply_storage_policy_env
+
 
 def get_repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -18,9 +20,13 @@ def _default_roots_for_platform(is_windows: bool) -> dict[str, str]:
             "MONEYOS_ASSETS_ROOT": r"C:\MoneyOS\assets",
             "MONEYOS_OUTPUT_ROOT": r"C:\MoneyOS\work",
             "MONEYOS_CACHE_ROOT": r"C:\MoneyOS\cache",
-            "HF_HOME": r"C:\MoneyOS\hf",
-            "HUGGINGFACE_HUB_CACHE": r"C:\MoneyOS\hf\hub",
-            "TRANSFORMERS_CACHE": r"C:\MoneyOS\hf\hub",
+            "HF_HOME": r"C:\MoneyOS\cache\huggingface",
+            "HUGGINGFACE_HUB_CACHE": r"C:\MoneyOS\cache\huggingface\hub",
+            "HF_HUB_CACHE": r"C:\MoneyOS\cache\huggingface\hub",
+            "HF_DATASETS_CACHE": r"C:\MoneyOS\cache\huggingface\datasets",
+            "TRANSFORMERS_CACHE": r"C:\MoneyOS\cache\huggingface\hub",
+            "TORCH_HOME": r"C:\MoneyOS\cache\torch",
+            "MONEYOS_TEMP_ROOT": r"C:\MoneyOS\tmp",
         }
     repo_root = get_repo_root()
     return {
@@ -34,12 +40,12 @@ def _default_roots_for_platform(is_windows: bool) -> dict[str, str]:
 
 
 def apply_default_storage_env() -> None:
-    defaults = _default_roots_for_platform(_is_windows())
+    if _is_windows():
+        apply_storage_policy_env()
+        return
+    defaults = _default_roots_for_platform(False)
     for key, value in defaults.items():
         os.environ.setdefault(key, value)
-    if _is_windows():
-        os.environ.setdefault("HUGGINGFACE_HUB_DISABLE_SYMLINKS", "1")
-        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 
 def _resolve_dir(env_name: str, fallback: str | Path) -> Path:
@@ -75,7 +81,9 @@ def get_hf_home() -> Path:
 
 def get_hf_hub_cache() -> Path:
     apply_default_storage_env()
-    return _resolve_dir("HUGGINGFACE_HUB_CACHE", _default_roots_for_platform(_is_windows())["HUGGINGFACE_HUB_CACHE"])
+    defaults = _default_roots_for_platform(_is_windows())
+    fallback = defaults.get("HF_HUB_CACHE") or defaults["HUGGINGFACE_HUB_CACHE"]
+    return _resolve_dir("HF_HUB_CACHE", fallback)
 
 
 def get_characters_dir() -> Path:

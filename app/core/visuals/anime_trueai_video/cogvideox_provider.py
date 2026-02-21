@@ -31,6 +31,7 @@ class CogVideoXProvider(TextToVideoProvider):
         self._device = CogVideoXProvider._shared_device
         self._generation_calls = 0
         self._compiled = False
+        self.force_disable_super_resolution = False
 
     def is_available(self) -> bool:
         try:
@@ -231,11 +232,28 @@ class CogVideoXProvider(TextToVideoProvider):
         text = str(exc).lower()
         return "out of memory" in text or "cuda" in text and "memory" in text
 
+    @staticmethod
+    def _is_tensor_shape_mismatch(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "size of tensor a" in text and "must match the size of tensor b" in text
+
+    @staticmethod
+    def _align_multiple(value: int, factor: int, minimum: int) -> int:
+        clamped = max(minimum, int(value))
+        return max(minimum, (clamped // factor) * factor)
+
+    def _sanitize_generation_dims(self, width: int, height: int, frames: int) -> tuple[int, int, int]:
+        safe_w = self._align_multiple(width, 16, 384)
+        safe_h = self._align_multiple(height, 16, 224)
+        safe_frames = self._align_multiple(frames, 2, 8)
+        safe_frames = min(48, safe_frames)
+        return safe_w, safe_h, safe_frames
+
     def _stability_degrade(self, width: int, height: int, steps: int, frames: int) -> tuple[int, int, int, int]:
-        degraded_w = max(384, ((int(width * 0.85)) // 8) * 8)
-        degraded_h = max(216, ((int(height * 0.85)) // 8) * 8)
+        degraded_w = self._align_multiple(int(width * 0.85), 16, 384)
+        degraded_h = self._align_multiple(int(height * 0.85), 16, 224)
         degraded_steps = max(8, steps - 4)
-        degraded_frames = max(8, frames - 8)
+        degraded_frames = self._align_multiple(max(8, frames - 8), 2, 8)
         return degraded_w, degraded_h, degraded_steps, degraded_frames
 
     def _maybe_compile(self) -> None:
@@ -266,6 +284,7 @@ class CogVideoXProvider(TextToVideoProvider):
         from diffusers.utils import export_to_video
 
         self._maybe_compile()
+        self.force_disable_super_resolution = False
         self._pipe.set_progress_bar_config(disable=True)
         generator = torch.Generator(device="cuda").manual_seed(request.seed) if self._device == "cuda" else torch.Generator().manual_seed(request.seed)
         with contextlib.suppress(Exception):
@@ -275,9 +294,11 @@ class CogVideoXProvider(TextToVideoProvider):
         width = request.width
         height = request.height
         steps = request.steps
+        width, height, num_frames = self._sanitize_generation_dims(width, height, num_frames)
         stability = resolve_stability_settings()
         max_attempts = 4 if stability.stability_mode else 1
         last_exc: Exception | None = None
+        tensor_retry_used = False
         for attempt in range(max_attempts):
             try:
                 if self._device == "cuda" and stability.stability_mode:
@@ -286,10 +307,12 @@ class CogVideoXProvider(TextToVideoProvider):
                     util = reserved / max(total, 1.0)
                     if util >= min(0.99, stability.vram_fraction + 0.05) and attempt < (max_attempts - 1):
                         width, height, steps, num_frames = self._stability_degrade(width, height, steps, num_frames)
+                        self.force_disable_super_resolution = True
                         print(
-                            "[TRUEAI][COGVIDEOX] guardrail_trigger="
-                            f"reserved_ratio({util:.3f})>=budget({stability.vram_fraction:.3f}) "
-                            f"degrade_to={width}x{height} steps={steps} frames={num_frames}"
+                            "[TRUEAI][COGVIDEOX] degrade "
+                            f"attempt={attempt + 1}/{max_attempts} reason=vram_guardrail "
+                            f"resolution={width}x{height} steps={steps} frames={num_frames} "
+                            f"sr=OFF reserved_ratio={util:.3f} budget={stability.vram_fraction:.3f}"
                         )
                         continue
                 with torch.autocast("cuda", dtype=torch.float16) if self._device == "cuda" else contextlib.nullcontext():
@@ -306,9 +329,25 @@ class CogVideoXProvider(TextToVideoProvider):
                 break
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                if not stability.stability_mode or not self._is_oom_error(exc) or attempt >= (max_attempts - 1):
+                is_oom = self._is_oom_error(exc)
+                is_mismatch = self._is_tensor_shape_mismatch(exc)
+                if is_mismatch and stability.stability_mode and not tensor_retry_used and attempt < (max_attempts - 1):
+                    tensor_retry_used = True
+                    width, height, steps, num_frames = self._stability_degrade(width, height, steps, num_frames)
+                    width, height, num_frames = self._sanitize_generation_dims(width, height, num_frames)
+                    self.force_disable_super_resolution = True
+                    print(
+                        "[TRUEAI][COGVIDEOX] degrade "
+                        f"attempt={attempt + 1}/{max_attempts} reason=tensor_mismatch_recovery "
+                        f"resolution={width}x{height} steps={steps} frames={num_frames} "
+                        f"sr=OFF error={exc}"
+                    )
+                    continue
+                if not stability.stability_mode or not is_oom or attempt >= (max_attempts - 1):
                     raise
                 width, height, steps, num_frames = self._stability_degrade(width, height, steps, num_frames)
+                width, height, num_frames = self._sanitize_generation_dims(width, height, num_frames)
+                self.force_disable_super_resolution = True
                 with contextlib.suppress(Exception):
                     if hasattr(self._pipe, "enable_model_cpu_offload"):
                         self._pipe.enable_model_cpu_offload()
@@ -317,8 +356,9 @@ class CogVideoXProvider(TextToVideoProvider):
                     if hasattr(self._pipe, "enable_vae_slicing"):
                         self._pipe.enable_vae_slicing()
                 print(
-                    "[TRUEAI][COGVIDEOX] oom_degrade "
-                    f"attempt={attempt + 1}/{max_attempts} to={width}x{height} steps={steps} frames={num_frames} reason={exc}"
+                    "[TRUEAI][COGVIDEOX] degrade "
+                    f"attempt={attempt + 1}/{max_attempts} reason=oom resolution={width}x{height} "
+                    f"steps={steps} frames={num_frames} sr=OFF budget={stability.vram_fraction:.3f} error={exc}"
                 )
         else:
             raise RuntimeError(

@@ -19,6 +19,7 @@ from app.core.stability import (
     read_recent_nvlddmkm_events,
     resolve_stability_settings,
 )
+from app.core.storage_policy import effective_settings_payload, print_effective_settings_banner
 
 StatusCallback = callable
 
@@ -83,7 +84,7 @@ def _probe_duration(path: Path) -> float:
 
 def _multiple_of_8(value: int) -> int:
     value = max(64, int(value))
-    return max(64, (value // 8) * 8)
+    return max(64, (value // 16) * 16)
 
 
 def _resolve_preset(forced_preset: str | None = None) -> TrueAIPresetConfig:
@@ -154,7 +155,19 @@ def run_trueai_60s_job(
     final_dir.mkdir(parents=True, exist_ok=True)
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
     report_path = final_dir / "report.json"
+    settings_effective_path = out_dir / "settings_effective.json"
     stability = resolve_stability_settings()
+    runtime_settings = {
+        "stability": {
+            "stability_mode": stability.stability_mode,
+            "max_concurrency": stability.max_concurrency,
+            "vram_fraction": stability.vram_fraction,
+            "pytorch_alloc_conf": stability.pytorch_alloc_conf,
+        },
+        "trueai": {"preset": cfg.name, "fps": fps, "steps": steps, "guidance": guidance, "width": width, "height": height},
+    }
+    settings_payload = print_effective_settings_banner(extra=runtime_settings, heading=f"EFFECTIVE SETTINGS (JOB {job_id})")
+    settings_effective_path.write_text(json.dumps(settings_payload, indent=2), encoding="utf-8")
     monitor = PressureMonitor(diagnostics_dir / "metrics.jsonl", stability)
     monitor.start()
     downshifts: list[dict[str, object]] = []
@@ -177,6 +190,7 @@ def run_trueai_60s_job(
     print(f"[TRUEAI] steps={steps}")
     print(f"[TRUEAI] guidance={guidance}")
     print(f"[TRUEAI] super_resolution={'ON' if cfg.super_resolution else 'OFF'}")
+    super_resolution_enabled = bool(cfg.super_resolution and not FASTTEST)
 
     generated: list[Path] = []
     started = time.time()
@@ -208,6 +222,9 @@ def run_trueai_60s_job(
             if status_callback:
                 status_callback(f"inference → clip {idx + 1}/{clip_count}")
             provider.generate(request)
+            if getattr(provider, "force_disable_super_resolution", False):
+                super_resolution_enabled = False
+                print("[TRUEAI] super_resolution=FORCED_OFF reason=oom_or_tensor_mismatch_degrade")
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
             failure_kind = classify_cuda_failure(msg)
@@ -272,6 +289,9 @@ def run_trueai_60s_job(
                         out_path=clip_path,
                     )
                     provider.generate(request)
+                    if getattr(provider, "force_disable_super_resolution", False):
+                        super_resolution_enabled = False
+                        print("[TRUEAI] super_resolution=FORCED_OFF reason=oom_or_tensor_mismatch_degrade")
             else:
                 raise
 
@@ -298,7 +318,7 @@ def run_trueai_60s_job(
     _ffmpeg("-f", "concat", "-safe", "0", "-i", str(concat_list), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(stitched))
 
     source_for_final = stitched
-    if cfg.super_resolution and not FASTTEST:
+    if super_resolution_enabled:
         if status_callback:
             status_callback("super-resolution")
         source_for_final = run_super_resolution(stitched, scale=2, fps=fps)
@@ -368,7 +388,7 @@ def run_trueai_60s_job(
         "width": width,
         "height": height,
         "preset": cfg.name,
-        "super_resolution": bool(cfg.super_resolution and not FASTTEST),
+        "super_resolution": bool(super_resolution_enabled),
         "elapsed_s": round(time.time() - started, 3),
         "final_video": str(final_mp4),
         "downshifts": downshifts,

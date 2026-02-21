@@ -11,7 +11,8 @@ import threading
 import time
 from typing import Any
 
-from app.core.paths import apply_default_storage_env, get_hf_home, get_hf_hub_cache
+from app.core.paths import apply_default_storage_env
+from app.core.storage_policy import apply_storage_policy_env
 
 try:
     import psutil  # type: ignore
@@ -37,6 +38,7 @@ def is_windows() -> bool:
 
 
 def apply_startup_env_defaults() -> StabilitySettings:
+    apply_storage_policy_env()
     apply_default_storage_env()
     if is_windows() and "MONEYOS_STABILITY_MODE" not in os.environ:
         os.environ["MONEYOS_STABILITY_MODE"] = "1"
@@ -50,18 +52,11 @@ def apply_startup_env_defaults() -> StabilitySettings:
     if is_windows():
         os.environ.setdefault("HUGGINGFACE_HUB_DISABLE_SYMLINKS", "1")
         os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-        os.environ.setdefault("HF_HOME", str(get_hf_home()))
-        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(get_hf_hub_cache()))
-        os.environ.setdefault("TRANSFORMERS_CACHE", str(get_hf_hub_cache()))
     if os.getenv("MONEYOS_STABILITY_MODE", "0") == "1":
-        os.environ.setdefault(
-            "MONEYOS_PYTORCH_ALLOC_CONF",
-            "max_split_size_mb:128,garbage_collection_threshold:0.8",
-        )
-        os.environ.setdefault(
-            "PYTORCH_CUDA_ALLOC_CONF",
-            os.getenv("MONEYOS_PYTORCH_ALLOC_CONF", "max_split_size_mb:128,garbage_collection_threshold:0.8"),
-        )
+        default_alloc = "expandable_segments:True,max_split_size_mb:128,garbage_collection_threshold:0.8"
+        alloc_conf = os.getenv("MONEYOS_PYTORCH_ALLOC_CONF") or os.getenv("PYTORCH_CUDA_ALLOC_CONF") or default_alloc
+        os.environ["MONEYOS_PYTORCH_ALLOC_CONF"] = alloc_conf
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = alloc_conf
     return resolve_stability_settings()
 
 
@@ -74,7 +69,10 @@ def resolve_stability_settings() -> StabilitySettings:
         cpu_max_util=int(os.getenv("MONEYOS_CPU_MAX_UTIL", "80")),
         disable_overlap_encode=os.getenv("MONEYOS_DISABLE_OVERLAP_ENCODE", "1") == "1",
         cuda_launch_blocking=int(os.getenv("MONEYOS_CUDA_LAUNCH_BLOCKING", "0")),
-        pytorch_alloc_conf=os.getenv("MONEYOS_PYTORCH_ALLOC_CONF", "max_split_size_mb:128,garbage_collection_threshold:0.8"),
+        pytorch_alloc_conf=os.getenv(
+            "MONEYOS_PYTORCH_ALLOC_CONF",
+            os.getenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True,max_split_size_mb:128,garbage_collection_threshold:0.8"),
+        ),
         vram_fraction=float(os.getenv("MONEYOS_VRAM_FRACTION", "0.70")),
     )
 
