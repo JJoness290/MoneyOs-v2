@@ -95,6 +95,23 @@ def _ffprobe_video(path: Path) -> dict[str, str]:
     return payload
 
 
+def _has_audio_stream(path: Path) -> bool:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    return proc.returncode == 0 and bool((proc.stdout or "").strip())
+
+
 def _encode_youtube_mp4(input_path: Path, output_path: Path, extra_filters: list[str] | None = None, duration_s: float | None = None) -> None:
     if not input_path.exists():
         parent = input_path.parent
@@ -108,11 +125,17 @@ def _encode_youtube_mp4(input_path: Path, output_path: Path, extra_filters: list
     args = ["-i", str(input_path)]
     if duration_s is not None:
         args += ["-t", f"{duration_s:.3f}"]
+    has_audio = _has_audio_stream(input_path)
     args += [
+        "-map",
+        "0:v:0",
         "-vf",
         vf,
         *youtube_video_encode_args(cfg),
-        "-an",
+    ]
+    if has_audio:
+        args += ["-map", "0:a:0?", "-c:a", "copy"]
+    args += [
         "-movflags",
         "+faststart",
         str(output_path),
@@ -403,10 +426,10 @@ def run_trueai_60s_job(
         normalize_source = pad_path if pad_path.exists() else base_clip_path
         if not normalize_source.exists():
             normalize_source = clip_path
-        normalized_temp = clips_dir / f"clip_{idx:02d}_yt.mp4"
-        _encode_youtube_mp4(normalize_source, normalized_temp, duration_s=request.seconds)
-        normalized_temp.replace(base_clip_path)
-        clip_path = base_clip_path
+        yt_clip_path = clips_dir / f"clip_{idx:02d}_yt.mp4"
+        _encode_youtube_mp4(normalize_source, yt_clip_path, duration_s=request.seconds)
+        print(f"[TRUEAI][YT] yt_src={normalize_source} yt_out={yt_clip_path} exists_out={yt_clip_path.exists()}")
+        clip_path = yt_clip_path if yt_clip_path.exists() else normalize_source
         generated.append(clip_path)
 
     if status_callback:
