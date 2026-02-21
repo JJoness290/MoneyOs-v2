@@ -12,7 +12,12 @@ import time
 from app.config import OUTPUT_DIR
 from app.core.visuals.anime_trueai_video.cogvideox_provider import CogVideoXProvider
 from app.core.visuals.anime_trueai_video.provider import ClipRequest, TextToVideoProvider
-from app.core.visuals.ffmpeg_utils import run_ffmpeg
+from app.core.visuals.ffmpeg_utils import (
+    get_youtube_target_profile,
+    run_ffmpeg,
+    youtube_video_encode_args,
+    youtube_video_filter,
+)
 from app.core.stability import (
     PressureMonitor,
     classify_cuda_failure,
@@ -63,6 +68,72 @@ def _negative_prompt() -> str:
 
 def _ffmpeg(*args: str) -> None:
     run_ffmpeg(["ffmpeg", "-y", *args])
+
+
+def _ffprobe_video(path: Path) -> dict[str, str]:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,r_frame_rate,avg_frame_rate,pix_fmt",
+        "-of",
+        "default=noprint_wrappers=1:nokey=0",
+        str(path),
+    ]
+    proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return {}
+    payload: dict[str, str] = {}
+    for line in (proc.stdout or "").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        payload[key.strip()] = value.strip()
+    return payload
+
+
+def _encode_youtube_mp4(input_path: Path, output_path: Path, extra_filters: list[str] | None = None, duration_s: float | None = None) -> None:
+    cfg = get_youtube_target_profile()
+    vf = youtube_video_filter(cfg, prepend=extra_filters)
+    args = ["-i", str(input_path)]
+    if duration_s is not None:
+        args += ["-t", f"{duration_s:.3f}"]
+    args += [
+        "-vf",
+        vf,
+        *youtube_video_encode_args(cfg),
+        "-an",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    _ffmpeg(*args)
+
+
+def _mux_youtube_with_audio(video_path: Path, audio_path: Path, output_path: Path, duration_s: float) -> None:
+    _ffmpeg(
+        "-i",
+        str(video_path),
+        "-i",
+        str(audio_path),
+        "-shortest",
+        "-t",
+        f"{duration_s:.3f}",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-ar",
+        "48000",
+        "-b:a",
+        "320k",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    )
 
 
 def _probe_duration(path: Path) -> float:
@@ -134,6 +205,7 @@ def run_trueai_60s_job(
 ) -> tuple[Path, Path]:
     FASTTEST = os.getenv("MONEYOS_TRUEAI_FASTTEST", "0") == "1" or str(forced_preset or "").strip().lower() == "fasttest"
     cfg = _resolve_preset("fasttest" if FASTTEST else forced_preset)
+    yt_target = get_youtube_target_profile()
 
     total_seconds = cfg.duration_s
     fps = cfg.fps
@@ -165,6 +237,17 @@ def run_trueai_60s_job(
             "pytorch_alloc_conf": stability.pytorch_alloc_conf,
         },
         "trueai": {"preset": cfg.name, "fps": fps, "steps": steps, "guidance": guidance, "width": width, "height": height},
+        "youtube_target": {
+            "name": yt_target.target_name,
+            "width": yt_target.width,
+            "height": yt_target.height,
+            "fps": yt_target.fps,
+            "codec": yt_target.codec,
+            "cq": yt_target.cq,
+            "preset": yt_target.preset,
+            "force_cfr": yt_target.force_cfr,
+            "sharpen": yt_target.sharpen,
+        },
     }
     settings_payload = print_effective_settings_banner(extra=runtime_settings, heading=f"EFFECTIVE SETTINGS (JOB {job_id})")
     settings_effective_path.write_text(json.dumps(settings_payload, indent=2), encoding="utf-8")
@@ -190,6 +273,7 @@ def run_trueai_60s_job(
     print(f"[TRUEAI] steps={steps}")
     print(f"[TRUEAI] guidance={guidance}")
     print(f"[TRUEAI] super_resolution={'ON' if cfg.super_resolution else 'OFF'}")
+    print(f"[TRUEAI][YT] target={yt_target.width}x{yt_target.height}@{yt_target.fps} codec={yt_target.codec} cq={yt_target.cq}")
     super_resolution_enabled = bool(cfg.super_resolution and not FASTTEST)
 
     generated: list[Path] = []
@@ -307,6 +391,10 @@ def run_trueai_60s_job(
             pad_path = clips_dir / f"clip_{idx:02d}_pad.mp4"
             _ffmpeg("-i", str(clip_path), "-vf", f"tpad=stop_mode=clone:stop_duration={pad_seconds:.3f}", "-r", str(fps), str(pad_path))
             clip_path = pad_path
+        normalized_path = clips_dir / f"clip_{idx:02d}_norm.mp4"
+        _encode_youtube_mp4(clip_path, normalized_path, duration_s=request.seconds)
+        if clip_path != normalized_path:
+            normalized_path.replace(clip_path)
         generated.append(clip_path)
 
     if status_callback:
@@ -315,61 +403,54 @@ def run_trueai_60s_job(
     concat_list.write_text("\n".join([f"file '{p.as_posix()}'" for p in generated]), encoding="utf-8")
 
     stitched = final_dir / "stitched.mp4"
-    _ffmpeg("-f", "concat", "-safe", "0", "-i", str(concat_list), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(stitched))
+    _ffmpeg(
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_list),
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        str(stitched),
+    )
 
     source_for_final = stitched
     if super_resolution_enabled:
         if status_callback:
             status_callback("super-resolution")
-        source_for_final = run_super_resolution(stitched, scale=2, fps=fps)
+        source_for_final = run_super_resolution(stitched, scale=2, fps=yt_target.fps)
 
     target_video = final_dir / "video_out.mp4"
-    final_filter = "scale=1920:1080:flags=lanczos,cas=strength=0.35"
-    try:
-        _ffmpeg(
-            "-i",
-            str(source_for_final),
-            "-vf",
-            final_filter,
-            "-t",
-            f"{total_seconds:.3f}",
-            "-c:v",
-            "h264_nvenc",
-            "-pix_fmt",
-            "yuv420p",
-            "-profile:v",
-            "high",
-            "-preset",
-            "p2" if FASTTEST else ("p4" if cfg.name == "balanced" else "p7"),
-            str(target_video),
-        )
-    except Exception:
-        _ffmpeg(
-            "-i",
-            str(source_for_final),
-            "-vf",
-            "scale=1920:1080:flags=lanczos,unsharp=5:5:1.0:5:5:0.0",
-            "-t",
-            f"{total_seconds:.3f}",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            str(target_video),
-        )
+    _encode_youtube_mp4(source_for_final, target_video, duration_s=total_seconds)
 
     if status_callback:
         status_callback("muxing")
     silent = final_dir / "silent.wav"
     _ffmpeg("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-t", f"{total_seconds:.3f}", str(silent))
     final_mp4 = final_dir / "final.mp4"
-    _ffmpeg("-i", str(target_video), "-i", str(silent), "-shortest", "-c:v", "copy", "-c:a", "aac", str(final_mp4))
+    _mux_youtube_with_audio(target_video, silent, final_mp4, total_seconds)
 
     duration = _probe_duration(final_mp4)
     if math.fabs(duration - total_seconds) > 0.15:
         trim_final = final_dir / "final_trim.mp4"
-        _ffmpeg("-i", str(final_mp4), "-t", f"{total_seconds:.3f}", "-c:v", "copy", "-c:a", "copy", str(trim_final))
+        _mux_youtube_with_audio(target_video, silent, trim_final, total_seconds)
         final_mp4 = trim_final
+
+    final_probe = _ffprobe_video(final_mp4)
+    mid_probe = _ffprobe_video(generated[0]) if generated else {}
+    print(
+        "[TRUEAI][YT][VERIFY] final "
+        f"width={final_probe.get('width')} height={final_probe.get('height')} "
+        f"fps={final_probe.get('avg_frame_rate') or final_probe.get('r_frame_rate')} pix_fmt={final_probe.get('pix_fmt')}"
+    )
+    print(
+        "[TRUEAI][YT][VERIFY] clip0 "
+        f"width={mid_probe.get('width')} height={mid_probe.get('height')} "
+        f"fps={mid_probe.get('avg_frame_rate') or mid_probe.get('r_frame_rate')} pix_fmt={mid_probe.get('pix_fmt')}"
+    )
 
     monitor.stop()
     peak_gpu = max([float(x.get("gpu_util") or 0.0) for x in monitor.samples], default=0.0)
@@ -391,6 +472,17 @@ def run_trueai_60s_job(
         "super_resolution": bool(super_resolution_enabled),
         "elapsed_s": round(time.time() - started, 3),
         "final_video": str(final_mp4),
+        "youtube_target": {
+            "name": yt_target.target_name,
+            "width": yt_target.width,
+            "height": yt_target.height,
+            "fps": yt_target.fps,
+            "codec": yt_target.codec,
+            "cq": yt_target.cq,
+            "preset": yt_target.preset,
+        },
+        "probe_final": final_probe,
+        "probe_first_clip": mid_probe,
         "downshifts": downshifts,
         "peak_gpu_util": peak_gpu,
         "peak_vram_util": peak_vram,

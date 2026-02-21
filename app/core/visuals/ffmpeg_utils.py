@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 from typing import Callable
+from dataclasses import dataclass
 
 import os
 
@@ -11,6 +12,125 @@ from src.utils.cmdlen import estimate_windows_cmd_length
 from src.utils.ffmpeg_script_mode import maybe_externalize_filter_graph
 
 StatusCallback = Callable[[str], None] | None
+
+
+@dataclass(frozen=True)
+class YouTubeTargetProfile:
+    target_name: str
+    width: int
+    height: int
+    fps: int
+    codec: str
+    cq: int
+    preset: str
+    force_cfr: bool
+    sharpen: bool
+
+
+def get_youtube_target_profile() -> YouTubeTargetProfile:
+    target = os.getenv("MONEYOS_YT_TARGET", "1080p60").strip().lower()
+    if target == "2160p60":
+        width, height, fps = 3840, 2160, 60
+    else:
+        width, height, fps = 1920, 1080, 60
+        target = "1080p60"
+    codec_env = os.getenv("MONEYOS_YT_CODEC", "h264").strip().lower()
+    codec = "hevc" if codec_env in {"hevc", "h265"} else "h264"
+    try:
+        cq = int(os.getenv("MONEYOS_YT_CQ", "18"))
+    except ValueError:
+        cq = 18
+    try:
+        force_cfr = int(os.getenv("MONEYOS_YT_FORCE_CFR", "1")) == 1
+    except ValueError:
+        force_cfr = True
+    try:
+        sharpen = int(os.getenv("MONEYOS_YT_SHARPEN", "0")) == 1
+    except ValueError:
+        sharpen = False
+    return YouTubeTargetProfile(
+        target_name=target,
+        width=width,
+        height=height,
+        fps=fps,
+        codec=codec,
+        cq=cq,
+        preset=os.getenv("MONEYOS_YT_PRESET", "p7"),
+        force_cfr=force_cfr,
+        sharpen=sharpen,
+    )
+
+
+def youtube_video_filter(profile: YouTubeTargetProfile | None = None, prepend: list[str] | None = None) -> str:
+    cfg = profile or get_youtube_target_profile()
+    chain = list(prepend or [])
+    chain.extend(
+        [
+            f"scale={cfg.width}:{cfg.height}:flags=lanczos",
+            "setsar=1",
+            f"fps={cfg.fps}",
+            "format=yuv420p",
+            "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+        ]
+    )
+    if cfg.sharpen:
+        chain.append("unsharp=5:5:0.6:5:5:0.0")
+    return ",".join(chain)
+
+
+def youtube_video_encode_args(profile: YouTubeTargetProfile | None = None) -> list[str]:
+    cfg = profile or get_youtube_target_profile()
+    gop = str(cfg.fps * 2)
+    if has_nvenc():
+        codec = "hevc_nvenc" if cfg.codec == "hevc" else "h264_nvenc"
+        args = [
+            "-c:v",
+            codec,
+            "-preset",
+            cfg.preset,
+            "-cq",
+            str(cfg.cq),
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            gop,
+            "-keyint_min",
+            gop,
+            "-bf",
+            "2",
+        ]
+        if cfg.codec == "h264":
+            args += ["-profile:v", "high"]
+    else:
+        args = [
+            "-c:v",
+            "libx264",
+            "-crf",
+            str(cfg.cq),
+            "-preset",
+            "slow",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            gop,
+            "-keyint_min",
+            gop,
+            "-profile:v",
+            "high",
+        ]
+    if cfg.force_cfr:
+        args += ["-vsync", "cfr", "-r", str(cfg.fps)]
+    args += [
+        "-colorspace",
+        "bt709",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+    ]
+    return args
 
 
 def _nvenc_quality_mode() -> str:
