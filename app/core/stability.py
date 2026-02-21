@@ -26,6 +26,7 @@ class StabilitySettings:
     max_gpu_util: int
     max_vram_util: int
     max_concurrency: int
+    max_concurrent_jobs: int
     cpu_max_util: int
     disable_overlap_encode: bool
     cuda_launch_blocking: int
@@ -45,6 +46,7 @@ def apply_startup_env_defaults() -> StabilitySettings:
     os.environ.setdefault("MONEYOS_MAX_GPU_UTIL", "80")
     os.environ.setdefault("MONEYOS_MAX_VRAM_UTIL", "85")
     os.environ.setdefault("MONEYOS_MAX_CONCURRENCY", "1")
+    os.environ.setdefault("MONEYOS_MAX_CONCURRENT_JOBS", os.getenv("MONEYOS_MAX_CONCURRENCY", "1"))
     os.environ.setdefault("MONEYOS_CPU_MAX_UTIL", "80")
     os.environ.setdefault("MONEYOS_DISABLE_OVERLAP_ENCODE", "1")
     os.environ.setdefault("MONEYOS_CUDA_LAUNCH_BLOCKING", "0")
@@ -61,11 +63,13 @@ def apply_startup_env_defaults() -> StabilitySettings:
 
 
 def resolve_stability_settings() -> StabilitySettings:
+    max_concurrency = int(os.getenv("MONEYOS_MAX_CONCURRENT_JOBS", os.getenv("MONEYOS_MAX_CONCURRENCY", "1")))
     return StabilitySettings(
         stability_mode=os.getenv("MONEYOS_STABILITY_MODE", "0") == "1",
         max_gpu_util=int(os.getenv("MONEYOS_MAX_GPU_UTIL", "80")),
         max_vram_util=int(os.getenv("MONEYOS_MAX_VRAM_UTIL", "85")),
-        max_concurrency=int(os.getenv("MONEYOS_MAX_CONCURRENCY", "1")),
+        max_concurrency=max_concurrency,
+        max_concurrent_jobs=max_concurrency,
         cpu_max_util=int(os.getenv("MONEYOS_CPU_MAX_UTIL", "80")),
         disable_overlap_encode=os.getenv("MONEYOS_DISABLE_OVERLAP_ENCODE", "1") == "1",
         cuda_launch_blocking=int(os.getenv("MONEYOS_CUDA_LAUNCH_BLOCKING", "0")),

@@ -6,102 +6,30 @@ import threading
 import time
 from dataclasses import dataclass
 
-import importlib.util
-
-_psutil_spec = importlib.util.find_spec("psutil")
-if _psutil_spec:
-    import psutil
-else:
-    psutil = None  # type: ignore[assignment]
-
-    class _PsutilMissing(Exception):
-        pass
-
-    class _ProcessStub:
-        def nice(self, _value: int) -> None:
-            raise _PsutilMissing("psutil not available")
-
-    class _VirtualMemoryStub:
-        percent = 0.0
-
-    class _PsutilStub:
-        AccessDenied = _PsutilMissing
-        BELOW_NORMAL_PRIORITY_CLASS = 0
-
-        @staticmethod
-        def Process() -> _ProcessStub:
-            return _ProcessStub()
-
-        @staticmethod
-        def cpu_percent(interval: float | None = None) -> float:
-            _ = interval
-            return 0.0
-
-        @staticmethod
-        def virtual_memory() -> _VirtualMemoryStub:
-            return _VirtualMemoryStub()
-
-    psutil = _PsutilStub()  # type: ignore[assignment]
-
-from app.config import performance
+from app.core.stability import resolve_stability_settings
 
 
-def _get_gpu_percent() -> float | None:
+def _nvidia_smi(query: str) -> list[float]:
     try:
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits"],
             capture_output=True,
             text=True,
             check=False,
             timeout=1,
         )
     except (OSError, subprocess.SubprocessError):
-        return None
-    values = []
+        return []
+    values: list[float] = []
     for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
+        raw = line.strip()
+        if not raw:
             continue
         try:
-            values.append(float(line))
+            values.append(float(raw))
         except ValueError:
             continue
-    if not values:
-        return None
-    return max(values)
-
-
-def _get_gpu_temp() -> float | None:
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=1,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    values = []
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            values.append(float(line))
-        except ValueError:
-            continue
-    if not values:
-        return None
-    return max(values)
-
-def _set_low_priority() -> None:
-    if os.name != "nt":
-        return
-    try:
-        psutil.Process().nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
-    except (psutil.AccessDenied, AttributeError):
-        return
+    return values
 
 
 @dataclass
@@ -109,19 +37,18 @@ class ResourceSnapshot:
     cpu_percent: float
     ram_percent: float
     gpu_percent: float | None
-    gpu_temp: float | None
+    vram_percent: float | None
 
 
 class ResourceGuard:
     def __init__(self, label: str) -> None:
         self.label = label
+        self.settings = resolve_stability_settings()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_log = 0.0
 
     def start(self) -> None:
-        _set_low_priority()
-        psutil.cpu_percent(interval=None)
         self._thread = threading.Thread(target=self._monitor, daemon=True)
         self._thread.start()
 
@@ -130,49 +57,69 @@ class ResourceGuard:
         if self._thread:
             self._thread.join(timeout=1.0)
 
+    def wait_if_limited(self) -> None:
+        while True:
+            snapshot = self._capture()
+            if not self._should_throttle(snapshot):
+                return
+            self._log(snapshot)
+            time.sleep(1.0)
+
     def _monitor(self) -> None:
         while not self._stop_event.is_set():
             snapshot = self._capture()
-            temp_limit = float(os.getenv("MONEYOS_GPU_TEMP_LIMIT", "83"))
-            if snapshot.gpu_temp is not None and snapshot.gpu_temp >= temp_limit:
-                self._log(snapshot)
-                time.sleep(5.0)
-                continue
             if self._should_throttle(snapshot):
                 self._log(snapshot)
-                time.sleep(performance.CHECK_INTERVAL_SEC)
-            time.sleep(performance.CHECK_INTERVAL_SEC)
+                time.sleep(1.0)
+            time.sleep(float(os.getenv("MONEYOS_RESOURCE_GUARD_INTERVAL", "0.8")))
 
     def _capture(self) -> ResourceSnapshot:
-        cpu = psutil.cpu_percent(interval=None)
-        ram = psutil.virtual_memory().percent
-        gpu = _get_gpu_percent()
-        gpu_temp = _get_gpu_temp()
-        return ResourceSnapshot(cpu_percent=cpu, ram_percent=ram, gpu_percent=gpu, gpu_temp=gpu_temp)
+        cpu_percent = 0.0
+        ram_percent = 0.0
+        try:
+            import psutil  # type: ignore
+
+            cpu_percent = float(psutil.cpu_percent(interval=None))
+            ram_percent = float(psutil.virtual_memory().percent)
+        except Exception:
+            pass
+
+        gpu_values = _nvidia_smi("utilization.gpu")
+        mem_used = _nvidia_smi("memory.used")
+        mem_total = _nvidia_smi("memory.total")
+        gpu_percent = max(gpu_values) if gpu_values else None
+        vram_percent = None
+        if mem_used and mem_total and max(mem_total) > 0:
+            vram_percent = max(mem_used) / max(mem_total) * 100.0
+
+        return ResourceSnapshot(
+            cpu_percent=cpu_percent,
+            ram_percent=ram_percent,
+            gpu_percent=gpu_percent,
+            vram_percent=vram_percent,
+        )
 
     def _should_throttle(self, snapshot: ResourceSnapshot) -> bool:
-        if snapshot.cpu_percent >= performance.MAX_CPU_PERCENT:
+        if snapshot.cpu_percent >= self.settings.cpu_max_util:
             return True
-        if snapshot.ram_percent >= performance.MAX_RAM_PERCENT:
+        if snapshot.gpu_percent is not None and snapshot.gpu_percent >= self.settings.max_gpu_util:
             return True
-        gpu_cap = int(os.getenv("MONEYOS_GPU_UTIL_CAP", "100"))
-        if gpu_cap < 100 and snapshot.gpu_percent is not None and snapshot.gpu_percent >= gpu_cap:
+        if snapshot.vram_percent is not None and snapshot.vram_percent >= self.settings.max_vram_util:
             return True
         return False
 
     def _log(self, snapshot: ResourceSnapshot) -> None:
         now = time.time()
-        if now - self._last_log < 2.5:
+        if now - self._last_log < 2.0:
             return
         self._last_log = now
-        gpu_value = "-" if snapshot.gpu_percent is None else f"{snapshot.gpu_percent:.0f}%"
-        gpu_temp = "-" if snapshot.gpu_temp is None else f"{snapshot.gpu_temp:.0f}C"
         print(
-            f"[ResourceGuard] Throttling: CPU={snapshot.cpu_percent:.0f}% "
-            f"RAM={snapshot.ram_percent:.0f}% GPU={gpu_value} TEMP={gpu_temp} "
-            f"(cap {performance.MAX_CPU_PERCENT}%)"
+            "[ResourceGuard] throttling "
+            f"label={self.label} cpu={snapshot.cpu_percent:.1f}/{self.settings.cpu_max_util} "
+            f"gpu={(snapshot.gpu_percent if snapshot.gpu_percent is not None else -1):.1f}/{self.settings.max_gpu_util} "
+            f"vram={(snapshot.vram_percent if snapshot.vram_percent is not None else -1):.1f}/{self.settings.max_vram_util}"
         )
 
 
 def monitored_threads() -> int:
-    return performance.ffmpeg_threads()
+    return max(1, int(os.getenv("MONEYOS_FFMPEG_THREADS", "2")))

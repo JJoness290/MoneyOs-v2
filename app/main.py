@@ -190,6 +190,8 @@ class TrueAiVideoRequest(BaseModel):
 @app.on_event("startup")
 def bootstrap_dependencies() -> None:
     stability = apply_startup_env_defaults()
+    status_payload = stability_status_payload()
+    current_metrics = status_payload.get("current_metrics", {})
     print_effective_settings_banner(
         heading="EFFECTIVE SETTINGS (STARTUP)",
         extra={
@@ -199,10 +201,19 @@ def bootstrap_dependencies() -> None:
                 "vram_fraction": stability.vram_fraction,
                 "pytorch_alloc_conf": stability.pytorch_alloc_conf,
             }
+            ,
+            "system": {
+                "gpu_util": current_metrics.get("gpu_util"),
+                "vram_util": current_metrics.get("vram_util"),
+                "cpu_util": current_metrics.get("cpu_util"),
+                "ram_util": current_metrics.get("ram_util"),
+                "encoder_mode": os.getenv("MONEYOS_ENCODER", "auto"),
+                "ram_mode": os.getenv("MONEYOS_RAM_MODE", "balanced"),
+            },
         },
     )
     print(f"[STABILITY] {stability}")
-    reg = stability_status_payload().get("registry", {})
+    reg = status_payload.get("registry", {})
     if reg.get("supported") and not reg.get("sufficient"):
         print("[STABILITY][WARN] TdrDelay/TdrDdiDelay are below recommended >=60. Configure Windows registry for long GPU workloads.")
     if "MONEYOS_USE_GPU" not in os.environ:

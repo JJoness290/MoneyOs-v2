@@ -1,46 +1,77 @@
-# MoneyOS Storage Policy (C:\ Only)
+# MoneyOS Storage Policy (C:\ only)
 
-MoneyOS now uses a centralized `StoragePolicy` (`app/core/storage_policy.py`) as the single source of truth for runtime paths.
+MoneyOS enforces a strict storage policy through `app/core/storage_policy.py`.
 
-## Default roots
+## Absolute rule
 
-When env vars are not provided, MoneyOS defaults to:
+- Storage root defaults to `C:\MoneyOS`.
+- All runtime storage must remain under `C:\MoneyOS\...`.
+- Any resolved `D:\...` path causes a fatal startup error.
+- Any resolved drive path outside `C:\MoneyOS\...` causes a fatal startup error.
 
-- `MONEYOS_ROOT = C:\MoneyOS`
-- `MONEYOS_ASSETS_ROOT = C:\MoneyOS\assets`
-- `MONEYOS_OUTPUT_ROOT = C:\MoneyOS\work`
-- `MONEYOS_CACHE_ROOT = C:\MoneyOS\cache`
-- `HF_HOME = C:\MoneyOS\cache\huggingface`
-- `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE = C:\MoneyOS\cache\huggingface\hub`
-- `HF_DATASETS_CACHE = C:\MoneyOS\cache\huggingface\datasets`
-- `TORCH_HOME = C:\MoneyOS\cache\torch`
-- `TRANSFORMERS_CACHE = C:\MoneyOS\cache\huggingface\hub`
-- `MONEYOS_TEMP_ROOT = C:\MoneyOS\tmp`
-- `TMP`, `TEMP`, `TMPDIR = C:\MoneyOS\tmp`
+## Root resolver
 
-## Startup behavior
+`resolve_moneyos_root()` resolves in this order:
 
-At startup, before loading heavy AI pipelines, MoneyOS:
+1. `MONEYOS_ROOT`
+2. default `C:\MoneyOS`
 
-1. Resolves policy defaults/overrides.
-2. Validates **no configured path points to `D:\`**.
-3. Validates key roots are under `C:\MoneyOS\...`.
-4. Sets process env vars (`os.environ`) for HF/Torch/temp/MoneyOS roots.
-5. Creates directories and sets `tempfile.tempdir`.
+## Required structure
 
-If a policy violation is detected, MoneyOS raises a fatal error:
+- `C:\MoneyOS`
+- `C:\MoneyOS\assets`
+- `C:\MoneyOS\work`
+- `C:\MoneyOS\cache`
+- `C:\MoneyOS\cache\huggingface`
+- `C:\MoneyOS\tmp`
+- `C:\MoneyOS\logs`
 
-`StoragePolicy violation: attempted to use D:\... (must use C:\MoneyOS\...)`
+## HuggingFace / Torch cache priority
 
-## Effective settings visibility
+`HF hub cache` is selected using this precedence:
 
-MoneyOS prints an `EFFECTIVE SETTINGS` banner:
+1. `HF_HUB_CACHE`
+2. `HF_HOME`
+3. `HUGGINGFACE_HUB_CACHE`
+4. `HF_DATASETS_CACHE`
+5. `TORCH_HOME`
+6. `XDG_CACHE_HOME`
+7. fallback `C:\MoneyOS\cache\huggingface\hub`
 
-- on startup
-- on each TrueAI job start
+## Env defaults applied at startup
 
-The same payload is written as JSON to each TrueAI job directory:
+MoneyOS sets these with `os.environ.setdefault(...)` before heavy model loading:
+
+- `HF_HOME`
+- `HF_HUB_CACHE`
+- `HF_DATASETS_CACHE`
+- `TRANSFORMERS_CACHE`
+- `TORCH_HOME`
+- `TEMP`
+- `TMP`
+- `TMPDIR`
+- `MONEYOS_ASSETS_ROOT`
+- `MONEYOS_OUTPUT_ROOT`
+- `MONEYOS_CACHE_ROOT`
+
+## Path validator
+
+`validate_storage_path(path)` enforces policy:
+
+- rejects `D:\...`
+- rejects paths outside `C:\MoneyOS\...`
+- creates missing directories
+
+Applied roots include assets, work/output, cache, huggingface, tmp, and logs.
+
+## Effective settings output
+
+At startup and at TrueAI job start, MoneyOS prints:
+
+`=== MONEYOS EFFECTIVE SETTINGS ===`
+
+including storage paths, env values, and stability/runtime settings.
+
+Each TrueAI job also writes:
 
 - `settings_effective.json`
-
-This includes storage policy paths + source (`default` or env key), key env vars, and stability settings.
