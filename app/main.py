@@ -187,6 +187,13 @@ class TrueAiVideoRequest(BaseModel):
     prompt: str = "anime action sequence in a futuristic city"
 
 
+class AnimeEpisodeAutoRequest(BaseModel):
+    topic_seed: str = "Rogue AI awakens in Neo-Tokyo"
+    minutes: int = 10
+    voice_ref_wav_path: Optional[str] = None
+    language: str = "en"
+
+
 @app.on_event("startup")
 def bootstrap_dependencies() -> None:
     stability = apply_startup_env_defaults()
@@ -804,6 +811,31 @@ def _build_phase25_shot_plan(target_seconds: float) -> list[dict]:
 
 
 
+def _run_anime_episode_auto(job_id: str, req: AnimeEpisodeAutoRequest) -> None:
+    from app.core.episode_auto import run_auto_anime_episode  # noqa: WPS433
+
+    try:
+        _set_status(job_id, "script", stage_key="script", progress_pct=5)
+        out_dir = OUTPUT_DIR / "anime_episode_auto" / job_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        final_video = run_auto_anime_episode(
+            out_dir,
+            topic_seed=req.topic_seed,
+            minutes=req.minutes,
+            language=req.language,
+            voice_ref_wav_path=req.voice_ref_wav_path,
+        )
+        _set_status(
+            job_id,
+            "Complete",
+            stage_key="done",
+            progress_pct=100,
+            extra={"clip": str(final_video), "output_dir": str(out_dir)},
+        )
+    except Exception as exc:  # noqa: BLE001
+        _set_error(job_id, f"Error: {exc}")
+
+
 def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: str | None = None) -> None:
     from app.core.visuals.anime_trueai_video.pipeline import run_trueai_60s_job  # noqa: WPS433
     print("[TRUEAI][ENTRY] file=app/main.py func=_run_trueai_video_60s -> app/core/visuals/anime_trueai_video/pipeline.py:run_trueai_60s_job")
@@ -1412,6 +1444,36 @@ async def generate_anime_trueai_quality(req: TrueAiVideoRequest = Body(default=T
     thread.start()
     out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
     return JSONResponse({"job_id": job_id, "output_dir": str(out_dir.resolve()), "preset": "quality"})
+
+@app.post("/jobs/anime-episode-auto")
+async def generate_anime_episode_auto(req: AnimeEpisodeAutoRequest = Body(default=AnimeEpisodeAutoRequest())) -> JSONResponse:
+    job_id = uuid.uuid4().hex
+    _set_status(job_id, "queued", stage_key="script", progress_pct=1)
+    thread = threading.Thread(target=_run_anime_episode_auto, args=(job_id, req), daemon=True)
+    thread.start()
+    out_dir = OUTPUT_DIR / "anime_episode_auto" / job_id
+    return JSONResponse({"job_id": job_id, "output_dir": str(out_dir.resolve())})
+
+
+@app.get("/debug/voice")
+def debug_voice() -> JSONResponse:
+    try:
+        import torch  # noqa: WPS433
+
+        cuda_available = bool(torch.cuda.is_available())
+    except Exception:
+        cuda_available = False
+    return JSONResponse(
+        {
+            "backend": os.getenv("MONEYOS_TTS_BACKEND", "xtts"),
+            "model": os.getenv("MONEYOS_TTS_MODEL", "tts_models/multilingual/multi-dataset/xtts_v2"),
+            "device": os.getenv("MONEYOS_TTS_DEVICE", "auto"),
+            "cuda_available": cuda_available,
+            "voice_convert": os.getenv("MONEYOS_VOICE_CONVERT", "0") == "1",
+            "rvc_model_path": os.getenv("MONEYOS_RVC_MODEL_PATH", ""),
+        }
+    )
+
 
 @app.post("/jobs/ai-video-60s")
 async def generate_ai_video_60s(req: AiVideoRequest = Body(...)) -> JSONResponse:
