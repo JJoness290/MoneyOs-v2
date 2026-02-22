@@ -34,10 +34,8 @@ For anime-trueai pipeline output MP4s:
 ## Smoothing modes
 
 - `MONEYOS_YT_SMOOTH=none` (default, no interpolation)
-- `MONEYOS_YT_SMOOTH=blend_strong` (stronger denoise + temporal smoothing)
+- `MONEYOS_YT_SMOOTH=blend` (temporal blending: `tblend=all_mode=average,fps=60`)
 - `MONEYOS_YT_SMOOTH=minterp` (optical flow interpolation, opt-in)
-- `MONEYOS_YT_SMOOTH=blend` (lighter denoise + temporal smoothing)
-- `MONEYOS_YT_SMOOTH=off` (no interpolation; fps conversion by duplication)
 
 ## Probe command
 

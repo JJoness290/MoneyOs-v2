@@ -62,7 +62,9 @@ def get_youtube_target_profile() -> YouTubeTargetProfile:
     minterp_alias = os.getenv("MONEYOS_YT_MINTERP")
     if minterp_alias is not None and minterp_alias == "1":
         smooth_mode = "minterp"
-    if smooth_mode not in {"off", "none", "blend", "blend_strong", "minterp"}:
+    if smooth_mode == "off":
+        smooth_mode = "none"
+    if smooth_mode not in {"none", "blend", "minterp"}:
         smooth_mode = "none"
     stabilize = os.getenv("MONEYOS_YT_STABILIZE", "1") == "1"
     stabilize_only_final = os.getenv("MONEYOS_YT_STAB_ONLY_FINAL", "1") == "1"
@@ -94,11 +96,9 @@ def youtube_video_filter(
     if apply_smoothing:
         if cfg.smooth_mode == "minterp":
             chain.append(f"minterpolate=fps={cfg.fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1")
-        elif cfg.smooth_mode == "blend_strong":
-            chain.extend(["hqdn3d=2.0:2.0:4:4", "tmix=frames=5:weights='1 2 2 2 1'", f"fps={cfg.fps}"])
         elif cfg.smooth_mode == "blend":
-            chain.extend(["hqdn3d=1.5:1.5:3:3", "tmix=frames=3:weights='1 2 1'", f"fps={cfg.fps}"])
-        elif cfg.smooth_mode in {"off", "none"}:
+            chain.extend(["tblend=all_mode=average", f"fps={cfg.fps}"])
+        elif cfg.smooth_mode == "none":
             chain.append(f"fps={cfg.fps}")
         else:
             chain.append(f"fps={cfg.fps}")
@@ -120,6 +120,8 @@ def youtube_video_encode_args(profile: YouTubeTargetProfile | None = None) -> li
             codec,
             "-preset",
             cfg.preset,
+            "-rc:v",
+            "vbr_hq",
             "-cq",
             str(cfg.cq),
             "-b:v",

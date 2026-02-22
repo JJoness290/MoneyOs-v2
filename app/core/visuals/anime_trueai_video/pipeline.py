@@ -327,9 +327,9 @@ def run_trueai_60s_job(
     height = _multiple_of_8(cfg.height)
     guidance = cfg.guidance
     try:
-        clip_seconds = max(1.0, float(os.getenv("MONEYOS_TRUEAI_CLIP_SECONDS", "10")))
+        clip_seconds = max(1, int(os.getenv("MONEYOS_TRUEAI_CLIP_SECONDS", "10")))
     except ValueError:
-        clip_seconds = 10.0
+        clip_seconds = 10
     frames_per_clip = max(8, int(round(fps * clip_seconds)))
     clip_count = int(math.ceil(total_seconds / clip_seconds))
     seed = int(os.getenv("MONEYOS_TRUEAI_SEED", "777"))
@@ -393,11 +393,8 @@ def run_trueai_60s_job(
     print(f"[TRUEAI][YT] fps={yt_target.fps} smooth={yt_target.smooth_mode} vf=\"{yt_vf}\"")
     print(f"[TRUEAI] clip_seconds={clip_seconds:g} infer_fps={fps} frames={frames_per_clip}")
     stab_supported = has_vidstab_filters()
-    print(
-        f"[YT] target={yt_target.width}x{yt_target.height}@{yt_target.fps} "
-        f"smooth={yt_target.smooth_mode} stabilize={'on' if yt_target.stabilize else 'off'} "
-        f"supported={stab_supported} only_final={yt_target.stabilize_only_final}"
-    )
+    print(f"[YT] target={yt_target.width}x{yt_target.height}@{yt_target.fps} stabilize={'on' if yt_target.stabilize else 'off'} smooth={yt_target.smooth_mode}")
+    print(f"[YT] vidstab_supported={stab_supported}")
     print("[TRUEAI][YT] If you want optical-flow interpolation: set MONEYOS_YT_SMOOTH=minterp")
     print(f"[TRUEAI][YT] target={yt_target.width}x{yt_target.height}@{yt_target.fps} codec={yt_target.codec} cq={yt_target.cq}")
     super_resolution_enabled = bool(cfg.super_resolution and not FASTTEST)

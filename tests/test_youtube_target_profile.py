@@ -34,7 +34,7 @@ def test_youtube_filter_blend_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MONEYOS_YT_TARGET", "1080p60")
     monkeypatch.setenv("MONEYOS_YT_SMOOTH", "blend")
     filt = youtube_video_filter()
-    assert "tmix=frames=3:weights='1 2 1'" in filt
+    assert "tblend=all_mode=average" in filt
     assert "fps=60" in filt
 
 
@@ -44,9 +44,7 @@ def test_youtube_filter_minterp_optin(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "minterpolate=fps=60" in filt
 
 
-def test_youtube_filter_blend_strong_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MONEYOS_YT_TARGET", "1080p60")
-    monkeypatch.setenv("MONEYOS_YT_SMOOTH", "blend_strong")
-    filt = youtube_video_filter()
-    assert "hqdn3d=2.0:2.0:4:4" in filt
-    assert "tmix=frames=5:weights='1 2 2 2 1'" in filt
+def test_youtube_filter_off_aliases_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MONEYOS_YT_SMOOTH", "off")
+    profile = get_youtube_target_profile()
+    assert profile.smooth_mode == "none"
