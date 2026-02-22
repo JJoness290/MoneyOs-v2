@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import traceback
 import asyncio
 import uuid
 import hashlib
@@ -811,29 +812,75 @@ def _build_phase25_shot_plan(target_seconds: float) -> list[dict]:
 
 
 
+def _anime_auto_job_dir(job_id: str) -> Path:
+    return OUTPUT_DIR / "anime_episode_auto" / job_id
+
+
+def _anime_auto_log_paths(job_id: str) -> tuple[Path, Path, Path, Path]:
+    job_dir = _anime_auto_job_dir(job_id)
+    logs_dir = job_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    return job_dir, logs_dir, logs_dir / "job.log", logs_dir / "error.log"
+
+
+def _append_job_log(path: Path, message: str) -> None:
+    ts = datetime.utcnow().isoformat() + "Z"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"[{ts}] {message}\n")
+
+
+def _write_auto_error_payload(job_id: str, stage: str, exc: Exception, traceback_text: str, error_file: Path) -> dict:
+    payload = {
+        "job_id": job_id,
+        "stage": stage,
+        "error_type": type(exc).__name__,
+        "error_message": str(exc),
+        "traceback": traceback_text,
+        "ts_utc": datetime.utcnow().isoformat() + "Z",
+    }
+    error_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
 def _run_anime_episode_auto(job_id: str, req: AnimeEpisodeAutoRequest) -> None:
     from app.core.episode_auto import run_auto_anime_episode  # noqa: WPS433
 
+    job_dir, _logs_dir, job_log, error_log = _anime_auto_log_paths(job_id)
+    _append_job_log(job_log, f"job_start topic_seed={req.topic_seed!r} minutes={req.minutes} language={req.language}")
+    stage = "bootstrap"
     try:
+        stage = "script"
         _set_status(job_id, "script", stage_key="script", progress_pct=5)
-        out_dir = OUTPUT_DIR / "anime_episode_auto" / job_id
-        out_dir.mkdir(parents=True, exist_ok=True)
         final_video = run_auto_anime_episode(
-            out_dir,
+            job_dir,
             topic_seed=req.topic_seed,
             minutes=req.minutes,
             language=req.language,
             voice_ref_wav_path=req.voice_ref_wav_path,
         )
+        _append_job_log(job_log, f"job_complete final_video={final_video}")
         _set_status(
             job_id,
             "Complete",
             stage_key="done",
             progress_pct=100,
-            extra={"clip": str(final_video), "output_dir": str(out_dir)},
+            extra={"clip": str(final_video), "output_dir": str(job_dir)},
         )
     except Exception as exc:  # noqa: BLE001
-        _set_error(job_id, f"Error: {exc}")
+        traceback_text = traceback.format_exc()
+        _append_job_log(job_log, f"job_error stage={stage} error={type(exc).__name__}: {exc}")
+        error_log.write_text(traceback_text, encoding="utf-8")
+        error_payload = _write_auto_error_payload(job_id, stage, exc, traceback_text, job_dir / "error.json")
+        _set_error(
+            job_id,
+            f"Error: {exc}",
+            extra={
+                "error_file": str((job_dir / "error.json").resolve()),
+                "error_stage": stage,
+                "error_type": error_payload["error_type"],
+            },
+        )
 
 
 def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: str | None = None) -> None:
@@ -1538,6 +1585,30 @@ async def job_diagnostics(job_id: str) -> JSONResponse:
         "events": str(output_dir / "diagnostics" / "nvlddmkm_events.log"),
     }
     return JSONResponse(diag)
+
+
+@app.get("/debug/jobs/{job_id}/error")
+def debug_job_error(job_id: str) -> JSONResponse:
+    job_dir = _anime_auto_job_dir(job_id)
+    error_file = job_dir / "error.json"
+    if not error_file.exists():
+        return JSONResponse({"ok": False, "job_id": job_id, "reason": "no error recorded"})
+    try:
+        payload = json.loads(error_file.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"ok": False, "job_id": job_id, "reason": f"failed to parse error file: {exc}"})
+    return JSONResponse(
+        {
+            "ok": True,
+            "job_id": job_id,
+            "error_file": str(error_file.resolve()),
+            "error_type": payload.get("error_type"),
+            "error_message": payload.get("error_message"),
+            "traceback": str(payload.get("traceback", ""))[:4000],
+            "stage": payload.get("stage"),
+            "ts_utc": payload.get("ts_utc"),
+        }
+    )
 
 
 @app.get("/events/{job_id}")

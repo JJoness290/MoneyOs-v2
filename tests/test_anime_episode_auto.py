@@ -18,3 +18,19 @@ def test_render_plan_duration_matches_audio(tmp_path):
     _, plan = build_prompts_and_render_plan(script, timestamps, tmp_path)
     total = sum(float(s["duration_sec"]) for s in plan["shots"])
     assert abs(total - 60.0) <= 0.25
+
+
+from app.core.audio.tts_xtts import MoneyOSValidationError, _normalize_xtts_model_name
+
+
+def test_xtts_model_alias_accepts_two_fields():
+    assert _normalize_xtts_model_name("coqui/XTTS-v2") == "tts_models/multilingual/multi-dataset/xtts_v2"
+
+
+def test_xtts_model_invalid_two_fields_raises_actionable_error():
+    try:
+        _normalize_xtts_model_name("bad/model")
+    except MoneyOSValidationError as exc:
+        assert "MONEYOS_TTS_MODEL" in str(exc)
+    else:
+        raise AssertionError("expected MoneyOSValidationError")
