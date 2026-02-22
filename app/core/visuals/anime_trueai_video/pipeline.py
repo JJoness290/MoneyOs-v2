@@ -95,6 +95,24 @@ def _ffprobe_video(path: Path) -> dict[str, str]:
     return payload
 
 
+def _fps_ratio_to_float(value: str | None) -> float | None:
+    if not value:
+        return None
+    if "/" in value:
+        left, right = value.split("/", 1)
+        try:
+            den = float(right)
+            if den == 0:
+                return None
+            return float(left) / den
+        except ValueError:
+            return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
 def _has_audio_stream(path: Path) -> bool:
     cmd = [
         "ffprobe",
@@ -112,7 +130,15 @@ def _has_audio_stream(path: Path) -> bool:
     return proc.returncode == 0 and bool((proc.stdout or "").strip())
 
 
-def _encode_youtube_mp4(input_path: Path, output_path: Path, extra_filters: list[str] | None = None, duration_s: float | None = None) -> None:
+def _encode_youtube_mp4(
+    input_path: Path,
+    output_path: Path,
+    extra_filters: list[str] | None = None,
+    duration_s: float | None = None,
+    *,
+    apply_smoothing: bool = True,
+    force_x264: bool = False,
+) -> None:
     if not input_path.exists():
         parent = input_path.parent
         contents = sorted([p.name for p in parent.iterdir()]) if parent.exists() else []
@@ -121,7 +147,7 @@ def _encode_youtube_mp4(input_path: Path, output_path: Path, extra_filters: list
             f"input={input_path} dir={parent} contents={contents}"
         )
     cfg = get_youtube_target_profile()
-    vf = youtube_video_filter(cfg, prepend=extra_filters)
+    vf = youtube_video_filter(cfg, prepend=extra_filters, apply_smoothing=apply_smoothing)
     args = ["-i", str(input_path)]
     if duration_s is not None:
         args += ["-t", f"{duration_s:.3f}"]
@@ -133,6 +159,11 @@ def _encode_youtube_mp4(input_path: Path, output_path: Path, extra_filters: list
         vf,
         *youtube_video_encode_args(cfg),
     ]
+    if force_x264:
+        args = [
+            part if part not in {"h264_nvenc", "hevc_nvenc"} else "libx264"
+            for part in args
+        ]
     if has_audio:
         args += ["-map", "0:a:0?", "-c:a", "copy"]
     args += [
@@ -145,10 +176,27 @@ def _encode_youtube_mp4(input_path: Path, output_path: Path, extra_filters: list
 
 def _ensure_youtube_clip(yt_src: Path, yt_out: Path, duration_s: float) -> Path:
     yt_out.parent.mkdir(parents=True, exist_ok=True)
+    cfg = get_youtube_target_profile()
     try:
-        _encode_youtube_mp4(yt_src, yt_out, duration_s=duration_s)
+        _encode_youtube_mp4(yt_src, yt_out, duration_s=duration_s, apply_smoothing=True)
     except Exception as exc:  # noqa: BLE001
         print(f"[TRUEAI][YT][WARN] make_clip failed src={yt_src} out={yt_out} reason={exc}")
+    probe = _ffprobe_video(yt_out) if yt_out.exists() else {}
+    fps_value = _fps_ratio_to_float(probe.get("avg_frame_rate") or probe.get("r_frame_rate"))
+    needs_fix = not (
+        yt_out.exists()
+        and probe.get("width") == str(cfg.width)
+        and probe.get("height") == str(cfg.height)
+        and probe.get("pix_fmt") == "yuv420p"
+        and fps_value is not None
+        and abs(fps_value - cfg.fps) < 0.1
+    )
+    if needs_fix:
+        print(f"[TRUEAI][YT][WARN] clip probe mismatch, retry libx264 src={yt_src} out={yt_out} probe={probe}")
+        try:
+            _encode_youtube_mp4(yt_src, yt_out, duration_s=duration_s, apply_smoothing=True, force_x264=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[TRUEAI][YT][WARN] libx264 retry failed src={yt_src} out={yt_out} reason={exc}")
     print(f"[TRUEAI][YT] make_clip src={yt_src} out={yt_out} exists_out={yt_out.exists()}")
     return yt_out if yt_out.exists() else yt_src
 
@@ -313,6 +361,8 @@ def run_trueai_60s_job(
     print(f"[TRUEAI] steps={steps}")
     print(f"[TRUEAI] guidance={guidance}")
     print(f"[TRUEAI] super_resolution={'ON' if cfg.super_resolution else 'OFF'}")
+    yt_vf = youtube_video_filter(yt_target, apply_smoothing=True)
+    print(f"[TRUEAI][YT] default=1080p60 smooth={yt_target.smooth_mode} vf=\"{yt_vf}\"")
     print(f"[TRUEAI][YT] target={yt_target.width}x{yt_target.height}@{yt_target.fps} codec={yt_target.codec} cq={yt_target.cq}")
     super_resolution_enabled = bool(cfg.super_resolution and not FASTTEST)
 
@@ -467,7 +517,7 @@ def run_trueai_60s_job(
         source_for_final = run_super_resolution(stitched, scale=2, fps=yt_target.fps)
 
     target_video = final_dir / "video_out.mp4"
-    _encode_youtube_mp4(source_for_final, target_video, duration_s=total_seconds)
+    _encode_youtube_mp4(source_for_final, target_video, duration_s=total_seconds, apply_smoothing=False)
 
     if status_callback:
         status_callback("muxing")

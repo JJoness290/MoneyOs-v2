@@ -5,11 +5,13 @@
 ## Defaults
 
 - `MONEYOS_YT_TARGET=1080p60` (default)
+- `MONEYOS_YT_FPS=60` (default)
 - `MONEYOS_YT_CODEC=h264` (default)
 - `MONEYOS_YT_CQ=18`
 - `MONEYOS_YT_PRESET=p7`
 - `MONEYOS_YT_FORCE_CFR=1`
 - `MONEYOS_YT_SHARPEN=0`
+- `MONEYOS_YT_SMOOTH=minterp` (default)
 
 Optional UHD target:
 
@@ -25,6 +27,12 @@ For anime-trueai pipeline output MP4s:
 - bt709 color metadata
 - AAC audio at 48kHz, 320k
 - `+faststart`
+
+## Smoothing modes
+
+- `MONEYOS_YT_SMOOTH=minterp` (default, optical flow, smoothest)
+- `MONEYOS_YT_SMOOTH=blend` (lighter smoothing)
+- `MONEYOS_YT_SMOOTH=off` (no interpolation; fps conversion by duplication)
 
 ## Probe command
 

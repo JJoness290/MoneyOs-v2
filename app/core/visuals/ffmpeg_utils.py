@@ -25,6 +25,7 @@ class YouTubeTargetProfile:
     preset: str
     force_cfr: bool
     sharpen: bool
+    smooth_mode: str
 
 
 def get_youtube_target_profile() -> YouTubeTargetProfile:
@@ -34,6 +35,12 @@ def get_youtube_target_profile() -> YouTubeTargetProfile:
     else:
         width, height, fps = 1920, 1080, 60
         target = "1080p60"
+    try:
+        fps = int(os.getenv("MONEYOS_YT_FPS", str(fps)))
+    except ValueError:
+        fps = 60
+    if fps not in {24, 30, 60}:
+        fps = 60
     codec_env = os.getenv("MONEYOS_YT_CODEC", "h264").strip().lower()
     codec = "hevc" if codec_env in {"hevc", "h265"} else "h264"
     try:
@@ -48,6 +55,9 @@ def get_youtube_target_profile() -> YouTubeTargetProfile:
         sharpen = int(os.getenv("MONEYOS_YT_SHARPEN", "0")) == 1
     except ValueError:
         sharpen = False
+    smooth_mode = os.getenv("MONEYOS_YT_SMOOTH", "minterp").strip().lower()
+    if smooth_mode not in {"off", "blend", "minterp"}:
+        smooth_mode = "minterp"
     return YouTubeTargetProfile(
         target_name=target,
         width=width,
@@ -58,21 +68,29 @@ def get_youtube_target_profile() -> YouTubeTargetProfile:
         preset=os.getenv("MONEYOS_YT_PRESET", "p7"),
         force_cfr=force_cfr,
         sharpen=sharpen,
+        smooth_mode=smooth_mode,
     )
 
 
-def youtube_video_filter(profile: YouTubeTargetProfile | None = None, prepend: list[str] | None = None) -> str:
+def youtube_video_filter(
+    profile: YouTubeTargetProfile | None = None,
+    prepend: list[str] | None = None,
+    *,
+    apply_smoothing: bool = True,
+) -> str:
     cfg = profile or get_youtube_target_profile()
     chain = list(prepend or [])
-    chain.extend(
-        [
-            f"scale={cfg.width}:{cfg.height}:flags=lanczos",
-            "setsar=1",
-            f"fps={cfg.fps}",
-            "format=yuv420p",
-            "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709",
-        ]
-    )
+    chain.extend([f"scale={cfg.width}:{cfg.height}:flags=lanczos", "setsar=1"])
+    if apply_smoothing:
+        if cfg.smooth_mode == "minterp":
+            chain.append(f"minterpolate=fps={cfg.fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1")
+        elif cfg.smooth_mode == "blend":
+            chain.extend(["tmix=frames=3:weights='1 2 1'", "hqdn3d=1.5:1.5:3:3", f"fps={cfg.fps}"])
+        else:
+            chain.append(f"fps={cfg.fps}")
+    else:
+        chain.append(f"fps={cfg.fps}")
+    chain.extend(["format=yuv420p", "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709"])
     if cfg.sharpen:
         chain.append("unsharp=5:5:0.6:5:5:0.0")
     return ",".join(chain)
@@ -121,7 +139,7 @@ def youtube_video_encode_args(profile: YouTubeTargetProfile | None = None) -> li
             "high",
         ]
     if cfg.force_cfr:
-        args += ["-vsync", "cfr", "-r", str(cfg.fps)]
+        args += ["-vsync", "cfr"]
     args += [
         "-colorspace",
         "bt709",
