@@ -21,6 +21,39 @@ class XTTSHandle:
     backend: str
 
 
+def resolve_tts_license_mode() -> str:
+    return os.getenv("MONEYOS_TTS_LICENSE", "none").strip().lower()
+
+
+def configure_xtts_runtime_env(cache_root: Path) -> dict[str, str]:
+    cache_root = Path(cache_root)
+    tts_home = cache_root / "tts"
+    xdg_cache_home = cache_root
+    appdata_dir = cache_root / "appdata"
+    tts_home.mkdir(parents=True, exist_ok=True)
+    xdg_cache_home.mkdir(parents=True, exist_ok=True)
+    appdata_dir.mkdir(parents=True, exist_ok=True)
+
+    license_mode = resolve_tts_license_mode()
+    if license_mode not in {"cpml", "commercial"}:
+        raise MoneyOSValidationError(
+            "MONEYOS_TTS_LICENSE must be set to 'cpml' (or 'commercial' if you have that entitlement) "
+            "to run XTTS headlessly. Refusing to start interactive TTS prompt."
+        )
+
+    env_updates = {
+        "TTS_HOME": str(tts_home),
+        "XDG_CACHE_HOME": str(xdg_cache_home),
+        "APPDATA": str(appdata_dir),
+        "MONEYOS_TTS_LICENSE": license_mode,
+    }
+    if license_mode == "cpml":
+        env_updates["COQUI_TOS_AGREED"] = "1"
+    for key, value in env_updates.items():
+        os.environ[key] = value
+    return env_updates
+
+
 def _resolve_device() -> str:
     desired = os.getenv("MONEYOS_TTS_DEVICE", "auto").strip().lower()
     if desired in {"cuda", "cpu"}:
@@ -63,7 +96,10 @@ def _normalize_xtts_model_name(model_name: str) -> str:
 
 
 def load_xtts(model_cache_dir: Path) -> XTTSHandle:
+    env_updates = configure_xtts_runtime_env(model_cache_dir.parent if model_cache_dir.name == "tts" else model_cache_dir)
     model_cache_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[VOICE] XTTS cache home set to {env_updates['TTS_HOME']}")
+    print(f"[VOICE] XTTS model files will be downloaded to {env_updates['TTS_HOME']} if missing")
     device = _resolve_device()
     try:
         from TTS.api import TTS  # type: ignore

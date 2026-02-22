@@ -55,6 +55,7 @@ from app.core.assets.starter_characters import ensure_starter_characters_install
 from app.core.net.downloads import get_last_download_diagnostics
 from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, status as autopilot_status
 from app.core.bootstrap import ensure_dependencies
+from app.core.audio.tts_xtts import resolve_tts_license_mode
 from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
 from app.core.visuals.anime_3d.animation_library import rebuild_animation_library
 from app.core.visuals.anime_3d.blender_runner import detect_blender
@@ -1510,6 +1511,7 @@ def debug_voice() -> JSONResponse:
         cuda_available = bool(torch.cuda.is_available())
     except Exception:
         cuda_available = False
+    license_mode = resolve_tts_license_mode()
     return JSONResponse(
         {
             "backend": os.getenv("MONEYOS_TTS_BACKEND", "xtts"),
@@ -1518,6 +1520,11 @@ def debug_voice() -> JSONResponse:
             "cuda_available": cuda_available,
             "voice_convert": os.getenv("MONEYOS_VOICE_CONVERT", "0") == "1",
             "rvc_model_path": os.getenv("MONEYOS_RVC_MODEL_PATH", ""),
+            "tts_home": os.getenv("TTS_HOME", ""),
+            "xdg_cache_home": os.getenv("XDG_CACHE_HOME", ""),
+            "appdata": os.getenv("APPDATA", ""),
+            "tos_accepted": os.getenv("COQUI_TOS_AGREED", "0") == "1",
+            "license_mode": license_mode,
         }
     )
 
