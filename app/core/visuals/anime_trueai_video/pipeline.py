@@ -316,6 +316,26 @@ def run_trueai_60s_job(
     width = _multiple_of_8(cfg.width)
     height = _multiple_of_8(cfg.height)
     guidance = cfg.guidance
+
+    try:
+        env_w = int(os.getenv("MONEYOS_TRUEAI_WIDTH", "0") or 0)
+    except ValueError:
+        env_w = 0
+    try:
+        env_h = int(os.getenv("MONEYOS_TRUEAI_HEIGHT", "0") or 0)
+    except ValueError:
+        env_h = 0
+    try:
+        env_steps = int(os.getenv("MONEYOS_TRUEAI_STEPS", "0") or 0)
+    except ValueError:
+        env_steps = 0
+
+    if env_w > 0 and env_h > 0:
+        width = _multiple_of_8(env_w)
+        height = _multiple_of_8(env_h)
+    if env_steps > 0:
+        steps = env_steps
+
     clip_seconds = get_trueai_clip_seconds()
     max_frames = 48
     chunk_seconds = max_frames / max(fps, 1)
@@ -375,6 +395,12 @@ def run_trueai_60s_job(
     if FASTTEST:
         print("[TRUEAI] FASTTEST ACTIVE — MAX SPEED MODE")
     print(f"[TRUEAI] preset={cfg.name}")
+    print(
+        "[TRUEAI] env_overrides "
+        f"width={env_w if env_w > 0 else 'preset'} "
+        f"height={env_h if env_h > 0 else 'preset'} "
+        f"steps={env_steps if env_steps > 0 else 'preset'}"
+    )
     print(f"[TRUEAI] resolution={width}x{height}")
     print(f"[TRUEAI] steps={steps}")
     print(f"[TRUEAI] guidance={guidance}")
