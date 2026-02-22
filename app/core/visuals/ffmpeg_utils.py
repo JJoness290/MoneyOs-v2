@@ -361,6 +361,9 @@ def _verify_nvenc_h264_output(output_path: Path, log_path: Path | None = None) -
     warn = "[FFmpeg] NVENC output verification failed; auto-fallback to safe libx264 encode"
     print(warn)
     _append_log(log_path, warn)
+    pre = f"[FFmpeg] safe re-encode input_path={output_path} exists={output_path.exists()}"
+    print(pre)
+    _append_log(log_path, pre)
     _reencode_safe_x264(output_path, log_path)
 
 
@@ -394,10 +397,6 @@ def run_ffmpeg(
                 status_callback(error_message)
             _append_log(log_path, error_message)
             raise RuntimeError(error_message)
-        if "h264_nvenc" in args:
-            out_path = Path(str(args[-1]))
-            if out_path.suffix.lower() == ".mp4":
-                _verify_nvenc_h264_output(out_path, log_path)
         print(f"[ResourceGuard] FFmpeg command length: {cmd_len}")
         command = " ".join(args)
         print("[ResourceGuard] FFmpeg command:", command)

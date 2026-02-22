@@ -143,6 +143,16 @@ def _encode_youtube_mp4(input_path: Path, output_path: Path, extra_filters: list
     _ffmpeg(*args)
 
 
+def _ensure_youtube_clip(yt_src: Path, yt_out: Path, duration_s: float) -> Path:
+    yt_out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _encode_youtube_mp4(yt_src, yt_out, duration_s=duration_s)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[TRUEAI][YT][WARN] make_clip failed src={yt_src} out={yt_out} reason={exc}")
+    print(f"[TRUEAI][YT] make_clip src={yt_src} out={yt_out} exists_out={yt_out.exists()}")
+    return yt_out if yt_out.exists() else yt_src
+
+
 def _mux_youtube_with_audio(video_path: Path, audio_path: Path, output_path: Path, duration_s: float) -> None:
     _ffmpeg(
         "-i",
@@ -427,9 +437,7 @@ def run_trueai_60s_job(
         if not normalize_source.exists():
             normalize_source = clip_path
         yt_clip_path = clips_dir / f"clip_{idx:02d}_yt.mp4"
-        _encode_youtube_mp4(normalize_source, yt_clip_path, duration_s=request.seconds)
-        print(f"[TRUEAI][YT] yt_src={normalize_source} yt_out={yt_clip_path} exists_out={yt_clip_path.exists()}")
-        clip_path = yt_clip_path if yt_clip_path.exists() else normalize_source
+        clip_path = _ensure_youtube_clip(normalize_source, yt_clip_path, request.seconds)
         generated.append(clip_path)
 
     if status_callback:
