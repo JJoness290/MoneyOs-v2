@@ -12,6 +12,7 @@ from src.utils.cmdlen import estimate_windows_cmd_length
 from src.utils.ffmpeg_script_mode import maybe_externalize_filter_graph
 
 StatusCallback = Callable[[str], None] | None
+_FILTERS_CACHE: str | None = None
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,8 @@ class YouTubeTargetProfile:
     force_cfr: bool
     sharpen: bool
     smooth_mode: str
+    stabilize: bool
+    stabilize_only_final: bool
 
 
 def get_youtube_target_profile() -> YouTubeTargetProfile:
@@ -55,9 +58,14 @@ def get_youtube_target_profile() -> YouTubeTargetProfile:
         sharpen = int(os.getenv("MONEYOS_YT_SHARPEN", "0")) == 1
     except ValueError:
         sharpen = False
-    smooth_mode = os.getenv("MONEYOS_YT_SMOOTH", "blend").strip().lower()
-    if smooth_mode not in {"off", "blend", "blend_strong", "minterp"}:
-        smooth_mode = "blend"
+    smooth_mode = os.getenv("MONEYOS_YT_SMOOTH", "none").strip().lower()
+    minterp_alias = os.getenv("MONEYOS_YT_MINTERP")
+    if minterp_alias is not None and minterp_alias == "1":
+        smooth_mode = "minterp"
+    if smooth_mode not in {"off", "none", "blend", "blend_strong", "minterp"}:
+        smooth_mode = "none"
+    stabilize = os.getenv("MONEYOS_YT_STABILIZE", "1") == "1"
+    stabilize_only_final = os.getenv("MONEYOS_YT_STAB_ONLY_FINAL", "1") == "1"
     return YouTubeTargetProfile(
         target_name=target,
         width=width,
@@ -69,6 +77,8 @@ def get_youtube_target_profile() -> YouTubeTargetProfile:
         force_cfr=force_cfr,
         sharpen=sharpen,
         smooth_mode=smooth_mode,
+        stabilize=stabilize,
+        stabilize_only_final=stabilize_only_final,
     )
 
 
@@ -88,6 +98,8 @@ def youtube_video_filter(
             chain.extend(["hqdn3d=2.0:2.0:4:4", "tmix=frames=5:weights='1 2 2 2 1'", f"fps={cfg.fps}"])
         elif cfg.smooth_mode == "blend":
             chain.extend(["hqdn3d=1.5:1.5:3:3", "tmix=frames=3:weights='1 2 1'", f"fps={cfg.fps}"])
+        elif cfg.smooth_mode in {"off", "none"}:
+            chain.append(f"fps={cfg.fps}")
         else:
             chain.append(f"fps={cfg.fps}")
     else:
@@ -151,6 +163,20 @@ def youtube_video_encode_args(profile: YouTubeTargetProfile | None = None) -> li
         "bt709",
     ]
     return args
+
+
+def ffmpeg_filters_text() -> str:
+    global _FILTERS_CACHE
+    if _FILTERS_CACHE is not None:
+        return _FILTERS_CACHE
+    result = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True, check=False)
+    _FILTERS_CACHE = (result.stdout or "") + (result.stderr or "")
+    return _FILTERS_CACHE
+
+
+def has_vidstab_filters() -> bool:
+    text = ffmpeg_filters_text().lower()
+    return "vidstabdetect" in text and "vidstabtransform" in text
 
 
 def _nvenc_quality_mode() -> str:

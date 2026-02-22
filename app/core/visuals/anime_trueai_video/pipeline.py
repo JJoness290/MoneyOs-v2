@@ -14,6 +14,7 @@ from app.core.visuals.anime_trueai_video.cogvideox_provider import CogVideoXProv
 from app.core.visuals.anime_trueai_video.provider import ClipRequest, TextToVideoProvider
 from app.core.visuals.ffmpeg_utils import (
     get_youtube_target_profile,
+    has_vidstab_filters,
     run_ffmpeg,
     youtube_video_encode_args,
     youtube_video_filter,
@@ -201,6 +202,30 @@ def _ensure_youtube_clip(yt_src: Path, yt_out: Path, duration_s: float) -> Path:
     return yt_out if yt_out.exists() else yt_src
 
 
+def _stabilize_final_video(input_path: Path, output_path: Path, diagnostics_dir: Path) -> Path:
+    cfg = get_youtube_target_profile()
+    trf = diagnostics_dir / "yt_stab.trf"
+    print(f"[TRUEAI][YT] stabilize pass1 detect input={input_path} trf={trf}")
+    _ffmpeg(
+        "-i",
+        str(input_path),
+        "-vf",
+        f"vidstabdetect=shakiness=6:accuracy=15:result={trf}",
+        "-f",
+        "null",
+        "NUL" if os.name == "nt" else "/dev/null",
+    )
+    print(f"[TRUEAI][YT] stabilize pass2 transform input={input_path} trf={trf} out={output_path}")
+    _encode_youtube_mp4(
+        input_path,
+        output_path,
+        extra_filters=[f"vidstabtransform=input={trf}:smoothing=30:zoom=5:optzoom=1"],
+        duration_s=None,
+        apply_smoothing=False,
+    )
+    return output_path
+
+
 def _mux_youtube_with_audio(video_path: Path, audio_path: Path, output_path: Path, duration_s: float) -> None:
     _ffmpeg(
         "-i",
@@ -301,8 +326,11 @@ def run_trueai_60s_job(
     width = _multiple_of_8(cfg.width)
     height = _multiple_of_8(cfg.height)
     guidance = cfg.guidance
-    frames_per_clip = min(48, max(8, cfg.frames_per_clip))
-    clip_seconds = frames_per_clip / fps
+    try:
+        clip_seconds = max(1.0, float(os.getenv("MONEYOS_TRUEAI_CLIP_SECONDS", "10")))
+    except ValueError:
+        clip_seconds = 10.0
+    frames_per_clip = max(8, int(round(fps * clip_seconds)))
     clip_count = int(math.ceil(total_seconds / clip_seconds))
     seed = int(os.getenv("MONEYOS_TRUEAI_SEED", "777"))
 
@@ -363,6 +391,13 @@ def run_trueai_60s_job(
     print(f"[TRUEAI] super_resolution={'ON' if cfg.super_resolution else 'OFF'}")
     yt_vf = youtube_video_filter(yt_target, apply_smoothing=True)
     print(f"[TRUEAI][YT] fps={yt_target.fps} smooth={yt_target.smooth_mode} vf=\"{yt_vf}\"")
+    print(f"[TRUEAI] clip_seconds={clip_seconds:g} infer_fps={fps} frames={frames_per_clip}")
+    stab_supported = has_vidstab_filters()
+    print(
+        f"[YT] target={yt_target.width}x{yt_target.height}@{yt_target.fps} "
+        f"smooth={yt_target.smooth_mode} stabilize={'on' if yt_target.stabilize else 'off'} "
+        f"supported={stab_supported} only_final={yt_target.stabilize_only_final}"
+    )
     print("[TRUEAI][YT] If you want optical-flow interpolation: set MONEYOS_YT_SMOOTH=minterp")
     print(f"[TRUEAI][YT] target={yt_target.width}x{yt_target.height}@{yt_target.fps} codec={yt_target.codec} cq={yt_target.cq}")
     super_resolution_enabled = bool(cfg.super_resolution and not FASTTEST)
@@ -479,7 +514,7 @@ def run_trueai_60s_job(
             _ffmpeg("-i", str(clip_path), "-t", f"{request.seconds:.3f}", "-c:v", "copy", str(trim_path))
             clip_path = trim_path
         elif clip_duration + 0.02 < request.seconds:
-            pad_seconds = max(0.0, request.seconds - clip_duration)
+            pad_seconds = min(0.2, max(0.0, request.seconds - clip_duration))
             pad_path = clips_dir / f"clip_{idx:02d}_pad.mp4"
             _ffmpeg("-i", str(clip_path), "-vf", f"tpad=stop_mode=clone:stop_duration={pad_seconds:.3f}", str(pad_path))
             clip_path = pad_path
@@ -519,6 +554,11 @@ def run_trueai_60s_job(
 
     target_video = final_dir / "video_out.mp4"
     _encode_youtube_mp4(source_for_final, target_video, duration_s=total_seconds, apply_smoothing=False)
+    if yt_target.stabilize and yt_target.stabilize_only_final and has_vidstab_filters():
+        stabilized_target = final_dir / "video_out_stabilized.mp4"
+        target_video = _stabilize_final_video(target_video, stabilized_target, diagnostics_dir)
+    elif yt_target.stabilize and not has_vidstab_filters():
+        print("[TRUEAI][YT][WARN] vidstab filters unavailable; continuing without stabilization")
 
     if status_callback:
         status_callback("muxing")

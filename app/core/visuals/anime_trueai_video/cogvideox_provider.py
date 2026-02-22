@@ -290,7 +290,11 @@ class CogVideoXProvider(TextToVideoProvider):
         with contextlib.suppress(Exception):
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.deterministic = True
-        num_frames = int(max(1, min(48, round(request.seconds * request.fps))))
+        try:
+            max_frames = int(os.getenv("MONEYOS_TRUEAI_MAX_FRAMES", "240"))
+        except ValueError:
+            max_frames = 240
+        num_frames = int(max(1, min(max_frames, round(request.seconds * request.fps))))
         width = request.width
         height = request.height
         steps = request.steps
