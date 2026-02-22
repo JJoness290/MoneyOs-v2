@@ -181,6 +181,66 @@ def has_vidstab_filters() -> bool:
     return "vidstabdetect" in text and "vidstabtransform" in text
 
 
+def concat_video_parts(part_paths: list[Path], list_path: Path, output_path: Path, fps: int) -> None:
+    list_path.parent.mkdir(parents=True, exist_ok=True)
+    list_path.write_text("\n".join([f"file '{p.as_posix()}'" for p in part_paths]), encoding="utf-8")
+    try:
+        run_ffmpeg(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path), "-c", "copy", str(output_path)])
+    except Exception:
+        run_ffmpeg(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_path),
+                "-vf",
+                "format=yuv420p,fps=%d" % fps,
+                "-c:v",
+                "libx264",
+                "-crf",
+                "18",
+                "-preset",
+                "medium",
+                str(output_path),
+            ]
+        )
+
+
+def stabilize_video_two_pass(input_path: Path, output_path: Path, transform_path: Path, fps: int) -> None:
+    sink = "NUL" if os.name == "nt" else "/dev/null"
+    run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_path),
+            "-vf",
+            f"vidstabdetect=shakiness=6:accuracy=15:result={transform_path}",
+            "-f",
+            "null",
+            sink,
+        ]
+    )
+    run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_path),
+            "-vf",
+            f"vidstabtransform=input={transform_path}:smoothing=30:zoom=5:optzoom=1,fps={fps},format=yuv420p",
+            *youtube_video_encode_args(get_youtube_target_profile()),
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+    )
+
+
 def _nvenc_quality_mode() -> str:
     mode = os.getenv("MONEYOS_NVENC_QUALITY", "").strip().lower()
     if not mode:

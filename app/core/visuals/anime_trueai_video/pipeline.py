@@ -13,9 +13,11 @@ from app.config import OUTPUT_DIR
 from app.core.visuals.anime_trueai_video.cogvideox_provider import CogVideoXProvider
 from app.core.visuals.anime_trueai_video.provider import ClipRequest, TextToVideoProvider
 from app.core.visuals.ffmpeg_utils import (
+    concat_video_parts,
     get_youtube_target_profile,
     has_vidstab_filters,
     run_ffmpeg,
+    stabilize_video_two_pass,
     youtube_video_encode_args,
     youtube_video_filter,
 )
@@ -214,30 +216,6 @@ def _ensure_youtube_clip(yt_src: Path, yt_out: Path, duration_s: float) -> Path:
     return yt_out if yt_out.exists() else yt_src
 
 
-def _stabilize_final_video(input_path: Path, output_path: Path, diagnostics_dir: Path) -> Path:
-    cfg = get_youtube_target_profile()
-    trf = diagnostics_dir / "yt_stab.trf"
-    print(f"[TRUEAI][YT] stabilize pass1 detect input={input_path} trf={trf}")
-    _ffmpeg(
-        "-i",
-        str(input_path),
-        "-vf",
-        f"vidstabdetect=shakiness=6:accuracy=15:result={trf}",
-        "-f",
-        "null",
-        "NUL" if os.name == "nt" else "/dev/null",
-    )
-    print(f"[TRUEAI][YT] stabilize pass2 transform input={input_path} trf={trf} out={output_path}")
-    _encode_youtube_mp4(
-        input_path,
-        output_path,
-        extra_filters=[f"vidstabtransform=input={trf}:smoothing=30:zoom=5:optzoom=1"],
-        duration_s=None,
-        apply_smoothing=False,
-    )
-    return output_path
-
-
 def _mux_youtube_with_audio(video_path: Path, audio_path: Path, output_path: Path, duration_s: float) -> None:
     _ffmpeg(
         "-i",
@@ -339,6 +317,9 @@ def run_trueai_60s_job(
     height = _multiple_of_8(cfg.height)
     guidance = cfg.guidance
     clip_seconds = get_trueai_clip_seconds()
+    max_frames = 48
+    chunk_seconds = max_frames / max(fps, 1)
+    chunks_needed = int(math.ceil(clip_seconds / chunk_seconds))
     frames_per_clip = max(8, get_trueai_target_frames(fps))
     clip_count = int(math.ceil(total_seconds / clip_seconds))
     seed = int(os.getenv("MONEYOS_TRUEAI_SEED", "777"))
@@ -401,6 +382,10 @@ def run_trueai_60s_job(
     yt_vf = youtube_video_filter(yt_target, apply_smoothing=True)
     print(f"[TRUEAI][YT] fps={yt_target.fps} smooth={yt_target.smooth_mode} vf=\"{yt_vf}\"")
     print(f"[TRUEAI] clip_seconds={clip_seconds:g} infer_fps={fps} target_frames={frames_per_clip}")
+    print(
+        f"[TRUEAI] target_clip_seconds={clip_seconds:g} infer_fps={fps} "
+        f"max_frames={max_frames} chunk_seconds={chunk_seconds:.1f} chunks={chunks_needed}"
+    )
     stab_supported = has_vidstab_filters()
     print(f"[YT] target={yt_target.width}x{yt_target.height}@{yt_target.fps} stabilize={'on' if yt_target.stabilize else 'off'} smooth={yt_target.smooth_mode}")
     print(f"[YT] vidstab_supported={stab_supported}")
@@ -417,146 +402,139 @@ def run_trueai_60s_job(
         if status_callback:
             status_callback(f"plan → generating clip {idx + 1}/{clip_count}")
         clip_path = clips_dir / f"clip_{idx:02d}.mp4"
-        base_clip_path = clip_path
-        request = ClipRequest(
-            prompt=_anime_prompt(prompt, character_desc, idx),
-            negative_prompt=_negative_prompt(),
-            seed=seed,
-            seconds=max(target_clip_seconds, 1.0 / fps),
-            fps=fps,
-            width=width,
-            height=height,
-            steps=steps,
-            guidance=guidance,
-            out_path=clip_path,
-            target_frames=frames_per_clip,
-        )
+        clip_prompt = _anime_prompt(prompt, character_desc, idx)
         # Load shedding under pressure
         if stability.stability_mode and monitor.state in {"HIGH", "CRITICAL"}:
             if status_callback:
                 status_callback("paused due to GPU/VRAM pressure; waiting to cool/free memory")
             time.sleep(2.0 if monitor.state == "HIGH" else 5.0)
-        try:
-            if status_callback:
-                status_callback(f"inference → clip {idx + 1}/{clip_count}")
-            provider.generate(request)
-            if getattr(provider, "force_disable_super_resolution", False):
-                super_resolution_enabled = False
-                print("[TRUEAI] super_resolution=FORCED_OFF reason=oom_or_tensor_mismatch_degrade")
-        except Exception as exc:  # noqa: BLE001
-            msg = str(exc)
-            failure_kind = classify_cuda_failure(msg)
-            if failure_kind:
+        part_paths: list[Path] = []
+        generated_seconds = 0.0
+        for chunk_idx in range(chunks_needed):
+            part_seconds = min(chunk_seconds, max(1.0 / fps, target_clip_seconds - generated_seconds))
+            if part_seconds <= 0:
+                break
+            part_frames = min(max_frames, max(1, int(round(part_seconds * fps))))
+            part_path = clips_dir / f"clip_{idx:02d}_part{chunk_idx:02d}.mp4"
+            request = ClipRequest(
+                prompt=clip_prompt,
+                negative_prompt=_negative_prompt(),
+                seed=seed + chunk_idx,
+                seconds=part_seconds,
+                fps=fps,
+                width=width,
+                height=height,
+                steps=steps,
+                guidance=guidance,
+                out_path=part_path,
+                target_frames=part_frames,
+            )
+            try:
                 if status_callback:
-                    status_callback("tdr_detected")
-                events = read_recent_nvlddmkm_events(max_lines=200, minutes=5)
-                if events:
-                    (diagnostics_dir / "nvlddmkm_events.log").write_text("\n".join(events), encoding="utf-8")
-                checkpoint = {
-                    "clip_index": idx,
-                    "seed": seed,
-                    "prompt": request.prompt,
-                    "width": width,
-                    "height": height,
-                    "steps": steps,
-                    "guidance": guidance,
-                    "preset": cfg.name,
-                }
-                (diagnostics_dir / "checkpoint.json").write_text(json.dumps(checkpoint, indent=2), encoding="utf-8")
-                try:
-                    import torch  # noqa: WPS433
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-                if status_callback:
-                    status_callback("recovery_wait")
-                time.sleep(15)
-                if status_callback:
-                    status_callback("recovery_restart_worker")
-                provider = CogVideoXProvider()
-                try:
-                    provider.generate(request)
-                except Exception as exc2:  # noqa: BLE001
-                    if cfg.name == "quality":
-                        cfg = _resolve_preset("balanced")
-                        downshifts.append({"from": "quality", "to": "balanced", "clip": idx})
-                        if status_callback:
-                            status_callback("fallback_safe_preset")
-                        width, height, steps, guidance = cfg.width, cfg.height, cfg.steps, cfg.guidance
-                    elif cfg.name == "balanced":
-                        cfg = _resolve_preset("safe")
-                        downshifts.append({"from": "balanced", "to": "safe", "clip": idx})
-                        if status_callback:
-                            status_callback("fallback_safe_preset")
-                        width, height, steps, guidance = cfg.width, cfg.height, cfg.steps, cfg.guidance
-                    else:
-                        if status_callback:
-                            status_callback("fallback_cpu")
-                        os.environ["MONEYOS_USE_GPU"] = "0"
-                    provider = CogVideoXProvider()
-                    request = ClipRequest(
-                        prompt=request.prompt,
-                        negative_prompt=request.negative_prompt,
-                        seed=request.seed,
-                        seconds=request.seconds,
-                        fps=request.fps,
-                        width=_multiple_of_8(width),
-                        height=_multiple_of_8(height),
-                        steps=steps,
-                        guidance=guidance,
-                        out_path=clip_path,
-                    )
-                    provider.generate(request)
-                    if getattr(provider, "force_disable_super_resolution", False):
-                        super_resolution_enabled = False
-                        print("[TRUEAI] super_resolution=FORCED_OFF reason=oom_or_tensor_mismatch_degrade")
-            else:
+                    status_callback(f"inference → clip {idx + 1}/{clip_count} part {chunk_idx + 1}/{chunks_needed}")
+                provider.generate(request)
+                if getattr(provider, "force_disable_super_resolution", False):
+                    super_resolution_enabled = False
+                    print("[TRUEAI] super_resolution=FORCED_OFF reason=oom_or_tensor_mismatch_degrade")
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                failure_kind = classify_cuda_failure(msg)
+                if failure_kind:
+                    if status_callback:
+                        status_callback("tdr_detected")
+                    events = read_recent_nvlddmkm_events(max_lines=200, minutes=5)
+                    if events:
+                        (diagnostics_dir / "nvlddmkm_events.log").write_text("\n".join(events), encoding="utf-8")
+                    checkpoint = {
+                        "clip_index": idx,
+                        "seed": seed,
+                        "prompt": request.prompt,
+                        "width": width,
+                        "height": height,
+                        "steps": steps,
+                        "guidance": guidance,
+                        "preset": cfg.name,
+                    }
+                    (diagnostics_dir / "checkpoint.json").write_text(json.dumps(checkpoint, indent=2), encoding="utf-8")
+                    raise
                 raise
+            part_paths.append(part_path)
+            generated_seconds += part_seconds
+
+        if not part_paths:
+            raise RuntimeError(f"no parts generated for clip {idx}")
+
+        concat_list_path = clips_dir / f"clip_{idx:02d}_parts.txt"
+        clip_raw_path = clips_dir / f"clip_{idx:02d}_raw.mp4"
+        concat_video_parts(part_paths, concat_list_path, clip_raw_path, fps)
+        clip_path = clip_raw_path
+
+        if yt_target.stabilize and not yt_target.stabilize_only_final and has_vidstab_filters():
+            stab_out = clips_dir / f"clip_{idx:02d}_stab.mp4"
+            stab_trf = diagnostics_dir / f"clip_{idx:02d}_stab.trf"
+            stabilize_video_two_pass(clip_path, stab_out, stab_trf, yt_target.fps)
+            clip_path = stab_out
+        elif yt_target.stabilize and not has_vidstab_filters():
+            print("[TRUEAI][YT][WARN] vidstab filters unavailable; continuing without stabilization")
+
+        clip_duration = _probe_duration(clip_path)
+        if clip_duration <= 0.1:
+            raise RuntimeError(f"empty clip generated: {clip_path}")
+        if clip_duration > target_clip_seconds + 0.02:
+            trim_path = clips_dir / f"clip_{idx:02d}_trim.mp4"
+            _ffmpeg("-i", str(clip_path), "-t", f"{target_clip_seconds:.3f}", "-c:v", "copy", str(trim_path))
+            clip_path = trim_path
+        elif clip_duration + 0.02 < target_clip_seconds:
+            pad_seconds = min(0.2, max(0.0, target_clip_seconds - clip_duration))
+            if pad_seconds > 0:
+                pad_path = clips_dir / f"clip_{idx:02d}_pad.mp4"
+                _ffmpeg("-i", str(clip_path), "-vf", f"tpad=stop_mode=clone:stop_duration={pad_seconds:.3f}", str(pad_path))
+                clip_path = pad_path
 
         clip_duration = _probe_duration(clip_path)
         short_retries = 0
-        while clip_duration < (request.seconds - 0.5) and short_retries < 2:
+        while clip_duration < (target_clip_seconds - 0.5) and short_retries < 2:
             print(
-                f"[TRUEAI] duration_check expected={request.seconds:.2f} got={clip_duration:.2f} -> retry_with_lower_settings"
+                f"[TRUEAI] duration_check expected={target_clip_seconds:.2f} got={clip_duration:.2f} -> retry_with_lower_settings"
             )
             width = _multiple_of_8(max(384, int(width * 0.9)))
             height = _multiple_of_8(max(224, int(height * 0.9)))
             steps = max(8, steps - 4)
             guidance = max(1.0, guidance - 0.5)
-            request = ClipRequest(
-                prompt=request.prompt,
-                negative_prompt=request.negative_prompt,
-                seed=request.seed,
-                seconds=request.seconds,
-                fps=request.fps,
-                width=width,
-                height=height,
-                steps=steps,
-                guidance=guidance,
-                out_path=clip_path,
-                target_frames=frames_per_clip,
-            )
             provider = CogVideoXProvider()
-            provider.generate(request)
-            clip_duration = _probe_duration(clip_path)
             short_retries += 1
-        if clip_duration <= 0.1:
-            raise RuntimeError(f"empty clip generated: {clip_path}")
-        if clip_duration > request.seconds + 0.02:
-            trim_path = clips_dir / f"clip_{idx:02d}_trim.mp4"
-            _ffmpeg("-i", str(clip_path), "-t", f"{request.seconds:.3f}", "-c:v", "copy", str(trim_path))
-            clip_path = trim_path
-        elif clip_duration + 0.02 < request.seconds:
-            pad_seconds = min(0.2, max(0.0, request.seconds - clip_duration))
-            pad_path = clips_dir / f"clip_{idx:02d}_pad.mp4"
-            _ffmpeg("-i", str(clip_path), "-vf", f"tpad=stop_mode=clone:stop_duration={pad_seconds:.3f}", str(pad_path))
-            clip_path = pad_path
-        pad_path = clips_dir / f"clip_{idx:02d}_pad.mp4"
-        normalize_source = pad_path if pad_path.exists() else base_clip_path
-        if not normalize_source.exists():
-            normalize_source = clip_path
+            # restart this clip generation loop with safer settings
+            part_paths = []
+            generated_seconds = 0.0
+            for chunk_idx in range(chunks_needed):
+                part_seconds = min(chunk_seconds, max(1.0 / fps, target_clip_seconds - generated_seconds))
+                if part_seconds <= 0:
+                    break
+                part_frames = min(max_frames, max(1, int(round(part_seconds * fps))))
+                part_path = clips_dir / f"clip_{idx:02d}_part{chunk_idx:02d}_retry{short_retries}.mp4"
+                request = ClipRequest(
+                    prompt=clip_prompt,
+                    negative_prompt=_negative_prompt(),
+                    seed=seed + chunk_idx + short_retries,
+                    seconds=part_seconds,
+                    fps=fps,
+                    width=width,
+                    height=height,
+                    steps=steps,
+                    guidance=guidance,
+                    out_path=part_path,
+                    target_frames=part_frames,
+                )
+                provider.generate(request)
+                part_paths.append(part_path)
+                generated_seconds += part_seconds
+            concat_video_parts(part_paths, concat_list_path, clip_raw_path, fps)
+            clip_path = clip_raw_path
+            clip_duration = _probe_duration(clip_path)
+
+        normalize_source = clip_path
         yt_clip_path = clips_dir / f"clip_{idx:02d}_yt.mp4"
-        clip_path = _ensure_youtube_clip(normalize_source, yt_clip_path, request.seconds)
+        clip_path = _ensure_youtube_clip(normalize_source, yt_clip_path, target_clip_seconds)
         generated.append(clip_path)
 
     if status_callback:
@@ -587,10 +565,13 @@ def run_trueai_60s_job(
 
     target_video = final_dir / "video_out.mp4"
     _encode_youtube_mp4(source_for_final, target_video, duration_s=total_seconds, apply_smoothing=False)
-    if yt_target.stabilize and yt_target.stabilize_only_final and has_vidstab_filters():
+    if yt_target.stabilize and yt_target.stabilize_only_final and stab_supported:
         stabilized_target = final_dir / "video_out_stabilized.mp4"
-        target_video = _stabilize_final_video(target_video, stabilized_target, diagnostics_dir)
-    elif yt_target.stabilize and not has_vidstab_filters():
+        stab_trf = diagnostics_dir / "yt_stab.trf"
+        print(f"[TRUEAI][YT] stabilize pass1/pass2 input={target_video} trf={stab_trf} out={stabilized_target}")
+        stabilize_video_two_pass(target_video, stabilized_target, stab_trf, yt_target.fps)
+        target_video = stabilized_target
+    elif yt_target.stabilize and not stab_supported:
         print("[TRUEAI][YT][WARN] vidstab filters unavailable; continuing without stabilization")
 
     if status_callback:
