@@ -242,19 +242,42 @@ class CogVideoXProvider(TextToVideoProvider):
         clamped = max(minimum, int(value))
         return max(minimum, (clamped // factor) * factor)
 
-    def _sanitize_generation_dims(self, width: int, height: int, frames: int) -> tuple[int, int, int]:
+    def _sanitize_generation_dims(self, width: int, height: int, frames: int, max_frames: int) -> tuple[int, int, int]:
         safe_w = self._align_multiple(width, 16, 384)
         safe_h = self._align_multiple(height, 16, 224)
         safe_frames = self._align_multiple(frames, 2, 8)
-        safe_frames = min(48, safe_frames)
+        safe_frames = min(max_frames, safe_frames)
         return safe_w, safe_h, safe_frames
 
+    def _degrade_settings(
+        self,
+        stage: int,
+        width: int,
+        height: int,
+        steps: int,
+        frames: int,
+        guidance: float,
+        min_frames: int,
+        max_frames: int,
+    ) -> tuple[int, int, int, int, float, bool]:
+        if stage == 0:
+            width = self._align_multiple(int(width * 0.85), 16, 384)
+            height = self._align_multiple(int(height * 0.85), 16, 224)
+        elif stage == 1:
+            steps = max(8, steps - 4)
+        elif stage == 2:
+            self.force_disable_super_resolution = True
+        elif stage == 3:
+            guidance = max(1.0, round(guidance - 0.5, 2))
+        elif stage >= 4:
+            reduced = self._align_multiple(max(min_frames, int(frames * 0.85)), 2, min_frames)
+            frames = min(max_frames, max(reduced, min_frames))
+        return width, height, steps, frames, guidance, stage >= 4
+
+    # Backward-compatible helper used by tests/legacy call sites.
     def _stability_degrade(self, width: int, height: int, steps: int, frames: int) -> tuple[int, int, int, int]:
-        degraded_w = self._align_multiple(int(width * 0.85), 16, 384)
-        degraded_h = self._align_multiple(int(height * 0.85), 16, 224)
-        degraded_steps = max(8, steps - 4)
-        degraded_frames = self._align_multiple(max(8, frames - 8), 2, 8)
-        return degraded_w, degraded_h, degraded_steps, degraded_frames
+        w, h, s, f, _, _ = self._degrade_settings(4, width, height, steps, frames, 5.0, 8, 240)
+        return w, h, s, f
 
     def _maybe_compile(self) -> None:
         if self._compiled or self._pipe is None or self._device != "cuda":
@@ -294,13 +317,19 @@ class CogVideoXProvider(TextToVideoProvider):
             max_frames = int(os.getenv("MONEYOS_TRUEAI_MAX_FRAMES", "240"))
         except ValueError:
             max_frames = 240
-        num_frames = int(max(1, min(max_frames, round(request.seconds * request.fps))))
+        requested_frames = request.target_frames if request.target_frames is not None else round(request.seconds * request.fps)
+        num_frames = int(max(1, min(max_frames, int(requested_frames))))
+        min_seconds = min(float(request.seconds), 6.0)
+        min_frames = max(1, min(max_frames, int(round(request.fps * min_seconds))))
         width = request.width
         height = request.height
         steps = request.steps
-        width, height, num_frames = self._sanitize_generation_dims(width, height, num_frames)
+        guidance = float(request.guidance)
+        width, height, num_frames = self._sanitize_generation_dims(width, height, num_frames, max_frames)
+        num_frames = max(num_frames, min_frames)
+        print(f"[TRUEAI] model_num_frames={num_frames}")
         stability = resolve_stability_settings()
-        max_attempts = 4 if stability.stability_mode else 1
+        max_attempts = 6 if stability.stability_mode else 1
         last_exc: Exception | None = None
         tensor_retry_used = False
         for attempt in range(max_attempts):
@@ -310,21 +339,31 @@ class CogVideoXProvider(TextToVideoProvider):
                     reserved = float(torch.cuda.memory_reserved(0))
                     util = reserved / max(total, 1.0)
                     if util >= min(0.99, stability.vram_fraction + 0.05) and attempt < (max_attempts - 1):
-                        width, height, steps, num_frames = self._stability_degrade(width, height, steps, num_frames)
-                        self.force_disable_super_resolution = True
-                        print(
-                            "[TRUEAI][COGVIDEOX] degrade "
-                            f"attempt={attempt + 1}/{max_attempts} reason=vram_guardrail "
-                            f"resolution={width}x{height} steps={steps} frames={num_frames} "
-                            f"sr=OFF reserved_ratio={util:.3f} budget={stability.vram_fraction:.3f}"
+                        width, height, steps, num_frames, guidance, frames_reduced = self._degrade_settings(
+                            attempt,
+                            width,
+                            height,
+                            steps,
+                            num_frames,
+                            guidance,
+                            min_frames,
+                            max_frames,
                         )
+                        width, height, num_frames = self._sanitize_generation_dims(width, height, num_frames, max_frames)
+                        print(
+                            "[TRUEAI][DEGRADE] "
+                            f"attempt={attempt + 1} reason=vram_guardrail secs={num_frames / max(request.fps,1):.2f} "
+                            f"frames={num_frames} res={width}x{height} steps={steps} guidance={guidance:.2f}"
+                        )
+                        if frames_reduced:
+                            print(f"[TRUEAI][DEGRADE] frames_reduced=true new_secs={num_frames / max(request.fps,1):.2f} new_frames={num_frames}")
                         continue
                 with torch.autocast("cuda", dtype=torch.float16) if self._device == "cuda" else contextlib.nullcontext():
                     result = self._pipe(
                         prompt=request.prompt,
                         negative_prompt=request.negative_prompt,
                         num_inference_steps=steps,
-                        guidance_scale=request.guidance,
+                        guidance_scale=guidance,
                         num_frames=num_frames,
                         height=height,
                         width=width,
@@ -337,21 +376,38 @@ class CogVideoXProvider(TextToVideoProvider):
                 is_mismatch = self._is_tensor_shape_mismatch(exc)
                 if is_mismatch and stability.stability_mode and not tensor_retry_used and attempt < (max_attempts - 1):
                     tensor_retry_used = True
-                    width, height, steps, num_frames = self._stability_degrade(width, height, steps, num_frames)
-                    width, height, num_frames = self._sanitize_generation_dims(width, height, num_frames)
-                    self.force_disable_super_resolution = True
-                    print(
-                        "[TRUEAI][COGVIDEOX] degrade "
-                        f"attempt={attempt + 1}/{max_attempts} reason=tensor_mismatch_recovery "
-                        f"resolution={width}x{height} steps={steps} frames={num_frames} "
-                        f"sr=OFF error={exc}"
+                    width, height, steps, num_frames, guidance, frames_reduced = self._degrade_settings(
+                        attempt,
+                        width,
+                        height,
+                        steps,
+                        num_frames,
+                        guidance,
+                        min_frames,
+                        max_frames,
                     )
+                    width, height, num_frames = self._sanitize_generation_dims(width, height, num_frames, max_frames)
+                    print(
+                        "[TRUEAI][DEGRADE] "
+                        f"attempt={attempt + 1} reason=tensor_mismatch_recovery secs={num_frames / max(request.fps,1):.2f} "
+                        f"frames={num_frames} res={width}x{height} steps={steps} guidance={guidance:.2f}"
+                    )
+                    if frames_reduced:
+                        print(f"[TRUEAI][DEGRADE] frames_reduced=true new_secs={num_frames / max(request.fps,1):.2f} new_frames={num_frames}")
                     continue
                 if not stability.stability_mode or not is_oom or attempt >= (max_attempts - 1):
                     raise
-                width, height, steps, num_frames = self._stability_degrade(width, height, steps, num_frames)
-                width, height, num_frames = self._sanitize_generation_dims(width, height, num_frames)
-                self.force_disable_super_resolution = True
+                width, height, steps, num_frames, guidance, frames_reduced = self._degrade_settings(
+                    attempt,
+                    width,
+                    height,
+                    steps,
+                    num_frames,
+                    guidance,
+                    min_frames,
+                    max_frames,
+                )
+                width, height, num_frames = self._sanitize_generation_dims(width, height, num_frames, max_frames)
                 with contextlib.suppress(Exception):
                     if hasattr(self._pipe, "enable_model_cpu_offload"):
                         self._pipe.enable_model_cpu_offload()
@@ -360,10 +416,12 @@ class CogVideoXProvider(TextToVideoProvider):
                     if hasattr(self._pipe, "enable_vae_slicing"):
                         self._pipe.enable_vae_slicing()
                 print(
-                    "[TRUEAI][COGVIDEOX] degrade "
-                    f"attempt={attempt + 1}/{max_attempts} reason=oom resolution={width}x{height} "
-                    f"steps={steps} frames={num_frames} sr=OFF budget={stability.vram_fraction:.3f} error={exc}"
+                    "[TRUEAI][DEGRADE] "
+                    f"attempt={attempt + 1} reason=oom secs={num_frames / max(request.fps,1):.2f} frames={num_frames} "
+                    f"res={width}x{height} steps={steps} guidance={guidance:.2f} budget={stability.vram_fraction:.3f}"
                 )
+                if frames_reduced:
+                    print(f"[TRUEAI][DEGRADE] frames_reduced=true new_secs={num_frames / max(request.fps,1):.2f} new_frames={num_frames}")
         else:
             raise RuntimeError(
                 "VRAM guardrail blocked generation after automatic degradation. "

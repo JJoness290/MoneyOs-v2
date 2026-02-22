@@ -67,6 +67,18 @@ def _negative_prompt() -> str:
     )
 
 
+def get_trueai_clip_seconds() -> float:
+    try:
+        return max(1.0, float(os.getenv("MONEYOS_TRUEAI_CLIP_SECONDS", "10")))
+    except ValueError:
+        return 10.0
+
+
+def get_trueai_target_frames(infer_fps: int) -> int:
+    secs = get_trueai_clip_seconds()
+    return max(1, int(round(infer_fps * secs)))
+
+
 def _ffmpeg(*args: str) -> None:
     run_ffmpeg(["ffmpeg", "-y", *args])
 
@@ -326,11 +338,8 @@ def run_trueai_60s_job(
     width = _multiple_of_8(cfg.width)
     height = _multiple_of_8(cfg.height)
     guidance = cfg.guidance
-    try:
-        clip_seconds = max(1, int(os.getenv("MONEYOS_TRUEAI_CLIP_SECONDS", "10")))
-    except ValueError:
-        clip_seconds = 10
-    frames_per_clip = max(8, int(round(fps * clip_seconds)))
+    clip_seconds = get_trueai_clip_seconds()
+    frames_per_clip = max(8, get_trueai_target_frames(fps))
     clip_count = int(math.ceil(total_seconds / clip_seconds))
     seed = int(os.getenv("MONEYOS_TRUEAI_SEED", "777"))
 
@@ -391,7 +400,7 @@ def run_trueai_60s_job(
     print(f"[TRUEAI] super_resolution={'ON' if cfg.super_resolution else 'OFF'}")
     yt_vf = youtube_video_filter(yt_target, apply_smoothing=True)
     print(f"[TRUEAI][YT] fps={yt_target.fps} smooth={yt_target.smooth_mode} vf=\"{yt_vf}\"")
-    print(f"[TRUEAI] clip_seconds={clip_seconds:g} infer_fps={fps} frames={frames_per_clip}")
+    print(f"[TRUEAI] clip_seconds={clip_seconds:g} infer_fps={fps} target_frames={frames_per_clip}")
     stab_supported = has_vidstab_filters()
     print(f"[YT] target={yt_target.width}x{yt_target.height}@{yt_target.fps} stabilize={'on' if yt_target.stabilize else 'off'} smooth={yt_target.smooth_mode}")
     print(f"[YT] vidstab_supported={stab_supported}")
@@ -420,6 +429,7 @@ def run_trueai_60s_job(
             steps=steps,
             guidance=guidance,
             out_path=clip_path,
+            target_frames=frames_per_clip,
         )
         # Load shedding under pressure
         if stability.stability_mode and monitor.state in {"HIGH", "CRITICAL"}:
@@ -504,6 +514,32 @@ def run_trueai_60s_job(
                 raise
 
         clip_duration = _probe_duration(clip_path)
+        short_retries = 0
+        while clip_duration < (request.seconds - 0.5) and short_retries < 2:
+            print(
+                f"[TRUEAI] duration_check expected={request.seconds:.2f} got={clip_duration:.2f} -> retry_with_lower_settings"
+            )
+            width = _multiple_of_8(max(384, int(width * 0.9)))
+            height = _multiple_of_8(max(224, int(height * 0.9)))
+            steps = max(8, steps - 4)
+            guidance = max(1.0, guidance - 0.5)
+            request = ClipRequest(
+                prompt=request.prompt,
+                negative_prompt=request.negative_prompt,
+                seed=request.seed,
+                seconds=request.seconds,
+                fps=request.fps,
+                width=width,
+                height=height,
+                steps=steps,
+                guidance=guidance,
+                out_path=clip_path,
+                target_frames=frames_per_clip,
+            )
+            provider = CogVideoXProvider()
+            provider.generate(request)
+            clip_duration = _probe_duration(clip_path)
+            short_retries += 1
         if clip_duration <= 0.1:
             raise RuntimeError(f"empty clip generated: {clip_path}")
         if clip_duration > request.seconds + 0.02:
