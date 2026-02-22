@@ -55,9 +55,9 @@ def get_youtube_target_profile() -> YouTubeTargetProfile:
         sharpen = int(os.getenv("MONEYOS_YT_SHARPEN", "0")) == 1
     except ValueError:
         sharpen = False
-    smooth_mode = os.getenv("MONEYOS_YT_SMOOTH", "minterp").strip().lower()
-    if smooth_mode not in {"off", "blend", "minterp"}:
-        smooth_mode = "minterp"
+    smooth_mode = os.getenv("MONEYOS_YT_SMOOTH", "blend").strip().lower()
+    if smooth_mode not in {"off", "blend", "blend_strong", "minterp"}:
+        smooth_mode = "blend"
     return YouTubeTargetProfile(
         target_name=target,
         width=width,
@@ -84,8 +84,10 @@ def youtube_video_filter(
     if apply_smoothing:
         if cfg.smooth_mode == "minterp":
             chain.append(f"minterpolate=fps={cfg.fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1")
+        elif cfg.smooth_mode == "blend_strong":
+            chain.extend(["hqdn3d=2.0:2.0:4:4", "tmix=frames=5:weights='1 2 2 2 1'", f"fps={cfg.fps}"])
         elif cfg.smooth_mode == "blend":
-            chain.extend(["tmix=frames=3:weights='1 2 1'", "hqdn3d=1.5:1.5:3:3", f"fps={cfg.fps}"])
+            chain.extend(["hqdn3d=1.5:1.5:3:3", "tmix=frames=3:weights='1 2 1'", f"fps={cfg.fps}"])
         else:
             chain.append(f"fps={cfg.fps}")
     else:

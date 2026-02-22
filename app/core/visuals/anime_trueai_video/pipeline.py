@@ -362,7 +362,8 @@ def run_trueai_60s_job(
     print(f"[TRUEAI] guidance={guidance}")
     print(f"[TRUEAI] super_resolution={'ON' if cfg.super_resolution else 'OFF'}")
     yt_vf = youtube_video_filter(yt_target, apply_smoothing=True)
-    print(f"[TRUEAI][YT] default=1080p60 smooth={yt_target.smooth_mode} vf=\"{yt_vf}\"")
+    print(f"[TRUEAI][YT] fps={yt_target.fps} smooth={yt_target.smooth_mode} vf=\"{yt_vf}\"")
+    print("[TRUEAI][YT] If you want optical-flow interpolation: set MONEYOS_YT_SMOOTH=minterp")
     print(f"[TRUEAI][YT] target={yt_target.width}x{yt_target.height}@{yt_target.fps} codec={yt_target.codec} cq={yt_target.cq}")
     super_resolution_enabled = bool(cfg.super_resolution and not FASTTEST)
 

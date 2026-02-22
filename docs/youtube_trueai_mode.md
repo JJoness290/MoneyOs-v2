@@ -11,7 +11,7 @@
 - `MONEYOS_YT_PRESET=p7`
 - `MONEYOS_YT_FORCE_CFR=1`
 - `MONEYOS_YT_SHARPEN=0`
-- `MONEYOS_YT_SMOOTH=minterp` (default)
+- `MONEYOS_YT_SMOOTH=blend` (default)
 
 Optional UHD target:
 
@@ -30,8 +30,9 @@ For anime-trueai pipeline output MP4s:
 
 ## Smoothing modes
 
-- `MONEYOS_YT_SMOOTH=minterp` (default, optical flow, smoothest)
-- `MONEYOS_YT_SMOOTH=blend` (lighter smoothing)
+- `MONEYOS_YT_SMOOTH=blend` (default, stable AI-friendly temporal smoothing)
+- `MONEYOS_YT_SMOOTH=blend_strong` (stronger denoise + temporal smoothing)
+- `MONEYOS_YT_SMOOTH=minterp` (optical flow interpolation, opt-in)
 - `MONEYOS_YT_SMOOTH=off` (no interpolation; fps conversion by duplication)
 
 ## Probe command
