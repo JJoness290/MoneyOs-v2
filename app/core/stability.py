@@ -51,6 +51,11 @@ def apply_startup_env_defaults() -> StabilitySettings:
     os.environ.setdefault("MONEYOS_DISABLE_OVERLAP_ENCODE", "1")
     os.environ.setdefault("MONEYOS_CUDA_LAUNCH_BLOCKING", "0")
     os.environ.setdefault("MONEYOS_VRAM_FRACTION", "0.70")
+    if os.getenv("MONEYOS_STABILITY_MODE", "0") == "1":
+        os.environ.setdefault("MONEYOS_AUTO_VRAM", "1")
+    else:
+        os.environ.setdefault("MONEYOS_AUTO_VRAM", "0")
+    os.environ.setdefault("MONEYOS_VRAM_POLICY", "conservative")
     if is_windows():
         os.environ.setdefault("HUGGINGFACE_HUB_DISABLE_SYMLINKS", "1")
         os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")

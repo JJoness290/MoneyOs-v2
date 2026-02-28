@@ -51,3 +51,7 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
 - Default initial fraction is `0.80` (or last-known-good if available), then ladder retries down to `0.55` (max 6 attempts).
 - SSE events include `attempt`, `attempts_total`, `vram_fraction`, and `recovery_action=lower_vram_fraction`.
 - Last-known-good value is stored under `C:\MoneyOS\cache\stability\last_good_vram_fraction.json`.
+
+- Preflight adaptive VRAM knobs:
+  - `MONEYOS_AUTO_VRAM=1`
+  - `MONEYOS_VRAM_POLICY=conservative|balanced|aggressive`

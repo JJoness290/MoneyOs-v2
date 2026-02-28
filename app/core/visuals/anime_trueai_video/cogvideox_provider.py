@@ -214,14 +214,18 @@ class CogVideoXProvider(TextToVideoProvider):
                     pipe.enable_model_cpu_offload()
             else:
                 pipe = pipe.to("cuda")
-            with contextlib.suppress(Exception):
-                pipe.enable_attention_slicing("max")
-            with contextlib.suppress(Exception):
-                pipe.enable_vae_slicing()
-            with contextlib.suppress(Exception):
-                pipe.vae.enable_tiling()
-            with contextlib.suppress(Exception):
-                pipe.enable_xformers_memory_efficient_attention()
+            if os.getenv("MONEYOS_TRUEAI_ATTENTION_SLICING", "1") == "1":
+                with contextlib.suppress(Exception):
+                    pipe.enable_attention_slicing("max")
+            if os.getenv("MONEYOS_TRUEAI_VAE_SLICING", "1") == "1":
+                with contextlib.suppress(Exception):
+                    pipe.enable_vae_slicing()
+            if os.getenv("MONEYOS_TRUEAI_VAE_TILING", "1") == "1":
+                with contextlib.suppress(Exception):
+                    pipe.vae.enable_tiling()
+            if os.getenv("MONEYOS_TRUEAI_USE_XFORMERS", "1") == "1":
+                with contextlib.suppress(Exception):
+                    pipe.enable_xformers_memory_efficient_attention()
 
         self._pipe = pipe
         CogVideoXProvider._shared_pipe = pipe

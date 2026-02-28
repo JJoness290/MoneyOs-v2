@@ -315,6 +315,14 @@ def run_trueai_60s_job(
     steps = cfg.steps
     width = _multiple_of_8(cfg.width)
     height = _multiple_of_8(cfg.height)
+    try:
+        res_scale = float(os.getenv("MONEYOS_TRUEAI_RES_SCALE", "1.0"))
+    except ValueError:
+        res_scale = 1.0
+    res_scale = max(0.75, min(1.0, res_scale))
+    if res_scale < 0.999:
+        width = _multiple_of_8(max(384, int(width * res_scale)))
+        height = _multiple_of_8(max(224, int(height * res_scale)))
     guidance = cfg.guidance
 
     try:
@@ -337,7 +345,13 @@ def run_trueai_60s_job(
         steps = env_steps
 
     clip_seconds = get_trueai_clip_seconds()
-    max_frames = 48
+    try:
+        max_frames = int(os.getenv("MONEYOS_TRUEAI_FRAMES_PER_CHUNK", "48"))
+    except ValueError:
+        max_frames = 48
+    max_frames = max(8, min(48, max_frames))
+    if max_frames % 2 == 1:
+        max_frames -= 1
     chunk_seconds = max_frames / max(fps, 1)
     chunks_needed = int(math.ceil(clip_seconds / chunk_seconds))
     frames_per_clip = max(8, get_trueai_target_frames(fps))

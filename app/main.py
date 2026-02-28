@@ -57,6 +57,13 @@ from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, st
 from app.core.bootstrap import ensure_dependencies
 from app.core.audio.tts_xtts import resolve_tts_license_mode
 from app.core.audio.voice_registry import VoiceRegistry
+from app.core.gpu_preflight import (
+    GpuPlan,
+    VramStats,
+    apply_gpu_plan_env,
+    choose_job_gpu_plan,
+    get_vram_stats,
+)
 from app.core.oom_recovery import (
     build_fraction_ladder,
     is_oom_like_error,
@@ -119,6 +126,8 @@ _jobs_lock = threading.Lock()
 _jobs: Dict[str, dict] = {}
 _last_clip_telemetry: dict[str, object] = {}
 _last_job_snapshot: dict[str, object] = {}
+_last_gpu_preflight_stats: dict[str, object] = {}
+_last_gpu_preflight_plan: dict[str, object] = {}
 _perf_lock = threading.Lock()
 _perf_history_path = OUTPUT_DIR / "perf_history.json"
 _trueai_slots = threading.Semaphore(max(1, resolve_stability_settings().max_concurrency))
@@ -680,6 +689,8 @@ async def debug_status() -> JSONResponse:
         "last_clip_telemetry": _last_clip_telemetry,
         "last_job_snapshot": _last_job_snapshot,
         "stability": stability_status_payload(),
+        "last_gpu_preflight_stats": _last_gpu_preflight_stats,
+        "last_gpu_preflight_plan": _last_gpu_preflight_plan,
     }
     try:
         import torch  # noqa: WPS433
@@ -897,6 +908,71 @@ def _run_anime_episode_auto(job_id: str, req: AnimeEpisodeAutoRequest) -> None:
         )
 
 
+def _record_gpu_preflight(stats: VramStats, plan: GpuPlan) -> None:
+    global _last_gpu_preflight_stats, _last_gpu_preflight_plan
+    _last_gpu_preflight_stats = {
+        "vram_total_mib": stats.total_mib,
+        "vram_used_mib": stats.used_mib,
+        "vram_free_mib": stats.free_mib,
+        "source": stats.source,
+    }
+    _last_gpu_preflight_plan = plan.to_event_payload()
+
+
+def _prepare_gpu_plan(job_id: str, attempt: int, attempts_total: int) -> tuple[VramStats, GpuPlan]:
+    stats = get_vram_stats()
+    if stats is None:
+        stats = VramStats(total_mib=8192.0, used_mib=0.0, free_mib=8192.0, source="fallback")
+    policy = os.getenv("MONEYOS_VRAM_POLICY", "conservative")
+    auto_vram = os.getenv("MONEYOS_AUTO_VRAM", "1") == "1"
+    if auto_vram:
+        plan = choose_job_gpu_plan("trueai", policy, stats, oom_retry_level=max(0, attempt - 1))
+        apply_gpu_plan_env(plan)
+    else:
+        forced_fraction = float(os.getenv("MONEYOS_VRAM_FRACTION", "0.80"))
+        plan = choose_job_gpu_plan("trueai", policy, stats, oom_retry_level=0)
+        plan = GpuPlan(
+            policy=plan.policy,
+            vram_fraction=max(0.50, min(0.90, forced_fraction)),
+            reserve_mib=plan.reserve_mib,
+            allocator_overhead_mib=plan.allocator_overhead_mib,
+            budget_free_mib=plan.budget_free_mib,
+            attention_slicing=plan.attention_slicing,
+            vae_slicing=plan.vae_slicing,
+            vae_tiling=plan.vae_tiling,
+            use_xformers=plan.use_xformers,
+            batch_size=plan.batch_size,
+            frames_per_chunk=plan.frames_per_chunk,
+            resolution_scale=plan.resolution_scale,
+        )
+    _record_gpu_preflight(stats, plan)
+    if stats.free_mib < 1500:
+        raise RuntimeError(
+            f"Insufficient free VRAM ({stats.free_mib:.0f} MiB). Close GPU-heavy apps or reboot."
+        )
+    _set_status(
+        job_id,
+        "GPU preflight complete",
+        stage_key="plan",
+        progress_pct=8,
+        extra={
+            "attempt": attempt,
+            "attempts_total": attempts_total,
+            "vram_fraction": plan.vram_fraction,
+            "vram_total_mib": stats.total_mib,
+            "vram_used_mib": stats.used_mib,
+            "vram_free_mib": stats.free_mib,
+            "vram_budget_free_mib": plan.budget_free_mib,
+            "reserve_mib": plan.reserve_mib,
+            "vram_policy": plan.policy,
+            "auto_vram": auto_vram,
+            "chosen_vram_fraction": plan.vram_fraction,
+            "gpu_plan": plan.to_event_payload(),
+        },
+    )
+    return stats, plan
+
+
 def _run_with_oom_retries(
     job_id: str,
     runner,
@@ -910,15 +986,23 @@ def _run_with_oom_retries(
 
     for attempt, fraction in enumerate(fractions, start=1):
         os.environ["MONEYOS_VRAM_FRACTION"] = f"{fraction:.2f}"
+        stats, plan = _prepare_gpu_plan(job_id, attempt, len(fractions))
         _set_status(
             job_id,
-            f"attempt {attempt}/{len(fractions)} with vram_fraction={fraction:.2f}",
+            f"attempt {attempt}/{len(fractions)} with vram_fraction={plan.vram_fraction:.2f}",
             stage_key="generate",
             progress_pct=10,
             extra={
                 "attempt": attempt,
                 "attempts_total": len(fractions),
-                "vram_fraction": fraction,
+                "vram_fraction": plan.vram_fraction,
+                "vram_total_mib": stats.total_mib,
+                "vram_used_mib": stats.used_mib,
+                "vram_free_mib": stats.free_mib,
+                "vram_budget_free_mib": plan.budget_free_mib,
+                "reserve_mib": plan.reserve_mib,
+                "vram_policy": plan.policy,
+                "gpu_plan": plan.to_event_payload(),
             },
         )
         if output_dir.exists():
