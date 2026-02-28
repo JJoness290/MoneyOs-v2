@@ -57,6 +57,13 @@ from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, st
 from app.core.bootstrap import ensure_dependencies
 from app.core.audio.tts_xtts import resolve_tts_license_mode
 from app.core.audio.voice_registry import VoiceRegistry
+from app.core.oom_recovery import (
+    build_fraction_ladder,
+    is_oom_like_error,
+    release_cuda_memory,
+    resolve_initial_fraction,
+    save_last_good_fraction,
+)
 from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
 from app.core.visuals.anime_3d.animation_library import rebuild_animation_library
 from app.core.visuals.anime_3d.blender_runner import detect_blender
@@ -890,25 +897,115 @@ def _run_anime_episode_auto(job_id: str, req: AnimeEpisodeAutoRequest) -> None:
         )
 
 
+def _run_with_oom_retries(
+    job_id: str,
+    runner,
+    *,
+    output_dir: Path,
+    attempts_total: int = 6,
+) -> tuple[Path, Path]:
+    initial = resolve_initial_fraction()
+    fractions = build_fraction_ladder(initial, attempts_total=attempts_total)
+    last_exc: Exception | None = None
+
+    for attempt, fraction in enumerate(fractions, start=1):
+        os.environ["MONEYOS_VRAM_FRACTION"] = f"{fraction:.2f}"
+        _set_status(
+            job_id,
+            f"attempt {attempt}/{len(fractions)} with vram_fraction={fraction:.2f}",
+            stage_key="generate",
+            progress_pct=10,
+            extra={
+                "attempt": attempt,
+                "attempts_total": len(fractions),
+                "vram_fraction": fraction,
+            },
+        )
+        if output_dir.exists():
+            shutil.rmtree(output_dir, ignore_errors=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            result = runner(attempt, len(fractions), fraction)
+            if attempt > 1:
+                _set_status(
+                    job_id,
+                    f"Recovered from OOM at vram_fraction={fraction:.2f} (attempt {attempt}/{len(fractions)})",
+                    stage_key="generate",
+                    progress_pct=80,
+                    extra={
+                        "attempt": attempt,
+                        "attempts_total": len(fractions),
+                        "vram_fraction": fraction,
+                        "recovery_action": "lower_vram_fraction",
+                    },
+                )
+            save_last_good_fraction(fraction)
+            return result
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if not is_oom_like_error(exc):
+                raise
+            if attempt >= len(fractions):
+                break
+            next_fraction = fractions[attempt]
+            _set_status(
+                job_id,
+                f"OOM detected → lowering VRAM fraction to {next_fraction:.2f} and retrying (attempt {attempt + 1}/{len(fractions)})",
+                stage_key="generate",
+                progress_pct=15,
+                extra={
+                    "attempt": attempt + 1,
+                    "attempts_total": len(fractions),
+                    "vram_fraction": next_fraction,
+                    "recovery_action": "lower_vram_fraction",
+                },
+            )
+            release_cuda_memory()
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("OOM retry controller exited without attempts")
+
+
 def _run_trueai_quality_episode(job_id: str, req: TrueAiVideoRequest) -> None:
     from app.core.visuals.anime_trueai_video.production_episode import EpisodeSpec, run_trueai_quality_episode  # noqa: WPS433
 
-    def _update(message: str) -> None:
+    spec = EpisodeSpec(
+        topic_seed=req.topic_seed,
+        minutes=req.minutes,
+        language=req.language,
+        voice_pack=req.voice_pack,
+        voice_cast=req.voice_cast,
+    )
+    out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
+
+    def _update(message: str, attempt: int, attempts_total: int, fraction: float) -> None:
         stage = "generate"
         lowered = message.lower()
         if lowered in {"bootstrap", "script", "audio", "render"}:
             stage = lowered
-        _set_status(job_id, message, stage_key=stage, progress_pct=35)
+        _set_status(
+            job_id,
+            message,
+            stage_key=stage,
+            progress_pct=35,
+            extra={
+                "attempt": attempt,
+                "attempts_total": attempts_total,
+                "vram_fraction": fraction,
+            },
+        )
 
     try:
-        spec = EpisodeSpec(
-            topic_seed=req.topic_seed,
-            minutes=req.minutes,
-            language=req.language,
-            voice_pack=req.voice_pack,
-            voice_cast=req.voice_cast,
+        final_video, report = _run_with_oom_retries(
+            job_id,
+            lambda attempt, attempts_total, fraction: run_trueai_quality_episode(
+                job_id,
+                spec,
+                status_callback=lambda msg: _update(msg, attempt, attempts_total, fraction),
+            ),
+            output_dir=out_dir,
         )
-        final_video, report = run_trueai_quality_episode(job_id, spec, status_callback=_update)
         _set_status(
             job_id,
             "Complete",
@@ -934,7 +1031,7 @@ def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: s
                 progress = int(current.get("progress_pct", 35))
             _set_status(job_id, status, stage_key=stage, progress_pct=progress)
 
-    def _update(message: str) -> None:
+    def _update(message: str, attempt: int | None = None, attempts_total: int | None = None, fraction: float | None = None) -> None:
         stage = "generate"
         lowered = message.lower()
         if "plan" in lowered:
@@ -956,7 +1053,14 @@ def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: s
             stage = "plan"
         elif "load" in lowered or "inference" in lowered:
             stage = "generate"
-        _set_status(job_id, message, stage_key=stage, progress_pct=35)
+        extra = {}
+        if attempt is not None:
+            extra["attempt"] = attempt
+        if attempts_total is not None:
+            extra["attempts_total"] = attempts_total
+        if fraction is not None:
+            extra["vram_fraction"] = fraction
+        _set_status(job_id, message, stage_key=stage, progress_pct=35, extra=extra or None)
 
     try:
         _set_status(job_id, "Queued TRUE text-to-video", stage_key="plan", progress_pct=1)
@@ -965,7 +1069,16 @@ def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: s
         hb = threading.Thread(target=_heartbeat, daemon=True)
         hb.start()
         with _trueai_slots:
-            final_video, report = run_trueai_60s_job(job_id, req.prompt, status_callback=_update, forced_preset=forced_preset)
+            final_video, report = _run_with_oom_retries(
+                job_id,
+                lambda attempt, attempts_total, fraction: run_trueai_60s_job(
+                    job_id,
+                    req.prompt,
+                    status_callback=lambda msg: _update(msg, attempt, attempts_total, fraction),
+                    forced_preset=forced_preset,
+                ),
+                output_dir=OUTPUT_DIR / "anime_trueai_video" / job_id,
+            )
         _set_status(
             job_id,
             "Complete",

@@ -44,3 +44,10 @@ Use this to verify final/intermediate MP4 properties:
 ```bash
 ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate,avg_frame_rate,pix_fmt -of default=nw=1 "path\\to\\output.mp4"
 ```
+
+
+## Automatic OOM VRAM fraction recovery
+- TrueAI jobs now auto-retry CUDA OOM failures by lowering `MONEYOS_VRAM_FRACTION` without restarting the server.
+- Default initial fraction is `0.80` (or last-known-good if available), then ladder retries down to `0.55` (max 6 attempts).
+- SSE events include `attempt`, `attempts_total`, `vram_fraction`, and `recovery_action=lower_vram_fraction`.
+- Last-known-good value is stored under `C:\MoneyOS\cache\stability\last_good_vram_fraction.json`.
