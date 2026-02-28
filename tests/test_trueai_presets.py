@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.core.visuals.anime_trueai_video.pipeline import _resolve_preset
+from app.core.visuals.anime_trueai_video.pipeline import _resolve_preset, _resolve_super_resolution_env_override
 
 
 def test_fasttest_env_forces_fasttest(monkeypatch) -> None:
@@ -38,3 +38,8 @@ def test_forced_quality(monkeypatch) -> None:
     assert cfg.width == 1280
     assert cfg.height == 720
     assert cfg.guidance == 7.0
+
+
+def test_super_resolution_env_override_off(monkeypatch) -> None:
+    monkeypatch.setenv("MONEYOS_TRUEAI_SUPER_RES", "0")
+    assert _resolve_super_resolution_env_override() is False

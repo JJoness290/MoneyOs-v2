@@ -81,6 +81,24 @@ def get_trueai_target_frames(infer_fps: int) -> int:
     return max(1, int(round(infer_fps * secs)))
 
 
+def _parse_env_bool(value: str) -> bool | None:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "on"}:
+        return True
+    if normalized in {"0", "false", "off"}:
+        return False
+    return None
+
+
+def _resolve_super_resolution_env_override() -> bool | None:
+    raw = os.getenv("MONEYOS_TRUEAI_SUPER_RES")
+    if raw is None or not raw.strip():
+        raw = os.getenv("MONEYOS_TRUEAI_SUPER_RESOLUTION")
+    if raw is None or not raw.strip():
+        return None
+    return _parse_env_bool(raw)
+
+
 def _ffmpeg(*args: str) -> None:
     run_ffmpeg(["ffmpeg", "-y", *args])
 
@@ -308,6 +326,19 @@ def run_trueai_60s_job(
 ) -> tuple[Path, Path]:
     FASTTEST = os.getenv("MONEYOS_TRUEAI_FASTTEST", "0") == "1" or str(forced_preset or "").strip().lower() == "fasttest"
     cfg = _resolve_preset("fasttest" if FASTTEST else forced_preset)
+    sr_env_override = _resolve_super_resolution_env_override()
+    if sr_env_override is False:
+        cfg = TrueAIPresetConfig(
+            name=cfg.name,
+            duration_s=cfg.duration_s,
+            fps=cfg.fps,
+            width=cfg.width,
+            height=cfg.height,
+            steps=cfg.steps,
+            guidance=cfg.guidance,
+            frames_per_clip=cfg.frames_per_clip,
+            super_resolution=False,
+        )
     yt_target = get_youtube_target_profile()
 
     total_seconds = cfg.duration_s
@@ -376,7 +407,15 @@ def run_trueai_60s_job(
             "vram_fraction": stability.vram_fraction,
             "pytorch_alloc_conf": stability.pytorch_alloc_conf,
         },
-        "trueai": {"preset": cfg.name, "fps": fps, "steps": steps, "guidance": guidance, "width": width, "height": height},
+        "trueai": {
+            "preset": cfg.name,
+            "fps": fps,
+            "steps": steps,
+            "guidance": guidance,
+            "width": width,
+            "height": height,
+            "super_resolution": bool(cfg.super_resolution and not FASTTEST),
+        },
         "youtube_target": {
             "name": yt_target.target_name,
             "width": yt_target.width,
@@ -418,6 +457,8 @@ def run_trueai_60s_job(
     print(f"[TRUEAI] resolution={width}x{height}")
     print(f"[TRUEAI] steps={steps}")
     print(f"[TRUEAI] guidance={guidance}")
+    if sr_env_override is False:
+        print("[TRUEAI] super_resolution=FORCED_OFF reason=env_override")
     print(f"[TRUEAI] super_resolution={'ON' if cfg.super_resolution else 'OFF'}")
     yt_vf = youtube_video_filter(yt_target, apply_smoothing=True)
     print(f"[TRUEAI][YT] fps={yt_target.fps} smooth={yt_target.smooth_mode} vf=\"{yt_vf}\"")
