@@ -131,18 +131,19 @@ def synthesize(
     language: str = "en",
     emotion: str | None = None,
     speed: float = 1.0,
+    speaker: str | None = None,
 ) -> bytes:
     styled_speed = _emotion_speed(emotion, speed)
     styled_text = text.replace(".", ". ")
     if handle.model is None:
         raise RuntimeError("XTTS model handle is not initialized")
 
-    wav = handle.model.tts(
-        text=styled_text,
-        speaker_wav=speaker_wav,
-        language=language,
-        speed=styled_speed,
-    )
+    kwargs = {"text": styled_text, "language": language, "speed": styled_speed}
+    if speaker:
+        kwargs["speaker"] = speaker
+    elif speaker_wav:
+        kwargs["speaker_wav"] = speaker_wav
+    wav = handle.model.tts(**kwargs)
     arr = np.asarray(wav, dtype=np.float32)
     arr = np.clip(arr, -1.0, 1.0)
     pcm = (arr * 32767.0).astype(np.int16)

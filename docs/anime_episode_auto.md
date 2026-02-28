@@ -52,3 +52,14 @@ Each job under `outputs/anime_episode_auto/<job_id>` writes:
   - `XDG_CACHE_HOME={MONEYOS_CACHE_ROOT}`
   - `APPDATA={MONEYOS_CACHE_ROOT}\appdata`
 - This prevents writes to `C:\Users\<user>\AppData`.
+
+
+## Production default
+- Production path is `POST /jobs/anime-trueai-quality` (true AI pipeline only; no Blender).
+- Golden command:
+
+```bash
+curl.exe -X POST "http://127.0.0.1:8000/jobs/anime-trueai-quality" -H "Content-Type: application/json" -d "{\"topic_seed\":\"Rogue AI awakens in Neo-Tokyo\",\"minutes\":10,\"language\":\"en\"}"
+```
+
+- Final output location: `C:\MoneyOS\work\anime_trueai_video\<job_id>\final.mp4`.

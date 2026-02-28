@@ -56,6 +56,7 @@ from app.core.net.downloads import get_last_download_diagnostics
 from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, status as autopilot_status
 from app.core.bootstrap import ensure_dependencies
 from app.core.audio.tts_xtts import resolve_tts_license_mode
+from app.core.audio.voice_registry import VoiceRegistry
 from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
 from app.core.visuals.anime_3d.animation_library import rebuild_animation_library
 from app.core.visuals.anime_3d.blender_runner import detect_blender
@@ -187,6 +188,11 @@ class AiVideoRequest(BaseModel):
 
 class TrueAiVideoRequest(BaseModel):
     prompt: str = "anime action sequence in a futuristic city"
+    topic_seed: str = "Rogue AI awakens in Neo-Tokyo"
+    minutes: int = 10
+    language: str = "en"
+    voice_pack: str = "anime_dub_builtin_v1"
+    voice_cast: Optional[Dict[str, str]] = None
 
 
 class AnimeEpisodeAutoRequest(BaseModel):
@@ -884,6 +890,36 @@ def _run_anime_episode_auto(job_id: str, req: AnimeEpisodeAutoRequest) -> None:
         )
 
 
+def _run_trueai_quality_episode(job_id: str, req: TrueAiVideoRequest) -> None:
+    from app.core.visuals.anime_trueai_video.production_episode import EpisodeSpec, run_trueai_quality_episode  # noqa: WPS433
+
+    def _update(message: str) -> None:
+        stage = "generate"
+        lowered = message.lower()
+        if lowered in {"bootstrap", "script", "audio", "render"}:
+            stage = lowered
+        _set_status(job_id, message, stage_key=stage, progress_pct=35)
+
+    try:
+        spec = EpisodeSpec(
+            topic_seed=req.topic_seed,
+            minutes=req.minutes,
+            language=req.language,
+            voice_pack=req.voice_pack,
+            voice_cast=req.voice_cast,
+        )
+        final_video, report = run_trueai_quality_episode(job_id, spec, status_callback=_update)
+        _set_status(
+            job_id,
+            "Complete",
+            stage_key="done",
+            progress_pct=100,
+            extra={"clip": str(final_video), "report": str(report), "mode": "trueai_quality_production"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        _set_error(job_id, f"Error: {exc}")
+
+
 def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: str | None = None) -> None:
     from app.core.visuals.anime_trueai_video.pipeline import run_trueai_60s_job  # noqa: WPS433
     print("[TRUEAI][ENTRY] file=app/main.py func=_run_trueai_video_60s -> app/core/visuals/anime_trueai_video/pipeline.py:run_trueai_60s_job")
@@ -1488,7 +1524,7 @@ async def generate_anime_trueai_fasttest(req: TrueAiVideoRequest = Body(default=
 async def generate_anime_trueai_quality(req: TrueAiVideoRequest = Body(default=TrueAiVideoRequest())) -> JSONResponse:
     job_id = uuid.uuid4().hex
     _set_status(job_id, "Queued TRUE AI quality video", stage_key="plan", progress_pct=1)
-    thread = threading.Thread(target=_run_trueai_video_60s, args=(job_id, req, "quality"), daemon=True)
+    thread = threading.Thread(target=_run_trueai_quality_episode, args=(job_id, req), daemon=True)
     thread.start()
     out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
     return JSONResponse({"job_id": job_id, "output_dir": str(out_dir.resolve()), "preset": "quality"})
@@ -1512,9 +1548,12 @@ def debug_voice() -> JSONResponse:
     except Exception:
         cuda_available = False
     license_mode = resolve_tts_license_mode()
+    registry = VoiceRegistry()
     return JSONResponse(
         {
             "backend": os.getenv("MONEYOS_TTS_BACKEND", "xtts"),
+            "voice_pack": os.getenv("MONEYOS_VOICE_PACK", "anime_dub_builtin_v1"),
+            "voices": registry.list_voices(),
             "model": os.getenv("MONEYOS_TTS_MODEL", "tts_models/multilingual/multi-dataset/xtts_v2"),
             "device": os.getenv("MONEYOS_TTS_DEVICE", "auto"),
             "cuda_available": cuda_available,
