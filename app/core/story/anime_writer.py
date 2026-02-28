@@ -71,20 +71,56 @@ BASE_CHARACTERS = [
 ]
 
 
-def _build_beats(scene_idx: int, per_scene_seconds: float, topic_seed: str) -> list[Beat]:
+def _emotion_for_progress(progress: float) -> str:
+    if progress < 0.3:
+        return "anxious"
+    if progress < 0.7:
+        return "urgent"
+    if progress < 0.95:
+        return "desperate"
+    return "relieved"
+
+
+def _ren_line(topic_seed: str, progress: float) -> str:
+    if progress < 0.3:
+        return f"Mika, the {topic_seed.lower()} spike just tore through district relays—if we stall, the whole grid falls out of sync."
+    if progress < 0.7:
+        return "I can hold the breach for thirty seconds, but after that the city core will lock us out for good."
+    if progress < 0.95:
+        return "I can feel the reactor shaking under us—if this fails, everyone above this shrine loses power and life support."
+    return "We did it… the signal is stabilizing. Neo-Tokyo gets to see the sunrise after all."
+
+
+def _mika_line(topic_seed: str, progress: float) -> str:
+    if progress < 0.3:
+        return f"Then we move now, Ren. I’m rerouting the {topic_seed.lower()} pulse through the shrine node before it eats the transit net."
+    if progress < 0.7:
+        return "Keep talking to me—your timing is my metronome. If we break rhythm once, the cascade wins."
+    if progress < 0.95:
+        return "Don’t you dare let go. I’ve got the kill-switch mapped, and when I count down we hit it together."
+    return "You gave me the window I needed. Core seal is clean, and the city lights are coming back one by one."
+
+
+def _build_beats(scene_idx: int, scene_count: int, per_scene_seconds: float, topic_seed: str) -> list[Beat]:
     beat_count = 4
     beat_len = per_scene_seconds / beat_count
     beats: list[Beat] = []
-    for i in range(beat_count):
+    for beat_idx in range(beat_count):
+        progress = ((scene_idx - 1) * beat_count + beat_idx + 1) / (scene_count * beat_count)
+        speaker = "Ren Aoki" if beat_idx % 2 == 0 else "Mika Sora"
+        spoken = _ren_line(topic_seed, progress) if speaker == "Ren Aoki" else _mika_line(topic_seed, progress)
         beats.append(
             Beat(
-                beat_id=f"s{scene_idx:02d}_b{i+1:02d}",
+                beat_id=f"s{scene_idx:02d}_b{beat_idx+1:02d}",
                 duration_sec_target=round(beat_len, 3),
-                on_screen_action=f"Characters react to {topic_seed} escalation phase {i+1} in scene {scene_idx}.",
-                dialogue=f"Narration: Scene {scene_idx} beat {i+1} pushes the conflict toward resolution.",
-                emotion=("tense" if i < 2 else "hopeful"),
-                key_visuals=["location continuity", "character close-up", "action emphasis"],
-                forbidden_visuals=["gore", "text artifacts", "deformed faces"],
+                on_screen_action=(
+                    "Rain-slick neon reflections ripple across armored rails while camera glides past sparking conduits, "
+                    "framing both leads as alarms pulse and distant towers flicker."
+                ),
+                dialogue=f"{speaker}: {spoken}",
+                emotion=_emotion_for_progress(progress),
+                key_visuals=["neon storm skyline", "reactor light pulses", "close emotional framing"],
+                forbidden_visuals=["gore", "text overlays", "deformed anatomy"],
             )
         )
     return beats
@@ -98,22 +134,23 @@ def generate_anime_episode_outline_and_script(topic_seed: str, minutes: int) -> 
 
     scenes: list[Scene] = []
     for scene_idx in range(1, scene_count + 1):
+        progress = scene_idx / scene_count
         scenes.append(
             Scene(
                 scene_id=f"scene_{scene_idx:02d}",
                 location=("Neo-Tokyo skybridge" if scene_idx % 2 else "Subterranean data shrine"),
-                time_of_day=("night" if scene_idx % 3 else "dawn"),
-                mood=("urgent" if scene_idx < scene_count else "resolved"),
+                time_of_day=("night" if scene_idx < scene_count else "dawn"),
+                mood=("volatile" if progress < 0.7 else "high-stakes resolve" if progress < 0.95 else "release"),
                 stakes="If they fail, city-wide autonomy systems collapse.",
-                camera_style=("dynamic push-ins and whip pans" if scene_idx % 2 else "steady cinematic wides"),
-                sfx_notes="Neon rain, distant rail hum, soft UI chirps.",
-                beats=_build_beats(scene_idx, per_scene_seconds, topic_seed),
+                camera_style=("dynamic push-ins and whip pans" if scene_idx % 2 else "steady cinematic wides with hard light contrast"),
+                sfx_notes="Neon rain, distant rail hum, capacitor whine, reactor tremors.",
+                beats=_build_beats(scene_idx, scene_count, per_scene_seconds, topic_seed),
             )
         )
 
     payload = EpisodeScript(
         title=f"{topic_seed}: Echoes of Tomorrow",
-        logline=f"In Neo-Tokyo, two young operators confront a rogue intelligence born from {topic_seed}.",
+        logline=f"In Neo-Tokyo, Ren and Mika race through a collapsing network to stop the intelligence born from {topic_seed}.",
         themes=["identity", "responsibility", "hope under pressure"],
         safety_notes=["PG-13 violence only", "no self-harm", "no hate content"],
         characters=BASE_CHARACTERS,

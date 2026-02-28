@@ -22,7 +22,7 @@ class XTTSHandle:
 
 
 def resolve_tts_license_mode() -> str:
-    return os.getenv("MONEYOS_TTS_LICENSE", "none").strip().lower()
+    return os.getenv("MONEYOS_TTS_LICENSE", "cpml").strip().lower()
 
 
 def configure_xtts_runtime_env(cache_root: Path) -> dict[str, str]:
@@ -98,8 +98,6 @@ def _normalize_xtts_model_name(model_name: str) -> str:
 def load_xtts(model_cache_dir: Path) -> XTTSHandle:
     env_updates = configure_xtts_runtime_env(model_cache_dir.parent if model_cache_dir.name == "tts" else model_cache_dir)
     model_cache_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[VOICE] XTTS cache home set to {env_updates['TTS_HOME']}")
-    print(f"[VOICE] XTTS model files will be downloaded to {env_updates['TTS_HOME']} if missing")
     device = _resolve_device()
     try:
         from TTS.api import TTS  # type: ignore
@@ -113,6 +111,13 @@ def load_xtts(model_cache_dir: Path) -> XTTSHandle:
     model_name = _normalize_xtts_model_name(configured_model)
     tts = TTS(model_name=model_name, progress_bar=False, gpu=(device == "cuda"))
     return XTTSHandle(model=tts, device=device, backend=model_name)
+
+
+def _tts_style_kwargs() -> dict:
+    style = os.getenv("MONEYOS_TTS_STYLE", "anime_dub").strip().lower()
+    if style == "anime_dub":
+        return {"temperature": 0.7, "repetition_penalty": 1.1, "speed": 1.0}
+    return {}
 
 
 def _emotion_speed(emotion: str | None, speed: float) -> float:
@@ -133,17 +138,24 @@ def synthesize(
     speed: float = 1.0,
     speaker: str | None = None,
 ) -> bytes:
-    styled_speed = _emotion_speed(emotion, speed)
+    speaking_rate = float(os.getenv("MONEYOS_TTS_SPEAKING_RATE", str(speed)))
+    styled_speed = _emotion_speed(emotion, speaking_rate)
     styled_text = text.replace(".", ". ")
     if handle.model is None:
         raise RuntimeError("XTTS model handle is not initialized")
 
     kwargs = {"text": styled_text, "language": language, "speed": styled_speed}
+    kwargs.update(_tts_style_kwargs())
     if speaker:
         kwargs["speaker"] = speaker
     elif speaker_wav:
         kwargs["speaker_wav"] = speaker_wav
-    wav = handle.model.tts(**kwargs)
+    try:
+        wav = handle.model.tts(**kwargs)
+    except TypeError:
+        kwargs.pop("temperature", None)
+        kwargs.pop("repetition_penalty", None)
+        wav = handle.model.tts(**kwargs)
     arr = np.asarray(wav, dtype=np.float32)
     arr = np.clip(arr, -1.0, 1.0)
     pcm = (arr * 32767.0).astype(np.int16)

@@ -62,4 +62,4 @@ Each job under `outputs/anime_episode_auto/<job_id>` writes:
 curl.exe -X POST "http://127.0.0.1:8000/jobs/anime-trueai-quality" -H "Content-Type: application/json" -d "{\"topic_seed\":\"Rogue AI awakens in Neo-Tokyo\",\"minutes\":10,\"language\":\"en\"}"
 ```
 
-- Final output location: `C:\MoneyOS\work\anime_trueai_video\<job_id>\final.mp4`.
+- Final output location: `C:\MoneyOS\work\anime_trueai_video\<job_id>\final_yt.mp4` (and compatibility copy `final.mp4`).

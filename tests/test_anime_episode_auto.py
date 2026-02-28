@@ -54,16 +54,19 @@ def test_xtts_runtime_env_redirects_cache(monkeypatch, tmp_path):
             os.environ[key] = value
 
 
-def test_xtts_runtime_env_requires_license(monkeypatch, tmp_path):
+def test_xtts_runtime_env_defaults_license_to_cpml(monkeypatch, tmp_path):
     monkeypatch.delenv("MONEYOS_TTS_LICENSE", raising=False)
-    try:
-        configure_xtts_runtime_env(tmp_path)
-    except MoneyOSValidationError as exc:
-        assert "MONEYOS_TTS_LICENSE" in str(exc)
-    else:
-        raise AssertionError("expected MoneyOSValidationError")
+    tracked = {k: os.environ.get(k) for k in ("TTS_HOME", "XDG_CACHE_HOME", "APPDATA", "COQUI_TOS_AGREED", "MONEYOS_TTS_LICENSE")}
+    env = configure_xtts_runtime_env(tmp_path)
+    assert env["MONEYOS_TTS_LICENSE"] == "cpml"
+    assert env["COQUI_TOS_AGREED"] == "1"
+    for key, value in tracked.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 def test_resolve_tts_license_mode(monkeypatch):
-    monkeypatch.setenv("MONEYOS_TTS_LICENSE", "cpml")
+    monkeypatch.delenv("MONEYOS_TTS_LICENSE", raising=False)
     assert resolve_tts_license_mode() == "cpml"

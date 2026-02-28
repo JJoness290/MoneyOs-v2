@@ -10,8 +10,14 @@ class BootstrapDownloadError(RuntimeError):
     pass
 
 
+def _models_root() -> Path:
+    return Path(os.getenv("MONEYOS_MODELS_ROOT", r"C:\MoneyOS\cache\models"))
+
+
 def ensure_hf_model(repo_id: str, revision: str | None = None, allow_patterns: list[str] | None = None, local_dir: Path | None = None) -> Path:
-    target = local_dir or Path(os.getenv("HF_HOME", r"C:\MoneyOS\cache\huggingface")) / repo_id.replace("/", "__")
+    base = _models_root()
+    base.mkdir(parents=True, exist_ok=True)
+    target = local_dir or (base / repo_id.replace("/", "__"))
     target.mkdir(parents=True, exist_ok=True)
     try:
         path = snapshot_download(
@@ -33,9 +39,22 @@ def ensure_hf_model(repo_id: str, revision: str | None = None, allow_patterns: l
 
 
 def ensure_xtts_model() -> Path:
-    return ensure_hf_model("coqui/XTTS-v2")
+    return ensure_hf_model(os.getenv("MONEYOS_TTS_MODEL_REPO", "coqui/XTTS-v2"))
 
 
 def ensure_trueai_video_model() -> Path:
     repo = os.getenv("MONEYOS_COGVIDEOX_MODEL_ID", "THUDM/CogVideoX-5b")
     return ensure_hf_model(repo)
+
+
+def ensure_anime_diffusion_model() -> Path:
+    repo = os.getenv("MONEYOS_ANIME_DIFFUSION_MODEL_ID", "cagliostrolab/animagine-xl-3.1")
+    return ensure_hf_model(repo)
+
+
+def ensure_required_production_models() -> dict[str, str]:
+    return {
+        "xtts": str(ensure_xtts_model()),
+        "trueai": str(ensure_trueai_video_model()),
+        "anime_diffusion": str(ensure_anime_diffusion_model()),
+    }
