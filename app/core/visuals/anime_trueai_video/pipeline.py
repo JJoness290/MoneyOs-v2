@@ -405,6 +405,9 @@ def run_trueai_60s_job(
             "stability_mode": stability.stability_mode,
             "max_concurrency": stability.max_concurrency,
             "vram_fraction": stability.vram_fraction,
+            "vram_fraction_effective": stability.vram_fraction,
+            "vram_fraction_source": os.getenv("MONEYOS_VRAM_FRACTION_SOURCE", "planner"),
+            "vram_fraction_user_cap": os.getenv("MONEYOS_VRAM_FRACTION"),
             "pytorch_alloc_conf": stability.pytorch_alloc_conf,
         },
         "trueai": {

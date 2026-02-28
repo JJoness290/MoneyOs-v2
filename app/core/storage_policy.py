@@ -188,6 +188,8 @@ def effective_settings_payload(extra: dict[str, Any] | None = None) -> dict[str,
         "PYTORCH_CUDA_ALLOC_CONF",
         "MONEYOS_PYTORCH_ALLOC_CONF",
         "MONEYOS_VRAM_FRACTION",
+        "MONEYOS_VRAM_FRACTION_LOCK",
+        "MONEYOS_VRAM_FRACTION_EFFECTIVE",
         "MONEYOS_MAX_CONCURRENCY",
     ]
     payload = {

@@ -50,7 +50,6 @@ def apply_startup_env_defaults() -> StabilitySettings:
     os.environ.setdefault("MONEYOS_CPU_MAX_UTIL", "80")
     os.environ.setdefault("MONEYOS_DISABLE_OVERLAP_ENCODE", "1")
     os.environ.setdefault("MONEYOS_CUDA_LAUNCH_BLOCKING", "0")
-    os.environ.setdefault("MONEYOS_VRAM_FRACTION", "0.70")
     if os.getenv("MONEYOS_STABILITY_MODE", "0") == "1":
         os.environ.setdefault("MONEYOS_AUTO_VRAM", "1")
     else:
@@ -82,7 +81,7 @@ def resolve_stability_settings() -> StabilitySettings:
             "MONEYOS_PYTORCH_ALLOC_CONF",
             os.getenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True,max_split_size_mb:128,garbage_collection_threshold:0.8"),
         ),
-        vram_fraction=float(os.getenv("MONEYOS_VRAM_FRACTION", "0.70")),
+        vram_fraction=float(os.getenv("MONEYOS_VRAM_FRACTION_EFFECTIVE", os.getenv("MONEYOS_VRAM_FRACTION", "0.70"))),
     )
 
 

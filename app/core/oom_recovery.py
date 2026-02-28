@@ -32,7 +32,7 @@ def is_oom_like_error(exc: Exception) -> bool:
 
 
 def _clamp_fraction(value: float) -> float:
-    return max(0.50, min(0.90, value))
+    return max(0.10, min(0.95, value))
 
 
 def _last_good_file() -> Path:
@@ -56,13 +56,42 @@ def save_last_good_fraction(value: float) -> None:
     path.write_text(json.dumps({"vram_fraction": _clamp_fraction(value)}), encoding="utf-8")
 
 
-def resolve_initial_fraction() -> float:
+
+
+def resolve_user_fraction_cap() -> tuple[float | None, bool]:
     raw = os.getenv("MONEYOS_VRAM_FRACTION", "").strip()
+    cap: float | None = None
     if raw:
         try:
-            return _clamp_fraction(float(raw))
+            parsed = float(raw)
+            if 0.10 <= parsed <= 0.95:
+                cap = parsed
         except ValueError:
-            pass
+            cap = None
+    lock_raw = os.getenv("MONEYOS_VRAM_FRACTION_LOCK", "").strip().lower()
+    if lock_raw:
+        lock_enabled = lock_raw not in {"0", "false", "off"}
+    else:
+        lock_enabled = cap is not None
+    return cap, lock_enabled
+
+
+def cap_fraction_for_runtime(value: float, *, source: str) -> tuple[float, str]:
+    cap, lock_enabled = resolve_user_fraction_cap()
+    value = _clamp_fraction(value)
+    if not lock_enabled or cap is None:
+        return value, source
+    capped = min(value, _clamp_fraction(cap))
+    if capped < value - 1e-9:
+        return capped, f"{source}_capped"
+    if source == "planner":
+        return capped, "env_cap"
+    return capped, source
+
+def resolve_initial_fraction() -> float:
+    cap, lock_enabled = resolve_user_fraction_cap()
+    if cap is not None:
+        return _clamp_fraction(cap)
     remembered = load_last_good_fraction()
     if remembered is not None:
         return remembered

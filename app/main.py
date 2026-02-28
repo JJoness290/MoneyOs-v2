@@ -69,6 +69,8 @@ from app.core.oom_recovery import (
     is_oom_like_error,
     release_cuda_memory,
     resolve_initial_fraction,
+    resolve_user_fraction_cap,
+    cap_fraction_for_runtime,
     save_last_good_fraction,
 )
 from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
@@ -128,6 +130,8 @@ _last_clip_telemetry: dict[str, object] = {}
 _last_job_snapshot: dict[str, object] = {}
 _last_gpu_preflight_stats: dict[str, object] = {}
 _last_gpu_preflight_plan: dict[str, object] = {}
+_last_vram_user_cap: float | None = None
+_last_vram_fraction_effective: float | None = None
 _perf_lock = threading.Lock()
 _perf_history_path = OUTPUT_DIR / "perf_history.json"
 _trueai_slots = threading.Semaphore(max(1, resolve_stability_settings().max_concurrency))
@@ -230,9 +234,11 @@ def bootstrap_dependencies() -> None:
                 "stability_mode": stability.stability_mode,
                 "max_concurrency": stability.max_concurrency,
                 "vram_fraction": stability.vram_fraction,
+                "vram_fraction_effective": stability.vram_fraction,
+                "vram_fraction_source": "env_cap" if os.getenv("MONEYOS_VRAM_FRACTION") else "planner",
+                "vram_fraction_user_cap": os.getenv("MONEYOS_VRAM_FRACTION"),
                 "pytorch_alloc_conf": stability.pytorch_alloc_conf,
-            }
-            ,
+            },
             "system": {
                 "gpu_util": current_metrics.get("gpu_util"),
                 "vram_util": current_metrics.get("vram_util"),
@@ -691,6 +697,8 @@ async def debug_status() -> JSONResponse:
         "stability": stability_status_payload(),
         "last_gpu_preflight_stats": _last_gpu_preflight_stats,
         "last_gpu_preflight_plan": _last_gpu_preflight_plan,
+        "vram_fraction_user_cap": _last_vram_user_cap,
+        "vram_fraction_effective": _last_vram_fraction_effective,
     }
     try:
         import torch  # noqa: WPS433
@@ -908,32 +916,37 @@ def _run_anime_episode_auto(job_id: str, req: AnimeEpisodeAutoRequest) -> None:
         )
 
 
-def _record_gpu_preflight(stats: VramStats, plan: GpuPlan) -> None:
-    global _last_gpu_preflight_stats, _last_gpu_preflight_plan
+def _record_gpu_preflight(stats: VramStats, plan: GpuPlan, user_cap: float | None, source: str) -> None:
+    global _last_gpu_preflight_stats, _last_gpu_preflight_plan, _last_vram_user_cap, _last_vram_fraction_effective
     _last_gpu_preflight_stats = {
         "vram_total_mib": stats.total_mib,
         "vram_used_mib": stats.used_mib,
         "vram_free_mib": stats.free_mib,
         "source": stats.source,
     }
-    _last_gpu_preflight_plan = plan.to_event_payload()
+    payload = plan.to_event_payload()
+    payload["vram_fraction_source"] = source
+    payload["vram_fraction_user_cap"] = user_cap
+    _last_gpu_preflight_plan = payload
+    _last_vram_user_cap = user_cap
+    _last_vram_fraction_effective = plan.vram_fraction
 
 
-def _prepare_gpu_plan(job_id: str, attempt: int, attempts_total: int) -> tuple[VramStats, GpuPlan]:
+def _prepare_gpu_plan(job_id: str, attempt: int, attempts_total: int) -> tuple[VramStats, GpuPlan, str, float | None]:
     stats = get_vram_stats()
     if stats is None:
         stats = VramStats(total_mib=8192.0, used_mib=0.0, free_mib=8192.0, source="fallback")
     policy = os.getenv("MONEYOS_VRAM_POLICY", "conservative")
     auto_vram = os.getenv("MONEYOS_AUTO_VRAM", "1") == "1"
+    user_cap, lock_enabled = resolve_user_fraction_cap()
     if auto_vram:
         plan = choose_job_gpu_plan("trueai", policy, stats, oom_retry_level=max(0, attempt - 1))
-        apply_gpu_plan_env(plan)
     else:
-        forced_fraction = float(os.getenv("MONEYOS_VRAM_FRACTION", "0.80"))
+        forced_fraction = float(os.getenv("MONEYOS_VRAM_FRACTION_EFFECTIVE", os.getenv("MONEYOS_VRAM_FRACTION", "0.80")))
         plan = choose_job_gpu_plan("trueai", policy, stats, oom_retry_level=0)
         plan = GpuPlan(
             policy=plan.policy,
-            vram_fraction=max(0.50, min(0.90, forced_fraction)),
+            vram_fraction=max(0.10, min(0.95, forced_fraction)),
             reserve_mib=plan.reserve_mib,
             allocator_overhead_mib=plan.allocator_overhead_mib,
             budget_free_mib=plan.budget_free_mib,
@@ -945,7 +958,28 @@ def _prepare_gpu_plan(job_id: str, attempt: int, attempts_total: int) -> tuple[V
             frames_per_chunk=plan.frames_per_chunk,
             resolution_scale=plan.resolution_scale,
         )
-    _record_gpu_preflight(stats, plan)
+    source = "planner"
+    effective_fraction, source = cap_fraction_for_runtime(plan.vram_fraction, source=source)
+    if lock_enabled and user_cap is not None and attempt > 1 and source == "planner_capped":
+        source = "retry_capped"
+    if abs(effective_fraction - plan.vram_fraction) > 1e-9:
+        plan = GpuPlan(
+            policy=plan.policy,
+            vram_fraction=effective_fraction,
+            reserve_mib=plan.reserve_mib,
+            allocator_overhead_mib=plan.allocator_overhead_mib,
+            budget_free_mib=plan.budget_free_mib,
+            attention_slicing=plan.attention_slicing,
+            vae_slicing=plan.vae_slicing,
+            vae_tiling=plan.vae_tiling,
+            use_xformers=plan.use_xformers,
+            batch_size=plan.batch_size,
+            frames_per_chunk=plan.frames_per_chunk,
+            resolution_scale=plan.resolution_scale,
+        )
+    apply_gpu_plan_env(plan)
+    os.environ["MONEYOS_VRAM_FRACTION_SOURCE"] = source
+    _record_gpu_preflight(stats, plan, user_cap, source)
     if stats.free_mib < 1500:
         raise RuntimeError(
             f"Insufficient free VRAM ({stats.free_mib:.0f} MiB). Close GPU-heavy apps or reboot."
@@ -967,10 +1001,12 @@ def _prepare_gpu_plan(job_id: str, attempt: int, attempts_total: int) -> tuple[V
             "vram_policy": plan.policy,
             "auto_vram": auto_vram,
             "chosen_vram_fraction": plan.vram_fraction,
+            "vram_fraction_source": source,
+            "vram_fraction_user_cap": user_cap,
             "gpu_plan": plan.to_event_payload(),
         },
     )
-    return stats, plan
+    return stats, plan, source, user_cap
 
 
 def _run_with_oom_retries(
@@ -985,8 +1021,7 @@ def _run_with_oom_retries(
     last_exc: Exception | None = None
 
     for attempt, fraction in enumerate(fractions, start=1):
-        os.environ["MONEYOS_VRAM_FRACTION"] = f"{fraction:.2f}"
-        stats, plan = _prepare_gpu_plan(job_id, attempt, len(fractions))
+        stats, plan, source, user_cap = _prepare_gpu_plan(job_id, attempt, len(fractions))
         _set_status(
             job_id,
             f"attempt {attempt}/{len(fractions)} with vram_fraction={plan.vram_fraction:.2f}",
@@ -1002,6 +1037,8 @@ def _run_with_oom_retries(
                 "vram_budget_free_mib": plan.budget_free_mib,
                 "reserve_mib": plan.reserve_mib,
                 "vram_policy": plan.policy,
+                "vram_fraction_source": source,
+                "vram_fraction_user_cap": user_cap,
                 "gpu_plan": plan.to_event_payload(),
             },
         )
@@ -1009,21 +1046,21 @@ def _run_with_oom_retries(
             shutil.rmtree(output_dir, ignore_errors=True)
         output_dir.mkdir(parents=True, exist_ok=True)
         try:
-            result = runner(attempt, len(fractions), fraction)
+            result = runner(attempt, len(fractions), plan.vram_fraction)
             if attempt > 1:
                 _set_status(
                     job_id,
-                    f"Recovered from OOM at vram_fraction={fraction:.2f} (attempt {attempt}/{len(fractions)})",
+                    f"Recovered from OOM at vram_fraction={plan.vram_fraction:.2f} (attempt {attempt}/{len(fractions)})",
                     stage_key="generate",
                     progress_pct=80,
                     extra={
                         "attempt": attempt,
                         "attempts_total": len(fractions),
-                        "vram_fraction": fraction,
+                        "vram_fraction": plan.vram_fraction,
                         "recovery_action": "lower_vram_fraction",
                     },
                 )
-            save_last_good_fraction(fraction)
+            save_last_good_fraction(plan.vram_fraction)
             return result
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
@@ -1032,6 +1069,7 @@ def _run_with_oom_retries(
             if attempt >= len(fractions):
                 break
             next_fraction = fractions[attempt]
+            next_fraction, _ = cap_fraction_for_runtime(next_fraction, source="retry")
             _set_status(
                 job_id,
                 f"OOM detected → lowering VRAM fraction to {next_fraction:.2f} and retrying (attempt {attempt + 1}/{len(fractions)})",

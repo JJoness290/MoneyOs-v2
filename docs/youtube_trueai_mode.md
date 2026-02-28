@@ -55,3 +55,6 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
 - Preflight adaptive VRAM knobs:
   - `MONEYOS_AUTO_VRAM=1`
   - `MONEYOS_VRAM_POLICY=conservative|balanced|aggressive`
+  - `MONEYOS_VRAM_FRACTION` (user hard cap, 0.10-0.95)
+  - `MONEYOS_VRAM_FRACTION_LOCK=1|0` (default auto-on when cap is set)
+  - `MONEYOS_VRAM_FRACTION_EFFECTIVE` (runtime chosen/capped value)

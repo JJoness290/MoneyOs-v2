@@ -3,7 +3,12 @@ from pathlib import Path
 import pytest
 
 from app.main import _run_with_oom_retries
-from app.core.oom_recovery import build_fraction_ladder, is_oom_like_error
+from app.core.oom_recovery import (
+    build_fraction_ladder,
+    cap_fraction_for_runtime,
+    is_oom_like_error,
+    resolve_user_fraction_cap,
+)
 
 
 def test_build_fraction_ladder_respects_initial_and_bounds():
@@ -46,3 +51,37 @@ def test_oom_like_matchers():
     assert is_oom_like_error(RuntimeError("CUDNN_STATUS_NOT_SUPPORTED"))
     assert is_oom_like_error(RuntimeError("hipErrorOutOfMemory"))
     assert not is_oom_like_error(RuntimeError("file not found"))
+
+
+def test_user_vram_cap_defaults_lock_on(monkeypatch):
+    monkeypatch.setenv("MONEYOS_VRAM_FRACTION", "0.40")
+    monkeypatch.delenv("MONEYOS_VRAM_FRACTION_LOCK", raising=False)
+    cap, lock_enabled = resolve_user_fraction_cap()
+    assert cap == 0.40
+    assert lock_enabled
+
+
+def test_cap_fraction_for_runtime_caps_planner(monkeypatch):
+    monkeypatch.setenv("MONEYOS_VRAM_FRACTION", "0.40")
+    monkeypatch.setenv("MONEYOS_VRAM_FRACTION_LOCK", "1")
+    effective, source = cap_fraction_for_runtime(0.85, source="planner")
+    assert effective == 0.40
+    assert source == "planner_capped"
+
+
+def test_oom_retry_runner_respects_cap(monkeypatch, tmp_path):
+    monkeypatch.setenv("MONEYOS_VRAM_FRACTION", "0.40")
+    monkeypatch.setenv("MONEYOS_VRAM_FRACTION_LOCK", "1")
+    fractions = []
+
+    def runner(_attempt, _attempts_total, fraction):
+        fractions.append(fraction)
+        out = tmp_path / "ok2.mp4"
+        rep = tmp_path / "report2.json"
+        out.write_bytes(b"x")
+        rep.write_text("{}", encoding="utf-8")
+        return out, rep
+
+    _run_with_oom_retries("job_cap_sim", runner, output_dir=tmp_path / "job_cap")
+    assert fractions
+    assert all(v <= 0.40 for v in fractions)

@@ -183,7 +183,7 @@ def choose_job_gpu_plan(job_type: str, policy: str | None, stats: VramStats, oom
 
 
 def apply_gpu_plan_env(plan: GpuPlan) -> None:
-    os.environ["MONEYOS_VRAM_FRACTION"] = f"{plan.vram_fraction:.2f}"
+    os.environ["MONEYOS_VRAM_FRACTION_EFFECTIVE"] = f"{plan.vram_fraction:.2f}"
     os.environ["MONEYOS_TRUEAI_ATTENTION_SLICING"] = "1" if plan.attention_slicing else "0"
     os.environ["MONEYOS_TRUEAI_VAE_SLICING"] = "1" if plan.vae_slicing else "0"
     os.environ["MONEYOS_TRUEAI_VAE_TILING"] = "1" if plan.vae_tiling else "0"
