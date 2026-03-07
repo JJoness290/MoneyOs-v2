@@ -88,6 +88,55 @@ def get_trueai_target_frames(infer_fps: int) -> int:
     return max(1, int(round(infer_fps * secs)))
 
 
+def _tuning_from_meta(tuning_meta: dict[str, object] | None) -> GenerationTuning | None:
+    if not tuning_meta:
+        return None
+    selected = tuning_meta.get("selected")
+    if not isinstance(selected, dict):
+        return None
+    try:
+        return GenerationTuning(
+            secs=int(selected.get("secs", 0)),
+            frames=int(selected.get("frames", 0)),
+            width=int(selected.get("width", 0)),
+            height=int(selected.get("height", 0)),
+            steps=int(selected.get("steps", 0)),
+            guidance=float(selected.get("guidance", 0.0)),
+            segment_seconds=int(selected.get("segment_seconds", selected.get("secs", 0) or 0)),
+        )
+    except Exception:
+        return None
+
+
+def _enforce_calibrated_caps(
+    *,
+    caps: GenerationTuning | None,
+    width: int,
+    height: int,
+    steps: int,
+    guidance: float,
+    secs: float,
+    frames: int,
+) -> tuple[int, int, int, float, float, int, bool]:
+    if caps is None:
+        return width, height, steps, guidance, secs, frames, False
+    new_width = min(width, max(384, int(caps.width)))
+    new_height = min(height, max(224, int(caps.height)))
+    new_steps = min(steps, max(8, int(caps.steps)))
+    new_guidance = min(guidance, max(1.0, float(caps.guidance)))
+    new_secs = min(float(secs), max(1.0, float(caps.secs)))
+    new_frames = min(int(frames), max(8, int(caps.frames)))
+    clamped = (new_width, new_height, new_steps, round(new_guidance, 3), round(new_secs, 3), new_frames) != (
+        width,
+        height,
+        steps,
+        round(guidance, 3),
+        round(float(secs), 3),
+        int(frames),
+    )
+    return new_width, new_height, new_steps, new_guidance, new_secs, new_frames, clamped
+
+
 def _parse_env_bool(value: str) -> bool | None:
     normalized = value.strip().lower()
     if normalized in {"1", "true", "on"}:
@@ -399,17 +448,32 @@ def run_trueai_60s_job(
     guidance = float(tuned.guidance)
 
     clip_seconds = float(tuned.secs if "tuned" in locals() else get_trueai_clip_seconds())
+    frames_per_clip = int(tuned.frames if "tuned" in locals() else max(8, get_trueai_target_frames(fps)))
+    selected_caps = _tuning_from_meta(tuning_meta if "tuning_meta" in locals() else None)
+    width, height, steps, guidance, clip_seconds, frames_per_clip, calibration_hard_clamped = _enforce_calibrated_caps(
+        caps=selected_caps,
+        width=width,
+        height=height,
+        steps=steps,
+        guidance=guidance,
+        secs=clip_seconds,
+        frames=frames_per_clip,
+    )
+    infer_fps = max(4, int(round(frames_per_clip / max(clip_seconds, 1.0))))
+    infer_fps = min(max(4, fps), infer_fps)
+    inferred_frames_from_fps = max(8, int(round(infer_fps * clip_seconds)))
+    frames_per_clip = min(frames_per_clip, inferred_frames_from_fps)
     try:
         max_frames = int(os.getenv("MONEYOS_TRUEAI_FRAMES_PER_CHUNK", "48"))
     except ValueError:
         max_frames = 48
     max_frames = max(8, min(48, max_frames))
+    max_frames = min(max_frames, max(8, frames_per_clip))
     if max_frames % 2 == 1:
         max_frames -= 1
-    chunk_seconds = max_frames / max(fps, 1)
-    chunks_needed = int(math.ceil(clip_seconds / chunk_seconds))
-    frames_per_clip = int(tuned.frames if "tuned" in locals() else max(8, get_trueai_target_frames(fps)))
-    clip_count = int(math.ceil(total_seconds / clip_seconds))
+    chunk_seconds = max_frames / max(infer_fps, 1)
+    chunks_needed = max(1, int(math.ceil(clip_seconds / max(chunk_seconds, 0.001))))
+    clip_count = int(math.ceil(total_seconds / max(clip_seconds, 0.001)))
     seed = int(os.getenv("MONEYOS_TRUEAI_SEED", "777"))
 
     out_dir = _output_dir(job_id)
@@ -435,13 +499,15 @@ def run_trueai_60s_job(
         },
         "trueai": {
             "preset": cfg.name,
-            "fps": fps,
+            "fps": infer_fps,
+            "output_fps": yt_target.fps,
             "steps": steps,
             "guidance": guidance,
             "width": width,
             "height": height,
             "super_resolution": bool(cfg.super_resolution and not FASTTEST),
             "calibration": tuning_meta if "tuning_meta" in locals() else None,
+            "calibration_hard_clamped": calibration_hard_clamped if "calibration_hard_clamped" in locals() else False,
         },
         "youtube_target": {
             "name": yt_target.target_name,
@@ -494,9 +560,9 @@ def run_trueai_60s_job(
     print(f"[TRUEAI] super_resolution={'ON' if cfg.super_resolution else 'OFF'}")
     yt_vf = youtube_video_filter(yt_target, apply_smoothing=True)
     print(f"[TRUEAI][YT] fps={yt_target.fps} smooth={yt_target.smooth_mode} vf=\"{yt_vf}\"")
-    print(f"[TRUEAI] clip_seconds={clip_seconds:g} infer_fps={fps} target_frames={frames_per_clip}")
+    print(f"[TRUEAI] clip_seconds={clip_seconds:g} infer_fps={infer_fps} target_frames={frames_per_clip}")
     print(
-        f"[TRUEAI] target_clip_seconds={clip_seconds:g} infer_fps={fps} "
+        f"[TRUEAI] target_clip_seconds={clip_seconds:g} infer_fps={infer_fps} "
         f"max_frames={max_frames} chunk_seconds={chunk_seconds:.1f} chunks={chunks_needed}"
     )
     stab_supported = has_vidstab_filters()
@@ -510,7 +576,39 @@ def run_trueai_60s_job(
     os.environ["MONEYOS_TRUEAI_EFFECTIVE_GUIDANCE"] = f"{guidance:.2f}"
     os.environ["MONEYOS_TRUEAI_EFFECTIVE_SECS"] = f"{clip_seconds:.2f}"
     os.environ["MONEYOS_TRUEAI_EFFECTIVE_FRAMES"] = str(frames_per_clip)
+    os.environ["MONEYOS_TRUEAI_EFFECTIVE_INFER_FPS"] = str(infer_fps)
+    os.environ["MONEYOS_TRUEAI_SELECTED_PROFILE"] = str((tuning_meta or {}).get("profile") if "tuning_meta" in locals() else "none")
+    os.environ["MONEYOS_TRUEAI_CALIBRATION_CLAMPED"] = "1" if calibration_hard_clamped else "0"
+    os.environ["MONEYOS_TRUEAI_OUTPUT_FPS"] = str(yt_target.fps)
     super_resolution_enabled = bool(cfg.super_resolution and not FASTTEST)
+    if selected_caps is not None and str((tuning_meta or {}).get("profile", "")).lower() in {"safe", "balanced"}:
+        super_resolution_enabled = False
+        print("[TRUEAI] super_resolution=FORCED_OFF reason=calibrated_profile_guard")
+    os.environ["MONEYOS_TRUEAI_SUPER_RES_ENABLED"] = "1" if super_resolution_enabled else "0"
+
+    if selected_caps is not None:
+        exceed: list[str] = []
+        if width > selected_caps.width or height > selected_caps.height:
+            exceed.append("resolution")
+        if steps > selected_caps.steps:
+            exceed.append("steps")
+        if guidance > selected_caps.guidance:
+            exceed.append("guidance")
+        if clip_seconds > selected_caps.secs:
+            exceed.append("secs")
+        if frames_per_clip > selected_caps.frames:
+            exceed.append("frames")
+        if exceed:
+            print(f"[CALIBRATION] hard_cap_enforced fields={','.join(exceed)}")
+            width, height, steps, guidance, clip_seconds, frames_per_clip, _ = _enforce_calibrated_caps(
+                caps=selected_caps,
+                width=width,
+                height=height,
+                steps=steps,
+                guidance=guidance,
+                secs=clip_seconds,
+                frames=frames_per_clip,
+            )
 
     generated: list[Path] = []
     started = time.time()
@@ -530,17 +628,19 @@ def run_trueai_60s_job(
         part_paths: list[Path] = []
         generated_seconds = 0.0
         for chunk_idx in range(chunks_needed):
-            part_seconds = min(chunk_seconds, max(1.0 / fps, target_clip_seconds - generated_seconds))
+            part_seconds = min(chunk_seconds, max(1.0 / infer_fps, target_clip_seconds - generated_seconds))
             if part_seconds <= 0:
                 break
-            part_frames = min(max_frames, max(1, int(round(part_seconds * fps))))
+            part_frames = min(max_frames, max(8, int(round(part_seconds * infer_fps))))
+            if selected_caps is not None:
+                part_frames = min(part_frames, int(selected_caps.frames))
             part_path = clips_dir / f"clip_{idx:02d}_part{chunk_idx:02d}.mp4"
             request = ClipRequest(
                 prompt=clip_prompt,
                 negative_prompt=_negative_prompt(),
                 seed=seed + chunk_idx,
                 seconds=part_seconds,
-                fps=fps,
+                fps=infer_fps,
                 width=width,
                 height=height,
                 steps=steps,
@@ -633,17 +733,19 @@ def run_trueai_60s_job(
             part_paths = []
             generated_seconds = 0.0
             for chunk_idx in range(chunks_needed):
-                part_seconds = min(chunk_seconds, max(1.0 / fps, target_clip_seconds - generated_seconds))
+                part_seconds = min(chunk_seconds, max(1.0 / infer_fps, target_clip_seconds - generated_seconds))
                 if part_seconds <= 0:
                     break
-                part_frames = min(max_frames, max(1, int(round(part_seconds * fps))))
+                part_frames = min(max_frames, max(8, int(round(part_seconds * infer_fps))))
+            if selected_caps is not None:
+                part_frames = min(part_frames, int(selected_caps.frames))
                 part_path = clips_dir / f"clip_{idx:02d}_part{chunk_idx:02d}_retry{short_retries}.mp4"
                 request = ClipRequest(
                     prompt=clip_prompt,
                     negative_prompt=_negative_prompt(),
                     seed=seed + chunk_idx + short_retries,
                     seconds=part_seconds,
-                    fps=fps,
+                    fps=infer_fps,
                     width=width,
                     height=height,
                     steps=steps,

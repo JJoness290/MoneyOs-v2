@@ -80,3 +80,6 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
 - Additional debug endpoints:
   - `POST /debug/clear-backend-failures`
   - `POST /debug/unload-models`
+
+- Runtime enforces calibrated limits as **hard inference caps** (secs/frames/resolution/steps/guidance).
+- Model inference frames are now separated from output/export FPS; post-process upscaling/FPS conversion does not increase model inference frames.

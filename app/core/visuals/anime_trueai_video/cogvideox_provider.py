@@ -361,7 +361,22 @@ class CogVideoXProvider(TextToVideoProvider):
         for attempt in range(max_attempts):
             current_key = (width, height, steps, num_frames, round(guidance, 2))
             if current_key in seen_configs:
-                raise RuntimeError(f"degrade_loop_duplicate_config {current_key}")
+                if attempt >= (max_attempts - 1):
+                    break
+                width, height, steps, num_frames, guidance, _ = self._degrade_settings(
+                    min(attempt + 1, 4),
+                    width,
+                    height,
+                    steps,
+                    num_frames,
+                    guidance,
+                    min_frames,
+                    max_frames,
+                    request.fps,
+                )
+                width, height, num_frames = self._sanitize_generation_dims(width, height, num_frames, max_frames)
+                print(f"[TRUEAI][DEGRADE] duplicate_config_detected -> forced_next_stage config={(width, height, steps, num_frames, round(guidance,2))}")
+                continue
             seen_configs.add(current_key)
             try:
                 if self._device == "cuda" and stability.stability_mode:

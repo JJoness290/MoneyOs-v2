@@ -691,6 +691,19 @@ def calibration_status_payload() -> dict[str, Any]:
         "runtime_free_vram_mb": (stats.free_mib if stats else None),
         "runtime_used_vram_mb": (stats.used_mib if stats else None),
         "planner_budget_mb": planner_budget_mb,
+        "selected_calibrated_profile": os.getenv("MONEYOS_TRUEAI_SELECTED_PROFILE"),
+        "final_effective_inference_config": {
+            "width": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_WIDTH"),
+            "height": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_HEIGHT"),
+            "steps": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_STEPS"),
+            "guidance": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_GUIDANCE"),
+            "secs": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_SECS"),
+            "frames": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_FRAMES"),
+            "infer_fps": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_INFER_FPS"),
+        },
+        "output_export_fps": os.getenv("MONEYOS_TRUEAI_OUTPUT_FPS"),
+        "postprocess_upscale_enabled": os.getenv("MONEYOS_TRUEAI_SUPER_RES_ENABLED"),
+        "calibration_clamp_applied": os.getenv("MONEYOS_TRUEAI_CALIBRATION_CLAMPED"),
     }
     if profile:
         fp = profile.get("fingerprint", {})
