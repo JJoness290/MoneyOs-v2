@@ -33,6 +33,22 @@ class CogVideoXProvider(TextToVideoProvider):
         self._compiled = False
         self.force_disable_super_resolution = False
 
+
+    @classmethod
+    def unload_shared(cls) -> None:
+        cls._shared_pipe = None
+        cls._shared_device = "cpu"
+        try:
+            import torch  # noqa: WPS433
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+        except Exception:
+            pass
+        gc.collect()
+
     def is_available(self) -> bool:
         try:
             import torch  # noqa: F401
@@ -263,24 +279,29 @@ class CogVideoXProvider(TextToVideoProvider):
         guidance: float,
         min_frames: int,
         max_frames: int,
+        fps: int,
     ) -> tuple[int, int, int, int, float, bool]:
+        # Strict order: resolution -> frames -> secs -> steps -> guidance
         if stage == 0:
             width = self._align_multiple(int(width * 0.85), 16, 384)
             height = self._align_multiple(int(height * 0.85), 16, 224)
         elif stage == 1:
-            steps = max(8, steps - 4)
-        elif stage == 2:
-            self.force_disable_super_resolution = True
-        elif stage == 3:
-            guidance = max(1.0, round(guidance - 0.5, 2))
-        elif stage >= 4:
-            reduced = self._align_multiple(max(min_frames, int(frames * 0.85)), 2, min_frames)
+            reduced = self._align_multiple(max(min_frames, int(frames * 0.8)), 2, min_frames)
             frames = min(max_frames, max(reduced, min_frames))
-        return width, height, steps, frames, guidance, stage >= 4
+        elif stage == 2:
+            sec_floor_frames = max(8, self._align_multiple(int(max(1.0, fps * 2.0)), 2, 8))
+            frames = max(sec_floor_frames, min(frames, self._align_multiple(int(frames * 0.85), 2, sec_floor_frames)))
+        elif stage == 3:
+            steps = max(8, steps - 4)
+            self.force_disable_super_resolution = True
+        elif stage >= 4:
+            guidance = max(1.0, round(guidance - 0.5, 2))
+        return width, height, steps, frames, guidance, stage in {1, 2}
 
     # Backward-compatible helper used by tests/legacy call sites.
     def _stability_degrade(self, width: int, height: int, steps: int, frames: int) -> tuple[int, int, int, int]:
-        w, h, s, f, _, _ = self._degrade_settings(4, width, height, steps, frames, 5.0, 8, 240)
+        w, h, s, f, _, _ = self._degrade_settings(4, width, height, steps, frames, 5.0, 8, 240, 8)
+        w, h, f = self._sanitize_generation_dims(w, h, f, 240)
         return w, h, s, f
 
     def _maybe_compile(self) -> None:
@@ -323,7 +344,7 @@ class CogVideoXProvider(TextToVideoProvider):
             max_frames = 240
         requested_frames = request.target_frames if request.target_frames is not None else round(request.seconds * request.fps)
         num_frames = int(max(1, min(max_frames, int(requested_frames))))
-        min_seconds = min(float(request.seconds), 6.0)
+        min_seconds = max(1.5, min(float(request.seconds), 3.0))
         min_frames = max(1, min(max_frames, int(round(request.fps * min_seconds))))
         width = request.width
         height = request.height
@@ -333,10 +354,15 @@ class CogVideoXProvider(TextToVideoProvider):
         num_frames = max(num_frames, min_frames)
         print(f"[TRUEAI] model_num_frames={num_frames}")
         stability = resolve_stability_settings()
-        max_attempts = 6 if stability.stability_mode else 1
+        max_attempts = int(os.getenv("MONEYOS_TRUEAI_MAX_DEGRADE_ATTEMPTS", "7")) if stability.stability_mode else 1
         last_exc: Exception | None = None
         tensor_retry_used = False
+        seen_configs: set[tuple[int, int, int, int, float]] = set()
         for attempt in range(max_attempts):
+            current_key = (width, height, steps, num_frames, round(guidance, 2))
+            if current_key in seen_configs:
+                raise RuntimeError(f"degrade_loop_duplicate_config {current_key}")
+            seen_configs.add(current_key)
             try:
                 if self._device == "cuda" and stability.stability_mode:
                     total = float(torch.cuda.get_device_properties(0).total_memory)
@@ -352,6 +378,7 @@ class CogVideoXProvider(TextToVideoProvider):
                             guidance,
                             min_frames,
                             max_frames,
+                            request.fps,
                         )
                         width, height, num_frames = self._sanitize_generation_dims(width, height, num_frames, max_frames)
                         print(
@@ -376,6 +403,15 @@ class CogVideoXProvider(TextToVideoProvider):
                 break
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
+                with contextlib.suppress(Exception):
+                    if self._device == "cuda":
+                        torch.cuda.synchronize()
+                with contextlib.suppress(Exception):
+                    if self._device == "cuda":
+                        torch.cuda.empty_cache()
+                        if hasattr(torch.cuda, "ipc_collect"):
+                            torch.cuda.ipc_collect()
+                gc.collect()
                 is_oom = self._is_oom_error(exc)
                 is_mismatch = self._is_tensor_shape_mismatch(exc)
                 if is_mismatch and stability.stability_mode and not tensor_retry_used and attempt < (max_attempts - 1):
@@ -389,6 +425,7 @@ class CogVideoXProvider(TextToVideoProvider):
                         guidance,
                         min_frames,
                         max_frames,
+                        request.fps,
                     )
                     width, height, num_frames = self._sanitize_generation_dims(width, height, num_frames, max_frames)
                     print(
@@ -410,6 +447,7 @@ class CogVideoXProvider(TextToVideoProvider):
                     guidance,
                     min_frames,
                     max_frames,
+                    request.fps,
                 )
                 width, height, num_frames = self._sanitize_generation_dims(width, height, num_frames, max_frames)
                 with contextlib.suppress(Exception):
@@ -428,7 +466,7 @@ class CogVideoXProvider(TextToVideoProvider):
                     print(f"[TRUEAI][DEGRADE] frames_reduced=true new_secs={num_frames / max(request.fps,1):.2f} new_frames={num_frames}")
         else:
             raise RuntimeError(
-                "VRAM guardrail blocked generation after automatic degradation. "
+                "CogVideoX minimum profile failed; backend marked unsafe for this run. "
                 f"budget_fraction={stability.vram_fraction} last_error={last_exc}"
             )
         frames = result.frames[0]

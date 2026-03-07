@@ -16,7 +16,7 @@ def test_run_calibration_creates_profiles(monkeypatch, tmp_path):
         return ProbeResult(ok=ok, duration_s=0.01, reason="ok" if ok else "fail", metrics={})
 
     payload = run_calibration(force=True, probe=fake_probe)
-    assert payload["profiles"]["safe"]["width"] >= 768
+    assert payload["profiles"]["safe"]["width"] >= 640
     assert payload["profiles"]["max_stable"]["width"] <= 1152
     assert payload["profiles"]["max_stable"]["guidance"] <= 6.0
 

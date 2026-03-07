@@ -74,7 +74,13 @@ from app.core.oom_recovery import (
     save_last_good_fraction,
 )
 from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
-from app.core.calibration import calibration_status_payload, ensure_calibration, load_calibration_profile, record_runtime_failure
+from app.core.calibration import (
+    calibration_status_payload,
+    clear_backend_failures,
+    ensure_calibration,
+    load_calibration_profile,
+    record_runtime_failure,
+)
 from app.core.visuals.anime_3d.animation_library import rebuild_animation_library
 from app.core.visuals.anime_3d.blender_runner import detect_blender
 from app.core.visuals.anime_3d.render_pipeline import (
@@ -263,12 +269,13 @@ def bootstrap_dependencies() -> None:
         prune_assets(min_free_bytes=int(os.getenv("MONEYOS_MIN_FREE_BYTES", str(15 * 1024**3))))
     except Exception as exc:  # noqa: BLE001
         print(f"[PRUNE] startup scan failed: {exc}")
-    try:
-        cal = ensure_calibration(force=False)
-        if cal:
-            print(f"[CALIBRATION] loaded timestamp={cal.get('timestamp_utc')} backend={cal.get('backend')}")
-    except Exception as exc:  # noqa: BLE001
-        print(f"[CALIBRATION] startup check failed reason={exc}")
+    if os.getenv("MONEYOS_ENABLE_STARTUP_WARMUP", "0") == "1":
+        try:
+            cal = ensure_calibration(force=False, run_if_missing=False)
+            if cal:
+                print(f"[CALIBRATION] profile_loaded timestamp={cal.get('timestamp_utc')} backend={cal.get('backend')}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[CALIBRATION] startup profile check failed reason={exc}")
     start_autopilot()
     try:
         from app.core.visuals.ffmpeg_utils import select_video_encoder  # noqa: WPS433
@@ -1899,6 +1906,22 @@ async def debug_calibration() -> JSONResponse:
 async def debug_recalibrate() -> JSONResponse:
     profile = ensure_calibration(force=True)
     return JSONResponse({"ok": profile is not None, "profile": profile, "status": calibration_status_payload()})
+
+
+@app.post("/debug/clear-backend-failures")
+async def debug_clear_backend_failures() -> JSONResponse:
+    return JSONResponse(clear_backend_failures())
+
+
+@app.post("/debug/unload-models")
+async def debug_unload_models() -> JSONResponse:
+    try:
+        from app.core.visuals.anime_trueai_video.cogvideox_provider import CogVideoXProvider  # noqa: WPS433
+
+        CogVideoXProvider.unload_shared()
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(exc)})
+    return JSONResponse({"ok": True})
 
 
 @app.get("/debug/jobs/{job_id}/error")

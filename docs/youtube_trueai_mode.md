@@ -70,3 +70,13 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
 - Debug endpoints:
   - `GET /debug/calibration`
   - `POST /debug/recalibrate`
+
+- Startup behavior controls:
+  - `MONEYOS_ENABLE_STARTUP_WARMUP=0` (default, no heavy calibration/model warmup on boot)
+  - `MONEYOS_ENABLE_LAZY_CALIBRATION=1` (run calibration on first TrueAI use if needed)
+  - `MONEYOS_TRUEAI_DISABLE_COGVIDEOX=0|1` (hard disable backend)
+  - `MONEYOS_TRUEAI_COOLDOWN_FAILURES=3` (mark backend temporarily unavailable after repeated failures)
+
+- Additional debug endpoints:
+  - `POST /debug/clear-backend-failures`
+  - `POST /debug/unload-models`

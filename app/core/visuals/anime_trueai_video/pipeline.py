@@ -28,7 +28,13 @@ from app.core.stability import (
     resolve_stability_settings,
 )
 from app.core.storage_policy import effective_settings_payload, print_effective_settings_banner
-from app.core.calibration import GenerationTuning, apply_calibrated_limits
+from app.core.calibration import (
+    GenerationTuning,
+    apply_calibrated_limits,
+    is_backend_temporarily_unavailable,
+    mark_backend_success,
+    record_runtime_failure,
+)
 
 StatusCallback = callable
 
@@ -460,6 +466,9 @@ def run_trueai_60s_job(
         "same anime protagonist, dark hair, school uniform, consistent face and body proportions",
     )
 
+    blocked, blocked_reason = is_backend_temporarily_unavailable()
+    if blocked:
+        raise RuntimeError(f"CogVideoX backend temporarily unavailable: {blocked_reason}")
     provider: TextToVideoProvider = CogVideoXProvider()
     if status_callback:
         status_callback("load → CogVideoX pipeline")
@@ -566,7 +575,14 @@ def run_trueai_60s_job(
                         "preset": cfg.name,
                     }
                     (diagnostics_dir / "checkpoint.json").write_text(json.dumps(checkpoint, indent=2), encoding="utf-8")
-                    raise
+                record_runtime_failure({
+                    "width": width,
+                    "height": height,
+                    "frames": part_frames,
+                    "secs": int(round(part_seconds)),
+                    "steps": steps,
+                    "guidance": guidance,
+                }, reason=msg, stage="inference")
                 raise
             part_paths.append(part_path)
             generated_seconds += part_seconds
@@ -748,4 +764,5 @@ def run_trueai_60s_job(
         "diagnostics_dir": str(diagnostics_dir),
     }
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    mark_backend_success()
     return final_mp4, report_path
