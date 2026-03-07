@@ -61,7 +61,7 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
 
 
 ## Calibration
-- Startup checks/loads generation calibration from `C:\MoneyOS\cache\calibration\generation_profile.json`.
+- Startup checks/loads generation calibration from `C:\MoneyOS\cache\calibration\trueai_profile.json`.
 - Control flags:
   - `MONEYOS_CALIBRATION_ENABLE=1|0`
   - `MONEYOS_SKIP_CALIBRATION=1|0`

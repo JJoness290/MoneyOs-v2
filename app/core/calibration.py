@@ -56,6 +56,9 @@ _state: dict[str, Any] = {
     "running": False,
     "last_result": None,
     "last_error": None,
+    "current_search_phase": None,
+    "current_parameter_being_tested": None,
+    "last_successful_profile": None,
 }
 
 
@@ -271,19 +274,46 @@ def _with_param(cfg: GenerationTuning, param: str, idx: int) -> GenerationTuning
     return cfg
 
 
-def _search_profiles(probe: Callable[[GenerationTuning, Path], ProbeResult], probe_dir: Path) -> tuple[dict[str, GenerationTuning], list[dict[str, Any]]]:
+
+
+def _set_search_state(phase: str | None, param: str | None, last_success: GenerationTuning | None) -> None:
+    with _state_lock:
+        _state["current_search_phase"] = phase
+        _state["current_parameter_being_tested"] = param
+        _state["last_successful_profile"] = (last_success.to_json() if last_success else None)
+
+
+def _classify_failure_stage(reason: str, stage: str) -> str:
+    lowered = (reason or "").lower()
+    if stage == "load" or "load" in lowered:
+        return "model_load"
+    if stage == "timeout" or "timeout" in lowered:
+        return "timeout"
+    if "export" in lowered or "decode" in lowered or "ffmpeg" in lowered:
+        return "decode_export"
+    if "oom" in lowered or "memory" in lowered or stage == "inference":
+        return "inference"
+    return "unknown"
+
+def _search_profiles(probe: Callable[[GenerationTuning, Path], ProbeResult], probe_dir: Path) -> tuple[dict[str, GenerationTuning], list[dict[str, Any]], bool]:
     floor = _default_floor()
     bench: list[dict[str, Any]] = []
-    first = probe(floor, probe_dir)
-    bench.append({"config": floor.to_json(), "result": asdict(first), "phase": "floor"})
-    if not first.ok:
-        return {"safe": floor, "balanced": floor, "max_stable": floor}, bench
+    attempted_failures: set[str] = set()
+    _set_search_state("prove_minimum", None, None)
+    minimum = probe(floor, probe_dir)
+    bench.append({"config": floor.to_json(), "result": asdict(minimum), "phase": "prove_minimum"})
+    if not minimum.ok:
+        attempted_failures.add(_normalize_failure_key(floor.to_json()))
+        _set_search_state("failed_minimum", None, None)
+        return {"safe": floor, "balanced": floor, "max_stable": floor}, bench, False
 
     current = floor
+    _set_search_state("climb", None, current)
     start = time.time()
     for param in PARAMETER_ORDER:
         if time.time() - start > _max_duration_s():
             break
+        _set_search_state("climb", param, current)
         if param == "resolution":
             values = _RESOLUTION_LADDER
             idx = _resolution_idx(current)
@@ -302,31 +332,43 @@ def _search_profiles(probe: Callable[[GenerationTuning, Path], ProbeResult], pro
 
         for next_idx in range(idx + 1, len(values)):
             trial = _with_param(current, param, next_idx)
+            key = _normalize_failure_key(trial.to_json())
+            if key in attempted_failures:
+                continue
             res = probe(trial, probe_dir)
             bench.append({"config": trial.to_json(), "result": asdict(res), "phase": f"search_{param}"})
             if res.ok:
                 current = trial
+                _set_search_state("climb", param, current)
             else:
+                attempted_failures.add(key)
                 break
 
     max_stable = current
-
     safe = floor
-    balanced = GenerationTuning(
-        secs=_SECS_LADDER[min(len(_SECS_LADDER) - 1, (_value_idx(_SECS_LADDER, safe.secs) + _value_idx(_SECS_LADDER, max_stable.secs)) // 2)],
-        frames=_FRAMES_LADDER[min(len(_FRAMES_LADDER) - 1, (_value_idx(_FRAMES_LADDER, safe.frames) + _value_idx(_FRAMES_LADDER, max_stable.frames)) // 2)],
-        width=_RESOLUTION_LADDER[min(len(_RESOLUTION_LADDER) - 1, (_resolution_idx(safe) + _resolution_idx(max_stable)) // 2)][0],
-        height=_RESOLUTION_LADDER[min(len(_RESOLUTION_LADDER) - 1, (_resolution_idx(safe) + _resolution_idx(max_stable)) // 2)][1],
-        steps=_STEPS_LADDER[min(len(_STEPS_LADDER) - 1, (_value_idx(_STEPS_LADDER, safe.steps) + _value_idx(_STEPS_LADDER, max_stable.steps)) // 2)],
-        guidance=_GUIDANCE_LADDER[min(len(_GUIDANCE_LADDER) - 1, (_value_idx(_GUIDANCE_LADDER, safe.guidance) + _value_idx(_GUIDANCE_LADDER, max_stable.guidance)) // 2)],
-        segment_seconds=_SECS_LADDER[min(len(_SECS_LADDER) - 1, (_value_idx(_SECS_LADDER, safe.secs) + _value_idx(_SECS_LADDER, max_stable.secs)) // 2)],
-    )
-    balanced_result = probe(balanced, probe_dir)
-    bench.append({"config": balanced.to_json(), "result": asdict(balanced_result), "phase": "balanced_validate"})
-    if not balanced_result.ok:
-        balanced = safe
 
-    return {"safe": safe, "balanced": balanced, "max_stable": max_stable}, bench
+    def _mid(low_i: int, hi_i: int, values: list[Any]) -> Any:
+        return values[min(len(values) - 1, (low_i + hi_i) // 2)]
+
+    safe_res_i = _resolution_idx(safe)
+    max_res_i = _resolution_idx(max_stable)
+    balanced = GenerationTuning(
+        secs=int(_mid(_value_idx(_SECS_LADDER, safe.secs), _value_idx(_SECS_LADDER, max_stable.secs), _SECS_LADDER)),
+        frames=int(_mid(_value_idx(_FRAMES_LADDER, safe.frames), _value_idx(_FRAMES_LADDER, max_stable.frames), _FRAMES_LADDER)),
+        width=int(_RESOLUTION_LADDER[min(len(_RESOLUTION_LADDER)-1, (safe_res_i + max_res_i)//2)][0]),
+        height=int(_RESOLUTION_LADDER[min(len(_RESOLUTION_LADDER)-1, (safe_res_i + max_res_i)//2)][1]),
+        steps=int(_mid(_value_idx(_STEPS_LADDER, safe.steps), _value_idx(_STEPS_LADDER, max_stable.steps), _STEPS_LADDER)),
+        guidance=float(_mid(_value_idx(_GUIDANCE_LADDER, safe.guidance), _value_idx(_GUIDANCE_LADDER, max_stable.guidance), _GUIDANCE_LADDER)),
+        segment_seconds=int(_mid(_value_idx(_SECS_LADDER, safe.secs), _value_idx(_SECS_LADDER, max_stable.secs), _SECS_LADDER)),
+    )
+    if balanced != safe and balanced != max_stable:
+        br = probe(balanced, probe_dir)
+        bench.append({"config": balanced.to_json(), "result": asdict(br), "phase": "balanced_validate"})
+        if not br.ok:
+            balanced = safe
+
+    _set_search_state("completed", None, max_stable)
+    return {"safe": safe, "balanced": balanced, "max_stable": max_stable}, bench, True
 
 
 def _cleanup_probe_outputs() -> None:
@@ -354,6 +396,8 @@ def should_recalibrate(profile: dict[str, Any] | None) -> bool:
         return True
     if os.getenv("MONEYOS_FORCE_RECALIBRATE", "0") == "1":
         return True
+    if profile.get("minimum_success") is False:
+        return True
     return False
 
 
@@ -374,7 +418,7 @@ def run_calibration(
     probe_fn = probe or _probe_generation
     probe_dir = _calibration_dir() / "probes"
     try:
-        profiles, benchmark = _search_profiles(probe_fn, probe_dir)
+        profiles, benchmark, minimum_ok = _search_profiles(probe_fn, probe_dir)
         payload = {
             "calibration_version": CALIBRATION_VERSION,
             "timestamp_utc": _now_utc(),
@@ -386,11 +430,21 @@ def run_calibration(
             "benchmark": benchmark,
             "duration_s": round(time.time() - started, 3),
             "failed_configurations": [x for x in benchmark if not x["result"].get("ok")],
-            "last_error": None,
+            "minimum_success": minimum_ok,
+            "last_successful_profile": (profiles["max_stable"].to_json() if minimum_ok else None),
+            "last_error": None if minimum_ok else "minimum_profile_failed",
         }
-        _write_json(_profile_path(), payload)
+        if minimum_ok:
+            _write_json(_profile_path(), payload)
+            with _state_lock:
+                _state["last_result"] = {"status": "ok", "duration_s": payload["duration_s"]}
+            return payload
+        # minimum failed: keep backend marked unavailable and do not publish calibration profile
+        _save_backend_state({"failure_count": _cooldown_failures(), "backend_available": False, "cooldown_until_utc": _now_utc(), "last_failure": {"reason": "minimum_profile_failed", "stage": "model_load"}})
+        record_runtime_failure(_default_floor().to_json(), reason="minimum_profile_failed", stage="model_load")
         with _state_lock:
-            _state["last_result"] = {"status": "ok", "duration_s": payload["duration_s"]}
+            _state["last_result"] = {"status": "failed", "error": "minimum_profile_failed"}
+            _state["last_error"] = "minimum_profile_failed"
         return payload
     except Exception as exc:  # noqa: BLE001
         with _state_lock:
@@ -398,26 +452,28 @@ def run_calibration(
             _state["last_result"] = {"status": "failed", "error": str(exc)}
         if profile:
             return profile
-        fallback = {
+        return {
             "calibration_version": CALIBRATION_VERSION,
             "timestamp_utc": _now_utc(),
             "backend": "cogvideox",
             "fingerprint": fp,
             "fingerprint_key": _fingerprint_key(fp),
-            "profiles": {k: _default_floor().to_json() for k in ("safe", "balanced", "max_stable")},
+            "profiles": {},
             "safe_floor": _default_floor().to_json(),
             "benchmark": [],
             "duration_s": 0.0,
             "failed_configurations": [],
+            "minimum_success": False,
+            "last_successful_profile": None,
             "last_error": str(exc),
         }
-        _write_json(_profile_path(), fallback)
-        return fallback
     finally:
         _cleanup_probe_outputs()
         release_cuda_memory()
         with _state_lock:
             _state["running"] = False
+            _state["current_search_phase"] = None
+            _state["current_parameter_being_tested"] = None
 
 
 def ensure_calibration(force: bool = False, run_if_missing: bool = True) -> dict[str, Any] | None:
@@ -468,10 +524,22 @@ def _is_known_bad(params: dict[str, Any]) -> bool:
 def apply_calibrated_limits(requested: GenerationTuning, *, allow_unsafe: bool = False) -> tuple[GenerationTuning, dict[str, Any]]:
     profile = ensure_calibration(force=False, run_if_missing=True)
     if not profile:
-        return requested, {"source": "user_requested", "clamped": False, "profile": None}
+        floor = _default_floor()
+        final = requested if allow_unsafe else GenerationTuning(
+            secs=min(requested.secs, floor.secs),
+            frames=min(requested.frames, floor.frames),
+            width=min(requested.width, floor.width),
+            height=min(requested.height, floor.height),
+            steps=min(requested.steps, floor.steps),
+            guidance=min(requested.guidance, floor.guidance),
+            segment_seconds=min(requested.segment_seconds, floor.segment_seconds),
+        )
+        return final, {"source": "minimum_floor" if not allow_unsafe else "user_requested", "clamped": final != requested, "profile": "safe"}
 
-    tier = _runtime_pressure_tier()
-    selected_raw = (profile.get("profiles") or {}).get(tier) or (profile.get("profiles") or {}).get("balanced")
+    tier = "balanced"
+    if _runtime_pressure_tier() == "safe":
+        tier = "safe"
+    selected_raw = (profile.get("profiles") or {}).get(tier) or (profile.get("profiles") or {}).get("balanced") or (profile.get("profiles") or {}).get("safe")
     if not selected_raw:
         return requested, {"source": "user_requested", "clamped": False, "profile": None}
     selected = _to_tuning(selected_raw)
@@ -603,13 +671,16 @@ def calibration_status_payload() -> dict[str, Any]:
         overhead = 0.05 * stats.total_mib
         planner_budget_mb = round(max(0.0, stats.free_mib - reserve - overhead), 2)
     payload: dict[str, Any] = {
-        "calibration_present": bool(profile),
+        "calibration_present": bool(profile and (profile.get("minimum_success", True)) and (profile.get("profiles"))),
         "calibration_running": bool(_state.get("running")),
         "calibration_last_result": _state.get("last_result"),
         "calibration_last_error": _state.get("last_error") or (profile or {}).get("last_error"),
+        "current_search_phase": _state.get("current_search_phase"),
+        "current_parameter_being_tested": _state.get("current_parameter_being_tested"),
+        "last_successful_profile": (profile or {}).get("last_successful_profile") or _state.get("last_successful_profile"),
         "calibration_profiles": (profile or {}).get("profiles", {}),
         "failed_profile_count": len(failures),
-        "calibration_last_failure_stage": (failures[-1]["stage"] if failures else None),
+        "calibration_last_failure_stage": (_classify_failure_stage(failures[-1].get("reason", ""), failures[-1].get("stage", "unknown")) if failures else None),
         "calibration_last_failure_reason": (failures[-1]["reason"] if failures else None),
         "calibration_last_params": (failures[-1]["params"] if failures else None),
         "trueai_backend_available": bool(state.get("backend_available", True)),
@@ -629,6 +700,7 @@ def calibration_status_payload() -> dict[str, Any]:
                 "calibration_timestamp": profile.get("timestamp_utc"),
                 "calibration_gpu": fp.get("gpu_name"),
                 "calibration_backend": profile.get("backend"),
+                "minimum_success": profile.get("minimum_success", True),
             }
         )
     return payload
