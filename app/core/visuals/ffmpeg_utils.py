@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 from typing import Callable
+from dataclasses import dataclass
 
 import os
 
@@ -11,6 +12,233 @@ from src.utils.cmdlen import estimate_windows_cmd_length
 from src.utils.ffmpeg_script_mode import maybe_externalize_filter_graph
 
 StatusCallback = Callable[[str], None] | None
+_FILTERS_CACHE: str | None = None
+
+
+@dataclass(frozen=True)
+class YouTubeTargetProfile:
+    target_name: str
+    width: int
+    height: int
+    fps: int
+    codec: str
+    cq: int
+    preset: str
+    force_cfr: bool
+    sharpen: bool
+    smooth_mode: str
+    stabilize: bool
+    stabilize_only_final: bool
+
+
+def get_youtube_target_profile() -> YouTubeTargetProfile:
+    target = os.getenv("MONEYOS_YT_TARGET", "1080p60").strip().lower()
+    if target == "2160p60":
+        width, height, fps = 3840, 2160, 60
+    else:
+        width, height, fps = 1920, 1080, 60
+        target = "1080p60"
+    try:
+        fps = int(os.getenv("MONEYOS_YT_FPS", str(fps)))
+    except ValueError:
+        fps = 60
+    if fps not in {24, 30, 60}:
+        fps = 60
+    codec_env = os.getenv("MONEYOS_YT_CODEC", "h264").strip().lower()
+    codec = "hevc" if codec_env in {"hevc", "h265"} else "h264"
+    try:
+        cq = int(os.getenv("MONEYOS_YT_CQ", "18"))
+    except ValueError:
+        cq = 18
+    try:
+        force_cfr = int(os.getenv("MONEYOS_YT_FORCE_CFR", "1")) == 1
+    except ValueError:
+        force_cfr = True
+    try:
+        sharpen = int(os.getenv("MONEYOS_YT_SHARPEN", "0")) == 1
+    except ValueError:
+        sharpen = False
+    smooth_mode = os.getenv("MONEYOS_YT_SMOOTH", "none").strip().lower()
+    minterp_alias = os.getenv("MONEYOS_YT_MINTERP")
+    if minterp_alias is not None and minterp_alias == "1":
+        smooth_mode = "minterp"
+    if smooth_mode == "off":
+        smooth_mode = "none"
+    if smooth_mode not in {"none", "blend", "minterp"}:
+        smooth_mode = "none"
+    stabilize = os.getenv("MONEYOS_YT_STABILIZE", "1") == "1"
+    stabilize_only_final = os.getenv("MONEYOS_YT_STAB_ONLY_FINAL", "1") == "1"
+    return YouTubeTargetProfile(
+        target_name=target,
+        width=width,
+        height=height,
+        fps=fps,
+        codec=codec,
+        cq=cq,
+        preset=os.getenv("MONEYOS_YT_PRESET", "p7"),
+        force_cfr=force_cfr,
+        sharpen=sharpen,
+        smooth_mode=smooth_mode,
+        stabilize=stabilize,
+        stabilize_only_final=stabilize_only_final,
+    )
+
+
+def youtube_video_filter(
+    profile: YouTubeTargetProfile | None = None,
+    prepend: list[str] | None = None,
+    *,
+    apply_smoothing: bool = True,
+) -> str:
+    cfg = profile or get_youtube_target_profile()
+    chain = list(prepend or [])
+    chain.extend([f"scale={cfg.width}:{cfg.height}:flags=lanczos", "setsar=1"])
+    if apply_smoothing:
+        if cfg.smooth_mode == "minterp":
+            chain.append(f"minterpolate=fps={cfg.fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1")
+        elif cfg.smooth_mode == "blend":
+            chain.extend(["tblend=all_mode=average", f"fps={cfg.fps}"])
+        elif cfg.smooth_mode == "none":
+            chain.append(f"fps={cfg.fps}")
+        else:
+            chain.append(f"fps={cfg.fps}")
+    else:
+        chain.append(f"fps={cfg.fps}")
+    chain.extend(["format=yuv420p", "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709"])
+    if cfg.sharpen:
+        chain.append("unsharp=5:5:0.6:5:5:0.0")
+    return ",".join(chain)
+
+
+def youtube_video_encode_args(profile: YouTubeTargetProfile | None = None) -> list[str]:
+    cfg = profile or get_youtube_target_profile()
+    gop = str(cfg.fps * 2)
+    if has_nvenc():
+        codec = "hevc_nvenc" if cfg.codec == "hevc" else "h264_nvenc"
+        args = [
+            "-c:v",
+            codec,
+            "-preset",
+            cfg.preset,
+            "-rc:v",
+            "vbr_hq",
+            "-cq",
+            str(cfg.cq),
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            gop,
+            "-keyint_min",
+            gop,
+            "-bf",
+            "2",
+        ]
+        if cfg.codec == "h264":
+            args += ["-profile:v", "high"]
+    else:
+        args = [
+            "-c:v",
+            "libx264",
+            "-crf",
+            str(cfg.cq),
+            "-preset",
+            "slow",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            gop,
+            "-keyint_min",
+            gop,
+            "-profile:v",
+            "high",
+        ]
+    if cfg.force_cfr:
+        args += ["-vsync", "cfr"]
+    args += [
+        "-colorspace",
+        "bt709",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+    ]
+    return args
+
+
+def ffmpeg_filters_text() -> str:
+    global _FILTERS_CACHE
+    if _FILTERS_CACHE is not None:
+        return _FILTERS_CACHE
+    result = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True, check=False)
+    _FILTERS_CACHE = (result.stdout or "") + (result.stderr or "")
+    return _FILTERS_CACHE
+
+
+def has_vidstab_filters() -> bool:
+    text = ffmpeg_filters_text().lower()
+    return "vidstabdetect" in text and "vidstabtransform" in text
+
+
+def concat_video_parts(part_paths: list[Path], list_path: Path, output_path: Path, fps: int) -> None:
+    list_path.parent.mkdir(parents=True, exist_ok=True)
+    list_path.write_text("\n".join([f"file '{p.as_posix()}'" for p in part_paths]), encoding="utf-8")
+    try:
+        run_ffmpeg(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path), "-c", "copy", str(output_path)])
+    except Exception:
+        run_ffmpeg(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_path),
+                "-vf",
+                "format=yuv420p,fps=%d" % fps,
+                "-c:v",
+                "libx264",
+                "-crf",
+                "18",
+                "-preset",
+                "medium",
+                str(output_path),
+            ]
+        )
+
+
+def stabilize_video_two_pass(input_path: Path, output_path: Path, transform_path: Path, fps: int) -> None:
+    sink = "NUL" if os.name == "nt" else "/dev/null"
+    run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_path),
+            "-vf",
+            f"vidstabdetect=shakiness=6:accuracy=15:result={transform_path}",
+            "-f",
+            "null",
+            sink,
+        ]
+    )
+    run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_path),
+            "-vf",
+            f"vidstabtransform=input={transform_path}:smoothing=30:zoom=5:optzoom=1,fps={fps},format=yuv420p",
+            *youtube_video_encode_args(get_youtube_target_profile()),
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+    )
 
 
 def _nvenc_quality_mode() -> str:
@@ -191,6 +419,13 @@ def _is_nvenc_h264_safe_stream(info: dict[str, str] | None) -> bool:
 
 
 def _reencode_safe_x264(output_path: Path, log_path: Path | None = None) -> None:
+    if not output_path.exists():
+        parent = output_path.parent
+        contents = sorted([p.name for p in parent.iterdir()]) if parent.exists() else []
+        raise RuntimeError(
+            "safe x264 re-encode source missing: "
+            f"input={output_path} dir={parent} contents={contents}"
+        )
     temp_path = output_path.with_suffix(".x264safe.mp4")
     cmd = [
         "ffmpeg",
@@ -234,6 +469,9 @@ def _verify_nvenc_h264_output(output_path: Path, log_path: Path | None = None) -
     warn = "[FFmpeg] NVENC output verification failed; auto-fallback to safe libx264 encode"
     print(warn)
     _append_log(log_path, warn)
+    pre = f"[FFmpeg] safe re-encode input_path={output_path} exists={output_path.exists()}"
+    print(pre)
+    _append_log(log_path, pre)
     _reencode_safe_x264(output_path, log_path)
 
 
@@ -267,10 +505,6 @@ def run_ffmpeg(
                 status_callback(error_message)
             _append_log(log_path, error_message)
             raise RuntimeError(error_message)
-        if "h264_nvenc" in args:
-            out_path = Path(str(args[-1]))
-            if out_path.suffix.lower() == ".mp4":
-                _verify_nvenc_h264_output(out_path, log_path)
         print(f"[ResourceGuard] FFmpeg command length: {cmd_len}")
         command = " ".join(args)
         print("[ResourceGuard] FFmpeg command:", command)

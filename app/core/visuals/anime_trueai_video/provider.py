@@ -17,6 +17,7 @@ class ClipRequest:
     steps: int
     guidance: float
     out_path: Path
+    target_frames: int | None = None
 
 
 @dataclass(frozen=True)

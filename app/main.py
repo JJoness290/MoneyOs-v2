@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import traceback
 import asyncio
 import uuid
 import hashlib
@@ -12,6 +13,10 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
+
+from app.core.storage_policy import apply_storage_policy_env, print_effective_settings_banner
+
+apply_storage_policy_env()
 
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.routing import APIRoute
@@ -50,7 +55,32 @@ from app.core.assets.starter_characters import ensure_starter_characters_install
 from app.core.net.downloads import get_last_download_diagnostics
 from app.core.autopilot import enqueue as autopilot_enqueue, start_autopilot, status as autopilot_status
 from app.core.bootstrap import ensure_dependencies
+from app.core.audio.tts_xtts import resolve_tts_license_mode
+from app.core.audio.voice_registry import VoiceRegistry
+from app.core.gpu_preflight import (
+    GpuPlan,
+    VramStats,
+    apply_gpu_plan_env,
+    choose_job_gpu_plan,
+    get_vram_stats,
+)
+from app.core.oom_recovery import (
+    build_fraction_ladder,
+    is_oom_like_error,
+    release_cuda_memory,
+    resolve_initial_fraction,
+    resolve_user_fraction_cap,
+    cap_fraction_for_runtime,
+    save_last_good_fraction,
+)
 from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
+from app.core.calibration import (
+    calibration_status_payload,
+    clear_backend_failures,
+    ensure_calibration,
+    load_calibration_profile,
+    record_runtime_failure,
+)
 from app.core.visuals.anime_3d.animation_library import rebuild_animation_library
 from app.core.visuals.anime_3d.blender_runner import detect_blender
 from app.core.visuals.anime_3d.render_pipeline import (
@@ -105,6 +135,10 @@ _jobs_lock = threading.Lock()
 _jobs: Dict[str, dict] = {}
 _last_clip_telemetry: dict[str, object] = {}
 _last_job_snapshot: dict[str, object] = {}
+_last_gpu_preflight_stats: dict[str, object] = {}
+_last_gpu_preflight_plan: dict[str, object] = {}
+_last_vram_user_cap: float | None = None
+_last_vram_fraction_effective: float | None = None
 _perf_lock = threading.Lock()
 _perf_history_path = OUTPUT_DIR / "perf_history.json"
 _trueai_slots = threading.Semaphore(max(1, resolve_stability_settings().max_concurrency))
@@ -181,21 +215,49 @@ class AiVideoRequest(BaseModel):
 
 class TrueAiVideoRequest(BaseModel):
     prompt: str = "anime action sequence in a futuristic city"
+    topic_seed: str = "Rogue AI awakens in Neo-Tokyo"
+    minutes: int = 10
+    language: str = "en"
+    voice_pack: str = "anime_dub_builtin_v1"
+    voice_cast: Optional[Dict[str, str]] = None
+
+
+class AnimeEpisodeAutoRequest(BaseModel):
+    topic_seed: str = "Rogue AI awakens in Neo-Tokyo"
+    minutes: int = 10
+    voice_ref_wav_path: Optional[str] = None
+    language: str = "en"
 
 
 @app.on_event("startup")
 def bootstrap_dependencies() -> None:
     stability = apply_startup_env_defaults()
-    print(f"[STABILITY] {stability}")
-    print(
-        "[PATHS] "
-        f"assets_root={get_assets_root()} "
-        f"output_root={get_output_root()} "
-        f"cache_root={get_cache_root()} "
-        f"hf_home={get_hf_home()} "
-        f"hf_hub_cache={get_hf_hub_cache()}"
+    status_payload = stability_status_payload()
+    current_metrics = status_payload.get("current_metrics", {})
+    print_effective_settings_banner(
+        heading="EFFECTIVE SETTINGS (STARTUP)",
+        extra={
+            "stability": {
+                "stability_mode": stability.stability_mode,
+                "max_concurrency": stability.max_concurrency,
+                "vram_fraction": stability.vram_fraction,
+                "vram_fraction_effective": stability.vram_fraction,
+                "vram_fraction_source": "env_cap" if os.getenv("MONEYOS_VRAM_FRACTION") else "planner",
+                "vram_fraction_user_cap": os.getenv("MONEYOS_VRAM_FRACTION"),
+                "pytorch_alloc_conf": stability.pytorch_alloc_conf,
+            },
+            "system": {
+                "gpu_util": current_metrics.get("gpu_util"),
+                "vram_util": current_metrics.get("vram_util"),
+                "cpu_util": current_metrics.get("cpu_util"),
+                "ram_util": current_metrics.get("ram_util"),
+                "encoder_mode": os.getenv("MONEYOS_ENCODER", "auto"),
+                "ram_mode": os.getenv("MONEYOS_RAM_MODE", "balanced"),
+            },
+        },
     )
-    reg = stability_status_payload().get("registry", {})
+    print(f"[STABILITY] {stability}")
+    reg = status_payload.get("registry", {})
     if reg.get("supported") and not reg.get("sufficient"):
         print("[STABILITY][WARN] TdrDelay/TdrDdiDelay are below recommended >=60. Configure Windows registry for long GPU workloads.")
     if "MONEYOS_USE_GPU" not in os.environ:
@@ -207,6 +269,13 @@ def bootstrap_dependencies() -> None:
         prune_assets(min_free_bytes=int(os.getenv("MONEYOS_MIN_FREE_BYTES", str(15 * 1024**3))))
     except Exception as exc:  # noqa: BLE001
         print(f"[PRUNE] startup scan failed: {exc}")
+    if os.getenv("MONEYOS_ENABLE_STARTUP_WARMUP", "0") == "1":
+        try:
+            cal = ensure_calibration(force=False, run_if_missing=False)
+            if cal:
+                print(f"[CALIBRATION] profile_loaded timestamp={cal.get('timestamp_utc')} backend={cal.get('backend')}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[CALIBRATION] startup profile check failed reason={exc}")
     start_autopilot()
     try:
         from app.core.visuals.ffmpeg_utils import select_video_encoder  # noqa: WPS433
@@ -640,6 +709,11 @@ async def debug_status() -> JSONResponse:
         "last_clip_telemetry": _last_clip_telemetry,
         "last_job_snapshot": _last_job_snapshot,
         "stability": stability_status_payload(),
+        "last_gpu_preflight_stats": _last_gpu_preflight_stats,
+        "last_gpu_preflight_plan": _last_gpu_preflight_plan,
+        "vram_fraction_user_cap": _last_vram_user_cap,
+        "vram_fraction_effective": _last_vram_fraction_effective,
+        "calibration": calibration_status_payload(),
     }
     try:
         import torch  # noqa: WPS433
@@ -786,6 +860,311 @@ def _build_phase25_shot_plan(target_seconds: float) -> list[dict]:
 
 
 
+def _anime_auto_job_dir(job_id: str) -> Path:
+    return OUTPUT_DIR / "anime_episode_auto" / job_id
+
+
+def _anime_auto_log_paths(job_id: str) -> tuple[Path, Path, Path, Path]:
+    job_dir = _anime_auto_job_dir(job_id)
+    logs_dir = job_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    return job_dir, logs_dir, logs_dir / "job.log", logs_dir / "error.log"
+
+
+def _append_job_log(path: Path, message: str) -> None:
+    ts = datetime.utcnow().isoformat() + "Z"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"[{ts}] {message}\n")
+
+
+def _write_auto_error_payload(job_id: str, stage: str, exc: Exception, traceback_text: str, error_file: Path) -> dict:
+    payload = {
+        "job_id": job_id,
+        "stage": stage,
+        "error_type": type(exc).__name__,
+        "error_message": str(exc),
+        "traceback": traceback_text,
+        "ts_utc": datetime.utcnow().isoformat() + "Z",
+    }
+    error_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
+def _run_anime_episode_auto(job_id: str, req: AnimeEpisodeAutoRequest) -> None:
+    from app.core.episode_auto import run_auto_anime_episode  # noqa: WPS433
+
+    job_dir, _logs_dir, job_log, error_log = _anime_auto_log_paths(job_id)
+    _append_job_log(job_log, f"job_start topic_seed={req.topic_seed!r} minutes={req.minutes} language={req.language}")
+    stage = "bootstrap"
+    try:
+        stage = "script"
+        _set_status(job_id, "script", stage_key="script", progress_pct=5)
+        final_video = run_auto_anime_episode(
+            job_dir,
+            topic_seed=req.topic_seed,
+            minutes=req.minutes,
+            language=req.language,
+            voice_ref_wav_path=req.voice_ref_wav_path,
+        )
+        _append_job_log(job_log, f"job_complete final_video={final_video}")
+        _set_status(
+            job_id,
+            "Complete",
+            stage_key="done",
+            progress_pct=100,
+            extra={"clip": str(final_video), "output_dir": str(job_dir)},
+        )
+    except Exception as exc:  # noqa: BLE001
+        traceback_text = traceback.format_exc()
+        _append_job_log(job_log, f"job_error stage={stage} error={type(exc).__name__}: {exc}")
+        error_log.write_text(traceback_text, encoding="utf-8")
+        error_payload = _write_auto_error_payload(job_id, stage, exc, traceback_text, job_dir / "error.json")
+        _set_error(
+            job_id,
+            f"Error: {exc}",
+            extra={
+                "error_file": str((job_dir / "error.json").resolve()),
+                "error_stage": stage,
+                "error_type": error_payload["error_type"],
+            },
+        )
+
+
+def _record_gpu_preflight(stats: VramStats, plan: GpuPlan, user_cap: float | None, source: str) -> None:
+    global _last_gpu_preflight_stats, _last_gpu_preflight_plan, _last_vram_user_cap, _last_vram_fraction_effective
+    _last_gpu_preflight_stats = {
+        "vram_total_mib": stats.total_mib,
+        "vram_used_mib": stats.used_mib,
+        "vram_free_mib": stats.free_mib,
+        "source": stats.source,
+    }
+    payload = plan.to_event_payload()
+    payload["vram_fraction_source"] = source
+    payload["vram_fraction_user_cap"] = user_cap
+    _last_gpu_preflight_plan = payload
+    _last_vram_user_cap = user_cap
+    _last_vram_fraction_effective = plan.vram_fraction
+
+
+def _prepare_gpu_plan(job_id: str, attempt: int, attempts_total: int) -> tuple[VramStats, GpuPlan, str, float | None]:
+    stats = get_vram_stats()
+    if stats is None:
+        stats = VramStats(total_mib=8192.0, used_mib=0.0, free_mib=8192.0, source="fallback")
+    policy = os.getenv("MONEYOS_VRAM_POLICY", "conservative")
+    auto_vram = os.getenv("MONEYOS_AUTO_VRAM", "1") == "1"
+    user_cap, lock_enabled = resolve_user_fraction_cap()
+    if auto_vram:
+        plan = choose_job_gpu_plan("trueai", policy, stats, oom_retry_level=max(0, attempt - 1))
+    else:
+        forced_fraction = float(os.getenv("MONEYOS_VRAM_FRACTION_EFFECTIVE", os.getenv("MONEYOS_VRAM_FRACTION", "0.80")))
+        plan = choose_job_gpu_plan("trueai", policy, stats, oom_retry_level=0)
+        plan = GpuPlan(
+            policy=plan.policy,
+            vram_fraction=max(0.10, min(0.95, forced_fraction)),
+            reserve_mib=plan.reserve_mib,
+            allocator_overhead_mib=plan.allocator_overhead_mib,
+            budget_free_mib=plan.budget_free_mib,
+            attention_slicing=plan.attention_slicing,
+            vae_slicing=plan.vae_slicing,
+            vae_tiling=plan.vae_tiling,
+            use_xformers=plan.use_xformers,
+            batch_size=plan.batch_size,
+            frames_per_chunk=plan.frames_per_chunk,
+            resolution_scale=plan.resolution_scale,
+        )
+    source = "planner"
+    effective_fraction, source = cap_fraction_for_runtime(plan.vram_fraction, source=source)
+    if lock_enabled and user_cap is not None and attempt > 1 and source == "planner_capped":
+        source = "retry_capped"
+    if abs(effective_fraction - plan.vram_fraction) > 1e-9:
+        plan = GpuPlan(
+            policy=plan.policy,
+            vram_fraction=effective_fraction,
+            reserve_mib=plan.reserve_mib,
+            allocator_overhead_mib=plan.allocator_overhead_mib,
+            budget_free_mib=plan.budget_free_mib,
+            attention_slicing=plan.attention_slicing,
+            vae_slicing=plan.vae_slicing,
+            vae_tiling=plan.vae_tiling,
+            use_xformers=plan.use_xformers,
+            batch_size=plan.batch_size,
+            frames_per_chunk=plan.frames_per_chunk,
+            resolution_scale=plan.resolution_scale,
+        )
+    apply_gpu_plan_env(plan)
+    os.environ["MONEYOS_VRAM_FRACTION_SOURCE"] = source
+    _record_gpu_preflight(stats, plan, user_cap, source)
+    if stats.free_mib < 1500:
+        raise RuntimeError(
+            f"Insufficient free VRAM ({stats.free_mib:.0f} MiB). Close GPU-heavy apps or reboot."
+        )
+    _set_status(
+        job_id,
+        "GPU preflight complete",
+        stage_key="plan",
+        progress_pct=8,
+        extra={
+            "attempt": attempt,
+            "attempts_total": attempts_total,
+            "vram_fraction": plan.vram_fraction,
+            "vram_total_mib": stats.total_mib,
+            "vram_used_mib": stats.used_mib,
+            "vram_free_mib": stats.free_mib,
+            "vram_budget_free_mib": plan.budget_free_mib,
+            "reserve_mib": plan.reserve_mib,
+            "vram_policy": plan.policy,
+            "auto_vram": auto_vram,
+            "chosen_vram_fraction": plan.vram_fraction,
+            "vram_fraction_source": source,
+            "vram_fraction_user_cap": user_cap,
+            "gpu_plan": plan.to_event_payload(),
+        },
+    )
+    return stats, plan, source, user_cap
+
+
+def _run_with_oom_retries(
+    job_id: str,
+    runner,
+    *,
+    output_dir: Path,
+    attempts_total: int = 6,
+) -> tuple[Path, Path]:
+    initial = resolve_initial_fraction()
+    fractions = build_fraction_ladder(initial, attempts_total=attempts_total)
+    last_exc: Exception | None = None
+
+    for attempt, fraction in enumerate(fractions, start=1):
+        stats, plan, source, user_cap = _prepare_gpu_plan(job_id, attempt, len(fractions))
+        _set_status(
+            job_id,
+            f"attempt {attempt}/{len(fractions)} with vram_fraction={plan.vram_fraction:.2f}",
+            stage_key="generate",
+            progress_pct=10,
+            extra={
+                "attempt": attempt,
+                "attempts_total": len(fractions),
+                "vram_fraction": plan.vram_fraction,
+                "vram_total_mib": stats.total_mib,
+                "vram_used_mib": stats.used_mib,
+                "vram_free_mib": stats.free_mib,
+                "vram_budget_free_mib": plan.budget_free_mib,
+                "reserve_mib": plan.reserve_mib,
+                "vram_policy": plan.policy,
+                "vram_fraction_source": source,
+                "vram_fraction_user_cap": user_cap,
+                "gpu_plan": plan.to_event_payload(),
+            },
+        )
+        if output_dir.exists():
+            shutil.rmtree(output_dir, ignore_errors=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            result = runner(attempt, len(fractions), plan.vram_fraction)
+            if attempt > 1:
+                _set_status(
+                    job_id,
+                    f"Recovered from OOM at vram_fraction={plan.vram_fraction:.2f} (attempt {attempt}/{len(fractions)})",
+                    stage_key="generate",
+                    progress_pct=80,
+                    extra={
+                        "attempt": attempt,
+                        "attempts_total": len(fractions),
+                        "vram_fraction": plan.vram_fraction,
+                        "recovery_action": "lower_vram_fraction",
+                    },
+                )
+            save_last_good_fraction(plan.vram_fraction)
+            return result
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if not is_oom_like_error(exc):
+                raise
+            record_runtime_failure({
+                "vram_fraction": plan.vram_fraction,
+                "attempt": attempt,
+                "job_id": job_id,
+                "width": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_WIDTH"),
+                "height": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_HEIGHT"),
+                "steps": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_STEPS"),
+                "guidance": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_GUIDANCE"),
+                "secs": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_SECS"),
+                "frames": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_FRAMES"),
+            }, reason=str(exc))
+            if attempt >= len(fractions):
+                break
+            next_fraction = fractions[attempt]
+            next_fraction, _ = cap_fraction_for_runtime(next_fraction, source="retry")
+            _set_status(
+                job_id,
+                f"OOM detected → lowering VRAM fraction to {next_fraction:.2f} and retrying (attempt {attempt + 1}/{len(fractions)})",
+                stage_key="generate",
+                progress_pct=15,
+                extra={
+                    "attempt": attempt + 1,
+                    "attempts_total": len(fractions),
+                    "vram_fraction": next_fraction,
+                    "recovery_action": "lower_vram_fraction",
+                },
+            )
+            release_cuda_memory()
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("OOM retry controller exited without attempts")
+
+
+def _run_trueai_quality_episode(job_id: str, req: TrueAiVideoRequest) -> None:
+    from app.core.visuals.anime_trueai_video.production_episode import EpisodeSpec, run_trueai_quality_episode  # noqa: WPS433
+
+    spec = EpisodeSpec(
+        topic_seed=req.topic_seed,
+        minutes=req.minutes,
+        language=req.language,
+        voice_pack=req.voice_pack,
+        voice_cast=req.voice_cast,
+    )
+    out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
+
+    def _update(message: str, attempt: int, attempts_total: int, fraction: float) -> None:
+        stage = "generate"
+        lowered = message.lower()
+        if lowered in {"bootstrap", "script", "audio", "render"}:
+            stage = lowered
+        _set_status(
+            job_id,
+            message,
+            stage_key=stage,
+            progress_pct=35,
+            extra={
+                "attempt": attempt,
+                "attempts_total": attempts_total,
+                "vram_fraction": fraction,
+            },
+        )
+
+    try:
+        final_video, report = _run_with_oom_retries(
+            job_id,
+            lambda attempt, attempts_total, fraction: run_trueai_quality_episode(
+                job_id,
+                spec,
+                status_callback=lambda msg: _update(msg, attempt, attempts_total, fraction),
+            ),
+            output_dir=out_dir,
+        )
+        _set_status(
+            job_id,
+            "Complete",
+            stage_key="done",
+            progress_pct=100,
+            extra={"clip": str(final_video), "report": str(report), "mode": "trueai_quality_production"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        _set_error(job_id, f"Error: {exc}")
+
+
 def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: str | None = None) -> None:
     from app.core.visuals.anime_trueai_video.pipeline import run_trueai_60s_job  # noqa: WPS433
     print("[TRUEAI][ENTRY] file=app/main.py func=_run_trueai_video_60s -> app/core/visuals/anime_trueai_video/pipeline.py:run_trueai_60s_job")
@@ -800,7 +1179,7 @@ def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: s
                 progress = int(current.get("progress_pct", 35))
             _set_status(job_id, status, stage_key=stage, progress_pct=progress)
 
-    def _update(message: str) -> None:
+    def _update(message: str, attempt: int | None = None, attempts_total: int | None = None, fraction: float | None = None) -> None:
         stage = "generate"
         lowered = message.lower()
         if "plan" in lowered:
@@ -822,7 +1201,14 @@ def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: s
             stage = "plan"
         elif "load" in lowered or "inference" in lowered:
             stage = "generate"
-        _set_status(job_id, message, stage_key=stage, progress_pct=35)
+        extra = {}
+        if attempt is not None:
+            extra["attempt"] = attempt
+        if attempts_total is not None:
+            extra["attempts_total"] = attempts_total
+        if fraction is not None:
+            extra["vram_fraction"] = fraction
+        _set_status(job_id, message, stage_key=stage, progress_pct=35, extra=extra or None)
 
     try:
         _set_status(job_id, "Queued TRUE text-to-video", stage_key="plan", progress_pct=1)
@@ -831,7 +1217,16 @@ def _run_trueai_video_60s(job_id: str, req: TrueAiVideoRequest, forced_preset: s
         hb = threading.Thread(target=_heartbeat, daemon=True)
         hb.start()
         with _trueai_slots:
-            final_video, report = run_trueai_60s_job(job_id, req.prompt, status_callback=_update, forced_preset=forced_preset)
+            final_video, report = _run_with_oom_retries(
+                job_id,
+                lambda attempt, attempts_total, fraction: run_trueai_60s_job(
+                    job_id,
+                    req.prompt,
+                    status_callback=lambda msg: _update(msg, attempt, attempts_total, fraction),
+                    forced_preset=forced_preset,
+                ),
+                output_dir=OUTPUT_DIR / "anime_trueai_video" / job_id,
+            )
         _set_status(
             job_id,
             "Complete",
@@ -1390,10 +1785,49 @@ async def generate_anime_trueai_fasttest(req: TrueAiVideoRequest = Body(default=
 async def generate_anime_trueai_quality(req: TrueAiVideoRequest = Body(default=TrueAiVideoRequest())) -> JSONResponse:
     job_id = uuid.uuid4().hex
     _set_status(job_id, "Queued TRUE AI quality video", stage_key="plan", progress_pct=1)
-    thread = threading.Thread(target=_run_trueai_video_60s, args=(job_id, req, "quality"), daemon=True)
+    thread = threading.Thread(target=_run_trueai_quality_episode, args=(job_id, req), daemon=True)
     thread.start()
     out_dir = OUTPUT_DIR / "anime_trueai_video" / job_id
     return JSONResponse({"job_id": job_id, "output_dir": str(out_dir.resolve()), "preset": "quality"})
+
+@app.post("/jobs/anime-episode-auto")
+async def generate_anime_episode_auto(req: AnimeEpisodeAutoRequest = Body(default=AnimeEpisodeAutoRequest())) -> JSONResponse:
+    job_id = uuid.uuid4().hex
+    _set_status(job_id, "queued", stage_key="script", progress_pct=1)
+    thread = threading.Thread(target=_run_anime_episode_auto, args=(job_id, req), daemon=True)
+    thread.start()
+    out_dir = OUTPUT_DIR / "anime_episode_auto" / job_id
+    return JSONResponse({"job_id": job_id, "output_dir": str(out_dir.resolve())})
+
+
+@app.get("/debug/voice")
+def debug_voice() -> JSONResponse:
+    try:
+        import torch  # noqa: WPS433
+
+        cuda_available = bool(torch.cuda.is_available())
+    except Exception:
+        cuda_available = False
+    license_mode = resolve_tts_license_mode()
+    registry = VoiceRegistry()
+    return JSONResponse(
+        {
+            "backend": os.getenv("MONEYOS_TTS_BACKEND", "xtts"),
+            "voice_pack": os.getenv("MONEYOS_VOICE_PACK", "anime_dub_builtin_v1"),
+            "voices": registry.list_voices(),
+            "model": os.getenv("MONEYOS_TTS_MODEL", "tts_models/multilingual/multi-dataset/xtts_v2"),
+            "device": os.getenv("MONEYOS_TTS_DEVICE", "auto"),
+            "cuda_available": cuda_available,
+            "voice_convert": os.getenv("MONEYOS_VOICE_CONVERT", "0") == "1",
+            "rvc_model_path": os.getenv("MONEYOS_RVC_MODEL_PATH", ""),
+            "tts_home": os.getenv("TTS_HOME", ""),
+            "xdg_cache_home": os.getenv("XDG_CACHE_HOME", ""),
+            "appdata": os.getenv("APPDATA", ""),
+            "tos_accepted": os.getenv("COQUI_TOS_AGREED", "0") == "1",
+            "license_mode": license_mode,
+        }
+    )
+
 
 @app.post("/jobs/ai-video-60s")
 async def generate_ai_video_60s(req: AiVideoRequest = Body(...)) -> JSONResponse:
@@ -1458,6 +1892,60 @@ async def job_diagnostics(job_id: str) -> JSONResponse:
         "events": str(output_dir / "diagnostics" / "nvlddmkm_events.log"),
     }
     return JSONResponse(diag)
+
+
+@app.get("/debug/calibration")
+async def debug_calibration() -> JSONResponse:
+    profile = load_calibration_profile()
+    payload = calibration_status_payload()
+    payload["profile"] = profile
+    return JSONResponse(payload)
+
+
+@app.post("/debug/recalibrate")
+async def debug_recalibrate() -> JSONResponse:
+    profile = ensure_calibration(force=True)
+    return JSONResponse({"ok": profile is not None, "profile": profile, "status": calibration_status_payload()})
+
+
+@app.post("/debug/clear-backend-failures")
+async def debug_clear_backend_failures() -> JSONResponse:
+    return JSONResponse(clear_backend_failures())
+
+
+@app.post("/debug/unload-models")
+async def debug_unload_models() -> JSONResponse:
+    try:
+        from app.core.visuals.anime_trueai_video.cogvideox_provider import CogVideoXProvider  # noqa: WPS433
+
+        CogVideoXProvider.unload_shared()
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(exc)})
+    return JSONResponse({"ok": True})
+
+
+@app.get("/debug/jobs/{job_id}/error")
+def debug_job_error(job_id: str) -> JSONResponse:
+    job_dir = _anime_auto_job_dir(job_id)
+    error_file = job_dir / "error.json"
+    if not error_file.exists():
+        return JSONResponse({"ok": False, "job_id": job_id, "reason": "no error recorded"})
+    try:
+        payload = json.loads(error_file.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"ok": False, "job_id": job_id, "reason": f"failed to parse error file: {exc}"})
+    return JSONResponse(
+        {
+            "ok": True,
+            "job_id": job_id,
+            "error_file": str(error_file.resolve()),
+            "error_type": payload.get("error_type"),
+            "error_message": payload.get("error_message"),
+            "traceback": str(payload.get("traceback", ""))[:4000],
+            "stage": payload.get("stage"),
+            "ts_utc": payload.get("ts_utc"),
+        }
+    )
 
 
 @app.get("/events/{job_id}")
