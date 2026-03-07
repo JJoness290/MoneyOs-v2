@@ -58,3 +58,15 @@ ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_r
   - `MONEYOS_VRAM_FRACTION` (user hard cap, 0.10-0.95)
   - `MONEYOS_VRAM_FRACTION_LOCK=1|0` (default auto-on when cap is set)
   - `MONEYOS_VRAM_FRACTION_EFFECTIVE` (runtime chosen/capped value)
+
+
+## Calibration
+- Startup checks/loads generation calibration from `C:\MoneyOS\cache\calibration\generation_profile.json`.
+- Control flags:
+  - `MONEYOS_CALIBRATION_ENABLE=1|0`
+  - `MONEYOS_SKIP_CALIBRATION=1|0`
+  - `MONEYOS_FORCE_RECALIBRATE=1`
+  - `MONEYOS_CALIBRATION_ALLOW_UNSAFE=1` (allow user settings above calibrated tiers)
+- Debug endpoints:
+  - `GET /debug/calibration`
+  - `POST /debug/recalibrate`

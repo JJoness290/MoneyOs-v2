@@ -74,6 +74,7 @@ from app.core.oom_recovery import (
     save_last_good_fraction,
 )
 from app.core.anime_episode import EpisodeResult, generate_anime_episode_10m
+from app.core.calibration import calibration_status_payload, ensure_calibration, load_calibration_profile, record_runtime_failure
 from app.core.visuals.anime_3d.animation_library import rebuild_animation_library
 from app.core.visuals.anime_3d.blender_runner import detect_blender
 from app.core.visuals.anime_3d.render_pipeline import (
@@ -262,6 +263,12 @@ def bootstrap_dependencies() -> None:
         prune_assets(min_free_bytes=int(os.getenv("MONEYOS_MIN_FREE_BYTES", str(15 * 1024**3))))
     except Exception as exc:  # noqa: BLE001
         print(f"[PRUNE] startup scan failed: {exc}")
+    try:
+        cal = ensure_calibration(force=False)
+        if cal:
+            print(f"[CALIBRATION] loaded timestamp={cal.get('timestamp_utc')} backend={cal.get('backend')}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[CALIBRATION] startup check failed reason={exc}")
     start_autopilot()
     try:
         from app.core.visuals.ffmpeg_utils import select_video_encoder  # noqa: WPS433
@@ -699,6 +706,7 @@ async def debug_status() -> JSONResponse:
         "last_gpu_preflight_plan": _last_gpu_preflight_plan,
         "vram_fraction_user_cap": _last_vram_user_cap,
         "vram_fraction_effective": _last_vram_fraction_effective,
+        "calibration": calibration_status_payload(),
     }
     try:
         import torch  # noqa: WPS433
@@ -1066,6 +1074,17 @@ def _run_with_oom_retries(
             last_exc = exc
             if not is_oom_like_error(exc):
                 raise
+            record_runtime_failure({
+                "vram_fraction": plan.vram_fraction,
+                "attempt": attempt,
+                "job_id": job_id,
+                "width": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_WIDTH"),
+                "height": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_HEIGHT"),
+                "steps": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_STEPS"),
+                "guidance": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_GUIDANCE"),
+                "secs": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_SECS"),
+                "frames": os.getenv("MONEYOS_TRUEAI_EFFECTIVE_FRAMES"),
+            }, reason=str(exc))
             if attempt >= len(fractions):
                 break
             next_fraction = fractions[attempt]
@@ -1866,6 +1885,20 @@ async def job_diagnostics(job_id: str) -> JSONResponse:
         "events": str(output_dir / "diagnostics" / "nvlddmkm_events.log"),
     }
     return JSONResponse(diag)
+
+
+@app.get("/debug/calibration")
+async def debug_calibration() -> JSONResponse:
+    profile = load_calibration_profile()
+    payload = calibration_status_payload()
+    payload["profile"] = profile
+    return JSONResponse(payload)
+
+
+@app.post("/debug/recalibrate")
+async def debug_recalibrate() -> JSONResponse:
+    profile = ensure_calibration(force=True)
+    return JSONResponse({"ok": profile is not None, "profile": profile, "status": calibration_status_payload()})
 
 
 @app.get("/debug/jobs/{job_id}/error")

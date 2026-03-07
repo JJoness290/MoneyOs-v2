@@ -28,6 +28,7 @@ from app.core.stability import (
     resolve_stability_settings,
 )
 from app.core.storage_policy import effective_settings_payload, print_effective_settings_banner
+from app.core.calibration import GenerationTuning, apply_calibrated_limits
 
 StatusCallback = callable
 
@@ -375,7 +376,23 @@ def run_trueai_60s_job(
     if env_steps > 0:
         steps = env_steps
 
-    clip_seconds = get_trueai_clip_seconds()
+    allow_unsafe_calibration = os.getenv("MONEYOS_CALIBRATION_ALLOW_UNSAFE", "0") == "1"
+    requested_tuning = GenerationTuning(
+        secs=int(get_trueai_clip_seconds()),
+        frames=max(8, get_trueai_target_frames(fps)),
+        width=width,
+        height=height,
+        steps=steps,
+        guidance=float(guidance),
+        segment_seconds=int(get_trueai_clip_seconds()),
+    )
+    tuned, tuning_meta = apply_calibrated_limits(requested_tuning, allow_unsafe=allow_unsafe_calibration)
+    width = _multiple_of_8(int(tuned.width))
+    height = _multiple_of_8(int(tuned.height))
+    steps = int(tuned.steps)
+    guidance = float(tuned.guidance)
+
+    clip_seconds = float(tuned.secs if "tuned" in locals() else get_trueai_clip_seconds())
     try:
         max_frames = int(os.getenv("MONEYOS_TRUEAI_FRAMES_PER_CHUNK", "48"))
     except ValueError:
@@ -385,7 +402,7 @@ def run_trueai_60s_job(
         max_frames -= 1
     chunk_seconds = max_frames / max(fps, 1)
     chunks_needed = int(math.ceil(clip_seconds / chunk_seconds))
-    frames_per_clip = max(8, get_trueai_target_frames(fps))
+    frames_per_clip = int(tuned.frames if "tuned" in locals() else max(8, get_trueai_target_frames(fps)))
     clip_count = int(math.ceil(total_seconds / clip_seconds))
     seed = int(os.getenv("MONEYOS_TRUEAI_SEED", "777"))
 
@@ -418,6 +435,7 @@ def run_trueai_60s_job(
             "width": width,
             "height": height,
             "super_resolution": bool(cfg.super_resolution and not FASTTEST),
+            "calibration": tuning_meta if "tuning_meta" in locals() else None,
         },
         "youtube_target": {
             "name": yt_target.target_name,
@@ -460,6 +478,8 @@ def run_trueai_60s_job(
     print(f"[TRUEAI] resolution={width}x{height}")
     print(f"[TRUEAI] steps={steps}")
     print(f"[TRUEAI] guidance={guidance}")
+    if "tuning_meta" in locals():
+        print(f"[CALIBRATION] source={tuning_meta.get('source')} profile={tuning_meta.get('profile')} clamped={tuning_meta.get('clamped')}")
     if sr_env_override is False:
         print("[TRUEAI] super_resolution=FORCED_OFF reason=env_override")
     print(f"[TRUEAI] super_resolution={'ON' if cfg.super_resolution else 'OFF'}")
@@ -475,6 +495,12 @@ def run_trueai_60s_job(
     print(f"[YT] vidstab_supported={stab_supported}")
     print("[TRUEAI][YT] If you want optical-flow interpolation: set MONEYOS_YT_SMOOTH=minterp")
     print(f"[TRUEAI][YT] target={yt_target.width}x{yt_target.height}@{yt_target.fps} codec={yt_target.codec} cq={yt_target.cq}")
+    os.environ["MONEYOS_TRUEAI_EFFECTIVE_WIDTH"] = str(width)
+    os.environ["MONEYOS_TRUEAI_EFFECTIVE_HEIGHT"] = str(height)
+    os.environ["MONEYOS_TRUEAI_EFFECTIVE_STEPS"] = str(steps)
+    os.environ["MONEYOS_TRUEAI_EFFECTIVE_GUIDANCE"] = f"{guidance:.2f}"
+    os.environ["MONEYOS_TRUEAI_EFFECTIVE_SECS"] = f"{clip_seconds:.2f}"
+    os.environ["MONEYOS_TRUEAI_EFFECTIVE_FRAMES"] = str(frames_per_clip)
     super_resolution_enabled = bool(cfg.super_resolution and not FASTTEST)
 
     generated: list[Path] = []
